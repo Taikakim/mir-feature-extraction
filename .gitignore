@@ -57,6 +57,7 @@ test_data/
 
 # Logs and temporary files
 *.log
+!project.log  # Keep project development log
 /tmp/
 .claude/
 
