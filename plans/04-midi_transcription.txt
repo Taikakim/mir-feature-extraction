@@ -1,0 +1,34 @@
+MIDI Conversion
+
+Save outputs from different algorithms as separate MIDI files. During final implementation I will probably pick just one to use, but during development and testing I want to compare between the models/ methods.
+
+Drum Transcription
+
+Drums algorithm 1: ADTOF : https://github.com/MZehren/ADTOF
+Drums algorithm 2: OaF Drums: https://magenta.withgoogle.com/oaf-drums
+Drums algorith 3: https://github.com/jarredou/models/releases/tag/aufr33-jarredou_MDX23C_DrumSep_model_v0.1 as described in: https://arxiv.org/pdf/2509.24853
+
+
+Use the rhythm Grid established in section “Syncopation/ Establish a Beat Grid” to quantise music where BPM is present as established in step 10.
+
+Bass Transcription
+
+Bass algorithm 1: Basic Pitch: https://github.com/spotify/basic-pitch
+Bass algorithm 2: PESTO: https://github.com/SonyCSLParis/pesto
+Bass algorithm 3:CREPE: https://github.com/marl/crepe
+
+Where possible, convert continuous pitch to MIDI with pitch bend using a range of 12 semitones.
+
+Save the continuous pitch data for later use.
+
+Polyphonic Transcription for Other stem
+
+Where there is ambiguity over a given note, the harmony information extracted in step 11 could potentially be used in making educated choices.
+
+Other algorithm 1: Basic Pitch
+Other algorithm 2: MT3: https://github.com/magenta/mt3
+Other algorithm 3: MR-MT3: https://github.com/gudgud96/MR-MT3
+
+Generate MIDI files
+
+    • MIDI files are recorded in the same parent input file folder than the rest of the files, as defined in the section “File organsation/ Folder Structure”

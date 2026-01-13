@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual Environment
+mir/
+venv/
+env/
+ENV/
+
+# External Repositories (cloned separately)
+repos/
+
+# Audio Files and Processing Outputs
+test_data/
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+
+# Separated stems
+**/separated/
+**/drums.mp3
+**/bass.mp3
+**/other.mp3
+**/vocals.mp3
+
+# Feature extraction outputs (optional - you may want to track these)
+# Uncomment if you don't want to track feature files:
+# **/*.INFO
+# **/*.BEATS_GRID
+# **/*.ONSETS_GRID
+# **/*.CHROMA
+
+# MIDI files
+*.mid
+*.midi
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and temporary files
+*.log
+/tmp/
+.claude/
+
+# OS
+Thumbs.db
+.Spotlight-V100
+.Trashes

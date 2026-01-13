@@ -1,0 +1,56 @@
+Multiband RMS energy
+Conditioner type: NumberConditioner
+Conditioning mode: Global
+
+Frequency band definitions:
+    • Bass: 20-120 Hz, {rms_energy_bass}
+    • Body: 120-600 Hz, {rms_energy_body}
+    • Mid: 600-2500 Hz, {rms_energy_mid}, and
+    • Air: 2500-22000 Hz, {rms_energy_air}
+Implementation: Calculate RMS energy in dB (20*log10(rms)) for each band using bandpass filtering. The range -60 to 0 dB captures everything from silence to full-scale signals. Note: for training, will be normalised automatically. Does the normalisation understand if values are logs?
+Musical significance: Multiband RMS provides timbral balance control. High bass energy characterizes EDM and hip-hop, high mid energy suggests aggressive rock/metal, high air energy indicates bright acoustic or synthetic textures. These features are particularly powerful for controlling the overall sonic character independent of musical content.
+
+Loudness
+
+Loudness
+Calculate: {LUFS} and {LRA}
+Calculate these also per stem in addition to the main full mix.
+
+Loudness features
+LUFS and LRA (Loudness Range)
+Conditioner type: NumberConditioner
+ Conditioning mode: Global
+{
+  "id": "lufs",
+  "type": "number",
+  "config": {
+    "min_val": -40.0,
+    "max_val": 0.0
+  }
+},
+{
+  "id": "lra",
+  "type": "number",
+  "config": {
+    "min_val": 0.0,
+    "max_val": 25.0
+  }
+}
+
+LUFS (Loudness Units relative to Full Scale) measures integrated loudness per ITU-R BS.1770 standard. Values typically range from -40 LUFS (very quiet) to 0 LUFS (maximum loudness). Modern music masters to:
+    • Streaming: -14 to -10 LUFS (Spotify, Apple Music targets)
+    • Broadcasting: -23 LUFS (EBU R128 standard)
+    • Loudness war peaks: -6 to -4 LUFS (heavily compressed modern productions)
+LRA (Loudness Range) quantifies dynamic range in Loudness Units (LU). Higher values indicate greater dynamic variation:
+    • Orchestral classical: 15-25 LU (wide dynamics)
+    • Jazz, folk: 8-15 LU (moderate dynamics)
+    • Rock, pop: 4-8 LU (compressed but dynamic)
+    • Modern EDM, podcast: 2-4 LU (heavily compressed)
+Feature extraction: Use pyloudnorm library:
+import pyloudnorm as pyln
+meter = pyln.Meter(sr)  # sample rate
+loudness = meter.integrated_loudness(audio)  # LUFS
+lra = pyloudnorm.loudness_range(audio, sr)  # LRA
+
+Critical implementation detail: LUFS and LRA provide control over perceived loudness and dynamic character independent of actual peak levels. This enables generating content matched to specific deployment contexts (streaming, broadcast, film) and stylistic expectations (dynamic classical vs. compressed EDM). Consider these among the most important conditioning features for professional-quality output.
+Inference strategy: Users can specify target LUFS/LRA, and the model generates at that loudness profile. Post-processing can then normalize to exact targets, but conditioning gives the model awareness of intended dynamics during generation, producing more coherent results than naive post-normalization.

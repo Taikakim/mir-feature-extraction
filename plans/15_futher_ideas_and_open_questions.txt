@@ -1,0 +1,33 @@
+Unverified ideas and open questions
+Temporal dimension for int and number conditioners
+For some suitable features, allow for a single number that’s the median of the training clip, as well as a dictionary of, say 8 numbers, which are from evenly spread temporal slices of the training clip. So the user could input {0 ,0 ,2 ,6 ,8 ,8 ,8 ,10} for total volume energy level for a clip that starts easy and gathers up energy.
+This could work for:
+    • Rhythmic complexity (drums, bass, other)
+    • Onset density (drums, bass, other)
+    • Spectral flux, skewness
+    • Multiband RMS energy (bass, body, mid, air)
+Further modification of idea 1: Internally, gather more, like 2048 sample windows (windows have fixed size, which creates a slight problem since models are of different length) or whatever, while doing MIR, and under the GUI interpolate somehow.
+Problem with modification 1: linear interpolation would make everything always ramp in weird time/1024 steps? Consider using an ordinary ADSR envelope instead to pass the numbers to the model from the UI, since that would allow for most normal types of dynamic development inside the time windows relevant for me, which will be less than one minute.
+Normalisation
+
+Question: How would the internal normalisation code work for custom multi-dimensional or logarithmic conditionings, for an example?
+
+Chroma
+
+Should a time series be analysed and saved? Would it be much slower? Having it available would be useful for later analyses.
+
+BPM
+
+Question 1: what happens to rhythm and BPM calculations if a cropped file has partial beats in the beginning or end? Can these be truncated? Or do I trust my measure-aware pre-cropping?
+
+Question 2: Is 120 or 0 better as the default BPM for files where a BPM was not detected?
+
+Roformer for stem separation
+
+Look into this. For now the issue is that mostly vocal/other models are available.
+
+Global Drum Clustering
+
+If it’s possible from the data that exists to cluster drums so that different instruments/timbres can be mapped to their own MIDI notes, that is an interesting option. ADTOF only creates a limited amount of tracks, but in the case that in the same song there are four different hihat sounds, it would be beneficial to map the to four different MIDI notes.
+
+It is also an interesting idea that the timbre of each drum hit in the training set is recorded, and later when everything has been processed, cluster them so that in every drums MIDI file the same note would proxy the same type of sounds.

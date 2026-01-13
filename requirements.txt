@@ -1,0 +1,37 @@
+# MIR Feature Extraction Framework - Requirements
+# Python 3.10+ required
+
+# Audio Processing
+librosa>=0.11.0
+soundfile>=0.12.0
+audioread>=3.0.0
+
+# Stem Separation
+demucs>=4.0.0
+
+# Loudness Analysis
+pyloudnorm>=0.1.0
+
+# Harmonic Analysis
+essentia>=2.1b6.dev0
+essentia-tensorflow>=2.1b6.dev0
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Data Handling
+pandas>=2.0.0
+
+# External Dependencies (installed separately via setup script):
+# - timbral_models (Audio Commons) - cloned from GitHub
+
+# Optional: GPU Acceleration
+# For AMD GPUs: install pytorch with ROCm support
+# For NVIDIA GPUs: install pytorch with CUDA support
+# torch>=2.0.0  # Install appropriate version for your hardware
+
+# Development Tools (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# mypy>=1.0.0

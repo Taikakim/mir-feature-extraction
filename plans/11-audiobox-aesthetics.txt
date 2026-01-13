@@ -1,0 +1,33 @@
+Adudiobox Aesthetics features
+
+The following information will be extracted using Audiobox Aesthetics:
+    • CE Content Enjoyment, {content_enjoyment}
+    • CU Content Usefulness, {content_usefulness}
+    • PC Production Complexity, {production_complexity}
+    • PQ Production Quality, {production_quality}
+
+
+AudioBox aesthetics ratings
+
+Content Enjoyment (CE), Content Usefulness (CU), Production Complexity (PC), Production Quality (PQ)
+Conditioner type: NumberConditioner
+ Conditioning mode: Global
+ Value range: Original, Stable Audio Tools internally normalises the values according to settings in the model config
+Approach A: NumberConditioner (recommended)
+{
+  "id": "content_enjoyment",
+  "type": "number",
+  "config": {
+    "min_val": 1.0,
+    "max_val": 10.0
+  }
+}
+
+
+
+Feature semantics:
+Content Enjoyment captures aesthetic appeal and subjective preference. High CE indicates music people want to listen to repeatedly. This is inherently subjective and culturally dependent.
+Content Usefulness measures functional value—whether audio serves its intended purpose (e.g., workout music that energizes, background music that doesn't distract). More objective than enjoyment.
+Production Complexity quantifies sophistication of production techniques—layering, processing, arrangement density. High PC indicates professional, intricate production; low PC suggests minimal, raw, or DIY approaches.
+Production Quality measures technical excellence—clean recording, balanced mix, absence of artifacts. High PQ is quasi-objective—well-mastered tracks score higher regardless of style.
+Training strategy note: Use high dropout rate later during training (e.g., 50%) so the model doesn't become overly dependent on these signals. This creates a model that can generate well without these features but improves when they're provided.

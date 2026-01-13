@@ -1,0 +1,41 @@
+Audio Commons subjective features
+
+https://github.com/AudioCommons/timbral_models
+
+With Audio Commons, extract the following features:
+
+    • Brightness
+    • Roughness
+    • Hardness
+    • Depth
+    • Booming
+    • Reverberation
+    • Sharpness
+    • Warmth
+
+Audio Commons timbral features
+
+Brightness, Roughness, Hardness, Depth, Booming, Reverberation, Sharpness, Warmth
+Conditioner type: NumberConditioner for all
+ Conditioning mode: Global
+ Value range: Audio Commons features typically output values in [0,100] or similar ranges—normalized to [0,1] internally by Stable Audio Tools.
+{
+  "id": "brightness",
+  "type": "number",
+  "config": {
+    "min_val": 0.0,
+    "max_val": 100.0
+  }
+}
+// Repeat pattern for all 8 features
+
+Feature extraction: Use the Audio Commons Timbral Models library (timbral_models Python package) which implements perceptual models for each attribute. These models were developed through psychoacoustic experiments correlating acoustic features with human perception.
+Brightness correlates with spectral centroid—higher values indicate more high-frequency content. Critical for controlling "dark" versus "bright" sonic character.
+Roughness relates to beating and modulation, capturing harshness or smoothness. High roughness characterizes distorted guitars, growling bass; low roughness suggests pure tones, smooth pads.
+Hardness distinguishes soft, mellow sounds from hard, metallic ones. Correlates with attack sharpness and spectral irregularity.
+Depth captures the sense of spaciousness and resonance in low frequencies. High depth suggests large spaces, powerful sub-bass.
+Booming specifically measures low-frequency resonance and perceived "boominess" around 100-200 Hz. Critical for controlling bass weight without affecting sub-bass or higher harmonics.
+Reverberation quantifies wet/dry balance and decay characteristics. Straightforward perceptual model of reverb amount.
+Sharpness measures high-frequency harshness per psychoacoustic models. Related to brightness but specifically captures perceived "sharpness" that can be fatiguing.
+Warmth captures the perception of mid-low frequency richness that makes sounds feel "warm" versus "cold"—fundamental for controlling emotional quality.
+Why these features matter: Audio Commons descriptors bridge the semantic gap between acoustic features and perceptual qualities. Users can condition on "bright, warm, reverberant" rather than "high spectral centroid, elevated 200-600Hz, long RT60." This makes the model more intuitive while providing orthogonal control dimensions compared to raw spectral features.

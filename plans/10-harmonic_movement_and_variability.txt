@@ -1,0 +1,63 @@
+Harmonic movement and variability
+
+Get the Time Series of Chromagrams
+
+Sequence calculation
+
+Calculate the 12-dimensional chromagram for a series of short, fixed-time windows at 32th note intervals across the clip. The BPM key should exist at this point already for the clip. If not, output an error and use 100ms intervals instead.
+
+This gives us a sequence of vectors:
+    • chroma_sequence = [chroma_at_0.1s, chroma_at_0.2s, chroma_at_0.3s, ...]
+
+Calculate the Change Between Consecutive Slices
+
+We want to measure movement, so we’ll calculate the "distance" between each chromagram and the next one in the sequence. Cosine distance should be an excellent metric for this, as it measures the change in harmonic content regardless of overall volume.
+
+change_over_time = [cosine_distance(chroma_t, chroma_{t+1}) for t in chroma_sequence]
+
+Consider also using the Wasserstein metric/EMD for describing pitch distances, keeping it separate from the cosine prediction when saving the results.
+
+Now we have new time series that represents the magnitude of harmonic change at each time step.
+
+Establish feature keys
+
+Aggregate the data into a single number and save it in the keys
+    • {harmonic_movement_bass} and
+    • {harmonic_movement_other}
+
+Now, take the mean of that "change over time" series.
+
+{harmonic_movement_score} = np.mean(change_over_time)
+
+Calculate also the standard deviation to measure how erratic the harmonic changes are, and save the value in the keys {harmonic_variance_bass} and {harmonic_variance_other}
+
+Harmonic features implementation
+
+Chroma vectors:
+
+*THESE NEED TO BE DEFINED!* WIP*
+
+Harmonic movement and variance scores
+Conditioner type: NumberConditioner
+ Conditioning mode: Global
+ Value range: 0-1
+{
+  "id": "harmonic_movement_bass",
+  "type": "number",
+  "config": {
+    "min_val": 0.0,
+    "max_val": 1.0
+  }
+},
+{
+  "id": "harmonic_variance_bass",
+  "type": "number",
+  "config": {
+    "min_val": 0.0,
+    "max_val": 1.0
+  }
+}
+
+Harmonic movement quantifies how rapidly harmonic content changes over time. Compute as the average Euclidean distance between consecutive chroma vectors: movement = mean(||chroma[t] - chroma[t-1]||). Normalize by dividing by sqrt(2) (theoretical maximum distance between unit-normalized 12D vectors) to map to [0,1].
+Harmonic variance measures overall harmonic diversity across the audio. Calculate the variance of the chroma matrix along the time axis, then average across the 12 pitch classes. Normalize using percentile-based scaling across your training corpus.
+Musical interpretation: High harmonic movement indicates frequent chord changes or melodic activity (jazz, classical, pop). Low movement suggests static harmonies (drones, ambient, minimal techno). High variance indicates diverse harmonic content, low variance suggests limited pitch palette. These features enable control over harmonic complexity independent of rhythmic or textural characteristics.

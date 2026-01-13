@@ -1,0 +1,40 @@
+Planning notes and instructions
+
+Developement, documentation
+
+    • Primary source of reference for code is the local copy of the codebase, but the latest version of the original implementation of Stable Audio Tools should always be referenced when any feature needs to be compatible with any of the following dependencies:
+    • Document changes and additions to a project.log file which collects everything during development for later reviews.
+        ◦ Before any bigger changes, create a backup of the .py in the /backup folder under file location with the name filename.py.#, where # is a running number.
+    • When implementing any changes, always double check that nothing already implemented is not destroyed.
+        ◦ Never assume that code, features or variables which look unused is not needed.
+            ▪ Note of these can be saved in the project log.
+    • Look at my intention and also propose alternate ways of achieving better results, if you have knowledge of a method producing better results.
+    • Each set of distinct families of features requiring a different environment  will be placed in their own folder laid out in .py files which should be of manageable length.
+        ◦ Each .py will have a section in the beginning describing the purpose of functions and variables briefly.
+            ▪ This section will also list what external files the function depends on.
+                • This information needs to be continuously monitored so that if functions are moved, their dependents don’t break.
+        ◦ Each folder will have a file claude.md where the function and internals of each .py is briefly explained, along with how everything connects to the overarching MIR project.
+    • After it has been calculated, the beat and onset starts in time can be accessed in the files FILENAME.BEAT_GRID and FILENAME.ONSETS_GRID  (see under the heading “Rhythm” for details.
+    • The results of each analysis/feature for a given audio file will be saved in the same file: FILENAME.INFO
+        ◦ The format of the file is JSON with an individual key for each result.
+        ◦ If temporal data is calculated during processing (for medians of windows, etc), save everything in a format suitable for efficient access in the file FILENAME.MRI
+        ◦ Care must be taken to not accidentally remove any previously existing audio feature information in the MRI and INFO files.
+            ▪ When adding code to save new features, double-check that nothing gets destroyed.
+            ▪ Assume that before slicing (described in the section “smart cropping”), each file has been normalised to -1dB, but the slices are unnormalised to preserve dynamics.
+            ▪ JSON handling functions as well as other commonly shared functions will be placed in a suitable set of commonly accessed files. As more and more of the features are being implemented, maintain the big picture and move functions to these common files as needed.
+                • Make an overall estimation once in the beginning of the project after reviewing the detailed plan(s) for all of the foreseeable functionality before deciding which capabilities need to be shared.
+                • If moving a function, carefully check the claude.md files and the comment paragraphs of the whole project to make sure that the change does not break things.
+    • Priority implementation order:
+        ◦ Core features (highest impact): BPM, LUFS, danceability, brightness, position_in_file—these provide broad control over fundamental characteristics
+        ◦ Rhythmic features: Onset density, syncopation, beat count—critical for rhythmic music styles
+        ◦ Spectral/timbral features: Multiband RMS, Audio Commons descriptors—enables timbral control
+        ◦ Harmonic features: Custom chroma conditioner, harmonic movement—for harmonic/melodic content
+        ◦ Advanced features: AudioBox aesthetics, detailed Essentia features—refinement and specialized control
+File organisation
+
+Folder structure
+
+    • A skill is needed to cycle through all of the input files, and move each file to a folder placed in the file’s source directory and with the name of the file.
+        ◦ Move the file to this folder and name it full_mix.FILETYPE
+                • So, for /folder1/folder2/filename-something.flac the result will be /folder1/folder2/filename-something/full_mix.flac
+        ◦ Place this function in it’s own script so it’s easy to run it only when needed.

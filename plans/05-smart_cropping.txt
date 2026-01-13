@@ -1,0 +1,6 @@
+Smart cropping
+
+    • The smart cropping script will now be run, so that the output files will be placed in the same folder as the original files under a /crops folder.
+    • Each file is a crop from full songs, and they have the string section_N in the end of the filename before the Demucs/DrumSep signifier.
+- This can be used to calculate the location of the clip relative to the full song.-
+- The location of the clip relative to the full original file will be saved to a key named {position} which is a value between 0 and 1. Calculate this using the full mix length.

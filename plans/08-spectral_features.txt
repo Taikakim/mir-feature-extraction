@@ -1,0 +1,17 @@
+Spectral features
+
+It’s probably the easiest to do these with essentia. Calculate these only for the full mix.
+
+Conditioner type: NumberConditioner for all
+Conditioning mode: Global
+Rationale: All are continuous statistical measures of spectral content
+Implementation: Use Essentia for all features for speed.
+Spectral flatness
+Measures noise-like versus tone-like content (0=pure tone, 1=white noise). {spectral flatness}
+Spectral flux
+Quantifies how quickly the spectrum changes over time, indicating transient content and textural evolution. Calculate as the sum of squared differences between consecutive magnitude spectra. Values vary widely—normalize using 99th percentile of your corpus. A max_val of 3.0 works well when flux is computed on mel-scaled spectra and normalized by number of bins. {spectral_flux}
+Spectral skewness
+Indicates whether spectrum is weighted toward low frequencies (negative skew) or high frequencies (positive skew). Values typically range [-3, 3]—positive skewness indicates bright, high-frequency content. {spectral_skewness}
+Spectral kurtosis
+Measures "peakiness" of the spectrum—higher values indicate more concentrated energy in specific bands. Normal distributions have kurtosis=3.
+Implementation strategy: Compute these features over consistent frame sizes (2048 samples, 512 hop) and aggregate using the median value across frames rather than mean. Median is more robust to outlier frames during transitions or glitches. These features combine to provide rich spectral texture control—flat+low-flux suggests static pads, peaked+high-flux suggests rhythmic transients. {spectral_kurtosis}

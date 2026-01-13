@@ -1,0 +1,102 @@
+Rhythm
+
+For all features, the following conditioning parameters should work, except that the number conditioner should be used for {bpm_is_defined}, int conditioner for {beat_count}
+
+Conditioner type: NumberConditioner
+Conditioning mode: Global
+
+Syncopation
+
+A set of functions for analysing syncopation and other structural descriptors will be placed in their own file.
+
+Establish a Beat Grid
+
+First, for each audio clip use the full mix to get a master grid and use a robust beat tracker to find the beat and downbeat positions. While Essentia's BeatTrackerDegara is good, the Madmom library is often considered the state-of-the-art for this, especially for electronic music with its strong pulse. Consider which is better since now I’m training on goa trance, but I will be doing training in other genres too. Save the grid with the start time values of the beats in the file FILENAME.BEATS_GRID.
+
+Detect Onsets
+
+For each stem of the full mix, run an onset detection algorithm. Essentia's Onsets algorithm or Librosa's librosa.onset.onset_detect work well. These will give you a list of timestamps where rhythmic events begin. Save this grid in a variable and also the file FILENAME.ONSETS_GRID to be used by other routines later, notably at least the BPM calculation.
+
+Calculate a Syncopation Index
+
+This is where you combine the grid and the onsets to quantify syncopation. The logic, based on classic music cognition models (like Longuet-Higgins & Lee), is as follows:
+
+    • Assign Metrical Weights:
+        ◦ Give a high weight to strong metrical positions (e.g., downbeat '1' = weight 10) and low weights to weak positions (e.g., the 16th note right after the downbeat = weight 1).
+    •  Quantize Onsets:
+        ◦ Snap each detected onset to the nearest grid position (e.g., the nearest 16th note).
+    • Calculate Score:
+        ◦ The syncopation score is the sum of the energies of all onsets that fall on metrically weak positions. A high score means a lot of rhythmic energy is happening off the main beats.Rhythm
+    •
+    • For all features, the following conditioning parameters should work, except that the number conditioner should be used for {bpm_is_defined}, int conditioner for {beat_count}
+    •
+    • Conditioner type: NumberConditioner
+Conditioning mode: Global
+    •
+    • Syncopation
+    •
+    • A set of functions for analysing syncopation and other structural descriptors will be placed in their own file.
+    •
+    • Establish a Beat Grid
+    •
+    • First, for each audio clip use the full mix to get a master grid and use a robust beat tracker to find the beat and downbeat positions. While Essentia's BeatTrackerDegara is good, the Madmom library is often considered the state-of-the-art for this, especially for electronic music with its strong pulse. Consider which is better since now I’m training on goa trance, but I will be doing training in other genres too. Save the grid with the start time values of the beats in the file FILENAME.BEATS_GRID.
+    •
+    • Detect Onsets
+    •
+    • For each stem of the full mix, run an onset detection algorithm. Essentia's Onsets algorithm or Librosa's librosa.onset.onset_detect work well. These will give you a list of timestamps where rhythmic events begin. Save this grid in a variable and also the file FILENAME.ONSETS_GRID to be used by other routines later, notably at least the BPM calculation.
+    •
+    • Calculate a Syncopation Index
+    •
+    • This is where you combine the grid and the onsets to quantify syncopation. The logic, based on classic music cognition models (like Longuet-Higgins & Lee), is as follows:
+    •
+    • Assign Metrical Weights:
+        ◦ Give a high weight to strong metrical positions (e.g., downbeat '1' = weight 10) and low weights to weak positions (e.g., the 16th note right after the downbeat = weight 1).
+    •  Quantize Onsets:
+        ◦ Snap each detected onset to the neare
+        ◦ Save this information as the keys {syncopation_bass}, {syncopation_drums} and {syncopation_other}.
+
+
+BPM
+
+For music without clear tempo (ambient, field recordings, arrhythmic experimental music), set bpm_is_defined=0 and bpm to a default value (e.g., 120, or maybe 0?). This allows the model to learn distinct behaviors for rhythmic versus non-rhythmic content. During inference, users can specify BPM explicitly for tempo-controlled generation or leave it undefined for more organic, flowing content.
+
+I will need a system to set a conditioning for telling if a BPM is present, for this, do:
+
+Depends on existing onset data
+
+Use the (at this point necessarily) existing file FILENAME.BEATS_GRID as the basis for the calculations.
+
+Calculate Key Metrics
+
+    • For each audio file, you'll calculate two numbers:
+        ◦ {beat_count}: The total number of beats detected in the segment. beat_count = len(features['rhythm.beats_position'])
+        ◦ {beat_regularity} (Confidence): The consistency of the time between beats. A low standard deviation of the beat intervals indicates a very steady, regular rhythm. beat_intervals = np.diff(features['rhythm.beats_position']) and then regularity_score = np.std(beat_intervals).
+Apply a Combined Threshold
+
+    • You can now define a simple rule to set your {bpm_is_defined} flag.
+    • bpm_is_defined = 1 if beat_count is above a certain number AND regularity_score is below a certain number. Otherwise, bpm_is_defined = 0.
+        ◦ Example Thresholds (you should tune these on your data):
+            ▪ beat_count_threshold = 15 (Requires at least 15 detected beats in the analyzed clip)
+            ▪ regularity_threshold = 0.1 (Requires the standard deviation of beat intervals to be less than 100ms, indicating a steady pulse)
+
+Code Implementation
+
+You can integrate this directly into process_audio_unified method where we handle the essentia-tempo results. (do we need Essentia tempo anymore?)
+
+–
+Onset density
+
+    • Calculated by number_of_onsets / duration_of_clip_in_seconds and saved in the key {onset_density_average_bass}, {onset_density_average_drums} and {onset_density_average_other}
+        ◦ Also calculate variance in the keys: {onset_density_variance_bass}, {onset_density_variance_drums} and {onset_density_variance_other}
+
+Rhythmic complexity
+
+Calculated by taking all inter-onset time intervals, creating a histogram of these values (by quantizing them), and then computing the Shannon entropy of that distribution.
+
+These values are saved as {rhythmic_complexity_bass}, {rhythmic_complexity_ drums} and {rhythmic_complexity_other}.
+
+Rhythmic evenness
+
+    • Calculated by np.std(np.diff(onset_timestamps)) for {rhythmic_evenness_bass}, {rhythmic_evenness_drums} and {rhythmic_evenness_other} and saved in their respective keys.
+    • Do the above also for the kick, snare and cymbal tracks from DrumSep and save the info in suitable keys.
+    • Save the rhythm grid for future use.

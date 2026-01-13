@@ -1,0 +1,5 @@
+Statistical analysis
+
+As a last tool to be created after everything is done, is a statistical tool, which will create statistics on every feature gathered above. It does this by scanning through the values saved in the keys, and calculating the range of all values for each key, as well as the distribution, so that outliers can be later dealt with (to be decided later, what to do with them).
+
+The results are saved in a JSON, where these statistics per key are recorded. For classes, the number of each class present in the data is explicitly recorded.

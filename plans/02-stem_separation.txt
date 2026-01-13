@@ -1,0 +1,23 @@
+Stem separation
+
+The separated files can be used whenever it will be beneficial to the purpose of retrieving musical information.
+
+Demucs
+
+    • Separate all input files with demucs-ht v4
+        ◦ Paraneters:
+            ▪ shifts 1
+            ▪ filetype flac
+            ▪ number of concurrent jobs 4.
+        ◦ Have the relevant Demucs variables however available as parameters to the script.
+    • The output folder will be the same where the original file resides in the file structure  defined in “File organisation/ Folder structure”
+    • The filenames of the stems will be just drums.FILETYPE etc, so using the previous example we will now have:
+        ◦ /folder1/folder2/filename-something/full_mix.flac
+        ◦ /folder1/folder2/filename-something/drums.flac
+        ◦ /folder1/folder2/filename-something/bass.flac
+        ◦ /folder1/folder2/filename-something/othe.flac
+        ◦ /folder1/folder2/filename-something/vocals.flac
+DrumSep
+
+Each drums.FILETYPE will now be further separated by the Drumsep routine to also have
+Further percussion tracks named by the percussion type in the same folder than the other files. From these percussion stems later drum-specific MRI can be extracted.

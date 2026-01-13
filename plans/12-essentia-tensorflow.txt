@@ -1,0 +1,34 @@
+Essentia-Tensorflow
+
+Perform existing scripts for analysis of:
+    • Danceability
+    • Atonality
+    • For vocals, gender, how to establish if vocals are present? General problem where for little energy in the vocal stem, it should be mixed back into _other during separation
+    • Genre, think about how to encode these – for now drop them into the prompt during prompt generation later
+    • Mood, think about how to encode these  - same than above for now
+    • Instrumentation, this is also a bit suspect IMO – same than above for now
+
+Essentia high-level features
+Danceability and Atonality
+Conditioner type: NumberConditioner
+ Conditioning mode: Global
+ Value range: 0-1
+Solution: use existing Essentia code under /essentia
+
+Danceability from Essentia measures rhythmic strength, tempo stability, and beat salience—higher values indicate music suitable for dancing. It combines multiple features including beat strength, onset rate, and tempo.
+Atonality quantifies departure from traditional Western tonality. High values indicate atonal, dissonant, or experimental music; low values suggest clear tonal centers and consonance. This is computed using key strength and harmonic relationships.
+Vocal gender (categorical)
+Challenge: True categorical feature with no inherent ordering
+ Conditioner type: IntConditioner
+ Conditioning mode: Global
+Solution: Essentia, refer to the existing code under /essentia
+Genre, Mood, Instrumentation (categorical)
+Challenge: Multi-class categorical features with potentially hundreds of labels
+ Solution: Essentia
+Feature extraction: Use Essentia's classification models, refer to the existing code under /essentia
+Essentia provides pretrained models for:
+    • Genre: Multiple taxonomies (Discogs, Last.fm, custom)
+    • Mood: Arousal-valence models, discrete mood categories
+    • Instrumentation: Instrument presence/activation classifiers
+Recommendation: For most use cases, incorporate genre, mood, and instrumentation into text prompts rather than separate conditioning. This is simpler to implement, leverages existing text conditioning infrastructure, and provides more flexibility. CLAP and T5 encoders already understand terms like "jazz", "melancholic", "piano"—no need to reinvent this capability with separate conditioners.
+Reserve IntConditioner approach for scenarios where you need very precise, programmatic control over these attributes during generation, or when text conditioning proves insufficient for capturing specific categories.

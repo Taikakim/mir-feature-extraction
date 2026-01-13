@@ -1,0 +1,11 @@
+Chroma pitch mapping
+
+For each full mix clip, a circular chromatic pitch map is calculated. The output is a 12-dimensional vector with weights for the presence of each semitone.
+
+No key or scale is analysed, the purpose is to let the user decide the raw pitch values preferred in the output. To facilitate easier use, scale presets for sets of semitone weights can be presented in the UI.
+
+Essentia is probably the preferred tool for extraxing the chroma.
+
+    • A weight between 0-1 is assigned for each semitone. The weights are saved in the key {CHROMA_KEY}.
+        ◦ This analysis is done averaging the whole clip.
+    • Save also the raw chroma information in the filename.CHROMA

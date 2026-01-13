@@ -1,0 +1,23 @@
+Metadata features
+File position percentage (0-1)
+Conditioner type: NumberConditioner
+ Conditioning mode: Global
+ Value range: 0.0 to 1.0
+{
+  "id": "position_in_file",
+  "type": "number",
+  "config": {
+    "min_val": 0.0,
+    "max_val": 1.0
+  }
+}
+
+Purpose: Indicates where in the original audio file the current chunk originates. Position 0.0 = beginning, 0.5 = middle, 1.0 = end. This enables the model to learn positional characteristics—songs often have distinct intro, middle, and outro sections with different energy, instrumentation, and structural properties.
+Calculation: position = chunk_start_sample / total_audio_samples
+Musical significance: Conditioning on file position allows the model to understand that:
+    • 0.0-0.15: Introductions, gradual build-ups, establishing elements
+    • 0.15-0.35: First verse/section, developing musical ideas
+    • 0.35-0.65: Middle sections, peaks, development
+    • 0.65-0.85: Final sections, climaxes, variation
+    • 0.85-1.0: Outros, fade-outs, resolution
+This is particularly powerful for long-form generation where structural coherence matters. Combined with seconds_start/seconds_total (which Stable Audio Tools uses natively), position_in_file provides both absolute and relative temporal context.
