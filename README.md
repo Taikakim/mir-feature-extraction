@@ -1,5 +1,8 @@
 # MIR Feature Extraction Framework
 
+!==! Very much a hot work-in-progress mess, but it alread kind of works for me and my RX 9070 XT, so I thought, it could be a good starting point for other people too. !==!
+!==! None of the algos have been reviewed yet for correct implementation. I will leave that to the end since fixing implementation errors should not break anything, unlike the kind of total overhauls the code is still seeing through. !==!
+
 **Comprehensive music feature extraction pipeline for conditioning Stable Audio Tools and similar audio generation models.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
