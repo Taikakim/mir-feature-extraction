@@ -55,14 +55,25 @@ export OMP_NUM_THREADS=8
 ### Testing Commands
 
 ```bash
-# Test single file with all features
-python src/test_single_file.py "/path/to/Track Name/full_mix.flac"
+# Test ALL 70+ features on a single file (recommended)
+python src/test_all_features.py "/path/to/audio.flac"
+python src/test_all_features.py "/path/to/Track Name/"  # organized folder
 
-# Benchmark Music Flamingo performance
-python src/benchmark_fp8_full.py "/path/to/Track Name/full_mix.flac"
+# Test with specific GGUF model quantization
+python src/test_all_features.py "/path/to/audio.flac" --model Q8_0   # Best quality
+python src/test_all_features.py "/path/to/audio.flac" --model Q6_K   # Balanced (default)
+python src/test_all_features.py "/path/to/audio.flac" --model IQ3_M  # Fastest
 
-# Test quantization methods (INT8/INT4)
-python src/benchmark_quantization.py
+# Skip specific modules
+python src/test_all_features.py "/path/to/audio.flac" --skip-demucs     # Skip stem separation
+python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo   # Skip AI descriptions
+
+# Music Flamingo GGUF only (fastest - ~4s per track)
+python src/classification/music_flamingo_gguf.py "/path/to/audio.flac" --model Q6_K
+python src/classification/music_flamingo_gguf.py "/path/to/audio.flac" --prompt-type structured  # All 5 prompts
+
+# Music Flamingo Transformers (slower - ~28s per prompt, but native Python)
+python src/classification/music_flamingo_transformers.py "/path/to/audio.flac" --flash-attention
 ```
 
 ### Batch Processing
@@ -81,7 +92,11 @@ python src/rhythm/bpm.py /path/to/audio/ --batch
 # Extract classification features
 python src/classification/essentia_features.py /path/to/audio/ --batch
 
-# Music Flamingo batch analysis
+# Music Flamingo batch analysis (GGUF - recommended, 7x faster)
+python src/classification/music_flamingo_gguf.py /path/to/audio/ --batch --model Q6_K
+python src/classification/music_flamingo_gguf.py /path/to/audio/ --batch --prompt-type structured  # All 5 prompts
+
+# Music Flamingo batch analysis (Transformers - slower but native Python)
 python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch --flash-attention
 ```
 
@@ -147,53 +162,70 @@ src/
 │   ├── audio_commons.py          # 8 perceptual features (brightness, hardness, etc.)
 │   └── audiobox_aesthetics.py    # 4 aesthetics features (currently defaults)
 │
-└── classification/
-    ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
-    ├── music_flamingo_transformers.py  # AI-powered music descriptions (ONLY WORKING METHOD)
-    └── music_flamingo.py         # GGUF/llama.cpp approach (NOT FUNCTIONAL - audio not supported)
+├── classification/
+│   ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
+│   ├── music_flamingo_gguf.py    # ✅ RECOMMENDED: GGUF/llama.cpp (7x faster, 40-60% less VRAM)
+│   └── music_flamingo_transformers.py  # Native Python via HuggingFace transformers
+│
+└── test_all_features.py          # Comprehensive test script for all 70+ features
 ```
 
 ### Music Flamingo Integration (CRITICAL)
 
-**Location**: `src/classification/music_flamingo_transformers.py`
+**Two Methods Available**:
 
-**Architecture**: Uses NVIDIA Music Flamingo (8B params: Qwen2.5-7B language + Audio Flamingo 3 encoder) via HuggingFace transformers.
+| Method | Location | Speed | VRAM | Best For |
+|--------|----------|-------|------|----------|
+| **GGUF (Recommended)** | `src/classification/music_flamingo_gguf.py` | ~4s/track | 5-9GB | Production, batch processing |
+| Transformers | `src/classification/music_flamingo_transformers.py` | ~28s/prompt | 13GB | Native Python, fine-tuning |
 
-**IMPORTANT**: This is the **ONLY working method**. GGUF/llama.cpp is NOT supported for audio multimodal (see Known Issues below).
+**Architecture**: NVIDIA Music Flamingo (8B params: Qwen2.5-7B language + Audio Flamingo 3 encoder)
 
-**Key Implementation Details**:
+#### GGUF Method (Recommended) ✅
 
-1. **Text Normalization (MANDATORY)**: All Music Flamingo output is automatically normalized for T5 tokenizer compatibility via `normalize_music_flamingo_text()` which replaces Unicode special characters (em-dashes, curly quotes, non-breaking hyphens) with ASCII equivalents.
+Uses llama.cpp `llama-mtmd-cli` tool. **7x faster than transformers with 40-60% less VRAM.**
 
-2. **Memory Management**: Uses `clear_cache()` after each prompt to prevent OOM:
-   ```python
-   del outputs
-   del inputs
-   torch.hip.empty_cache()
-   gc.collect()
-   ```
+```python
+from classification.music_flamingo_gguf import MusicFlamingoGGUF
 
-3. **Five Prompt Types**:
-   - `full`: Comprehensive description (genre, tempo, key, instruments, mood)
-   - `technical`: Tempo, key, chords, dynamics, performance analysis
-   - `genre_mood`: Genre classification + emotional character
-   - `instrumentation`: Instruments and sounds present
-   - `structure`: Arrangement and structure analysis
+analyzer = MusicFlamingoGGUF(model='Q6_K')  # IQ3_M, Q6_K, or Q8_0
+description = analyzer.analyze('audio.flac', prompt_type='full')
 
-4. **Saved Keys in .INFO**:
-   - `music_flamingo_full`
-   - `music_flamingo_technical`
-   - `music_flamingo_genre_mood`
-   - `music_flamingo_instrumentation`
-   - `music_flamingo_structure`
+# Or all prompt types at once
+results = analyzer.analyze_all_prompts('audio.flac')
+```
 
-5. **Quantization Support** (via bitsandbytes):
-   - ❌ **NOT FUNCTIONAL on ROCm** - Models load but OOM during inference
-   - INT8/INT4 code exists but fails on AMD GPUs (works on CUDA only)
-   - See `QUANTIZATION_TEST_RESULTS.md` for details
-   - **Do not use `quantization` parameter on ROCm**
+**Note**: RDNA 4 (gfx1201) has a POOL_1D operator warning - this is cosmetic, model works correctly.
 
-6. **Performance**: 1.06x realtime for all 5 prompts with Flash Attention 2 + TunableOps
+#### Transformers Method
+
+Native Python via HuggingFace. Slower but more flexible.
+
+```python
+from classification.music_flamingo_transformers import MusicFlamingoTransformers
+
+analyzer = MusicFlamingoTransformers(use_flash_attention=True)
+description = analyzer.analyze('audio.flac', prompt_type='full')
+```
+
+**Memory Management** (transformers only): Uses `clear_cache()` after each prompt to prevent OOM.
+
+#### Common Details (Both Methods)
+
+**Five Prompt Types**:
+- `full`: Comprehensive description (genre, tempo, key, instruments, mood)
+- `technical`: Tempo, key, chords, dynamics, performance analysis
+- `genre_mood`: Genre classification + emotional character
+- `instrumentation`: Instruments and sounds present
+- `structure`: Arrangement and structure analysis
+
+**Saved Keys in .INFO**:
+- `music_flamingo_full`, `music_flamingo_technical`, `music_flamingo_genre_mood`
+- `music_flamingo_instrumentation`, `music_flamingo_structure`
+
+**Text Normalization (MANDATORY)**: All output is automatically normalized for T5 tokenizer compatibility via `normalize_music_flamingo_text()`.
+
+**Quantization** (transformers only): INT8/INT4 NOT FUNCTIONAL on ROCm - use bfloat16 + Flash Attention 2
 
 ### TunableOps Optimization
 
@@ -423,11 +455,10 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 - `README.md` - Project overview (updated 2026-01-13)
 - `plans/01-developement.txt` - Core development principles
 - `plans/02-stem_separation.txt` - Folder structure specification
-- `src/classification/music_flamingo.py` - GGUF code (exists but NOT FUNCTIONAL) ⚠️
+- `src/classification/music_flamingo_gguf.py` - ✅ GGUF wrapper (RECOMMENDED - 7x faster)
+- `GGUF_INVESTIGATION.md` - Full GGUF setup and usage documentation
 
 **Ignore older files** with issues that have been fixed in recent sessions.
-
-**Important**: Do NOT attempt to use GGUF/llama.cpp for Music Flamingo - it cannot support audio multimodal.
 
 ---
 
@@ -446,11 +477,11 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 1. **Check environment variables first** (especially `PYTORCH_ALLOC_CONF`)
 2. **Check bitsandbytes symlink** if quantization fails
 3. **Check for numba/numpy conflict** if librosa fails
-4. **Don't try GGUF/llama.cpp** - not supported for Music Flamingo audio multimodal
+4. **GGUF "error: invalid argument"** - this is cosmetic (POOL_1D CPU fallback on RDNA 4), model works fine
 5. **Never assume old documentation is current** - check session dates
 
 ---
 
-**Last Updated**: 2026-01-18 (Session: Quantization Testing Complete)
+**Last Updated**: 2026-01-18 (Session: GGUF Integration Complete)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
-**Status**: Production Ready (Standard Features) + Music Flamingo Operational (bfloat16 only)
+**Status**: Production Ready - GGUF recommended for Music Flamingo (7x faster, 40-60% less VRAM)

@@ -2,8 +2,8 @@
 
 Comparison of planned features (from `/plans/*.txt`) versus currently implemented features.
 
-**Last Updated:** 2026-01-13
-**Current Implementation:** 77 features per track extracted
+**Last Updated:** 2026-01-19
+**Current Implementation:** 78 numeric features + 5 text descriptions per track
 
 ---
 
@@ -37,6 +37,7 @@ All planned rhythm features implemented:
 
 **Auxiliary Files:**
 - ✅ `.BEATS_GRID` - Beat timestamps saved
+- ✅ `.ONSETS` - Onset timestamps saved
 
 ### Loudness Features (10/10) ✅
 All planned loudness features implemented:
@@ -88,7 +89,9 @@ All planned timbral features implemented:
 - ✅ `sharpness` - High-frequency harshness (0-100)
 - ✅ `warmth` - Mid-low frequency richness (0-100)
 
-**Note:** hardness, depth, warmth were fixed 2026-01-13 by patching librosa API calls in timbral_models.
+**Patches Applied:**
+- 2026-01-13: Fixed librosa API calls (onset_detect keyword args)
+- 2026-01-19: Fixed numpy.lib.pad -> numpy.pad for NumPy 2.x compatibility
 
 ### AudioBox Aesthetics (4/4) ✅
 All planned aesthetic features implemented:
@@ -100,11 +103,24 @@ All planned aesthetic features implemented:
 
 **Note:** Currently using default value 5.5 for all tracks. Actual model inference not yet implemented.
 
-### Essentia Classification (2/2+) ✅
+### Essentia Classification (2/2) ✅
 Core classification features implemented:
 
 - ✅ `danceability` - Rhythmic strength for dancing (0-1)
 - ✅ `atonality` - Departure from tonality (0-1)
+
+### Music Flamingo AI Descriptions (5/5) ✅ NEW
+Natural language music descriptions via GGUF/llama.cpp:
+
+- ✅ `music_flamingo_full` - Comprehensive description (genre, tempo, key, instruments, mood)
+- ✅ `music_flamingo_technical` - Technical analysis (tempo, key, chords, dynamics)
+- ✅ `music_flamingo_genre_mood` - Genre classification and emotional character
+- ✅ `music_flamingo_instrumentation` - Instruments and sounds present
+- ✅ `music_flamingo_structure` - Arrangement and structure analysis
+
+**Implementation:** Uses GGUF quantized models via llama-mtmd-cli
+**Performance:** ~4 seconds per track (7x faster than transformers)
+**Models:** IQ3_M (3.4GB), Q6_K (5.9GB), Q8_0 (7.6GB)
 
 ---
 
@@ -130,21 +146,7 @@ Core classification features implemented:
 
 ### Missing Auxiliary Files
 
-#### 2. ONSETS_GRID Files (0/4) ❌
-**Plan:** `03-rhythm.txt`
-
-- ❌ `.ONSETS_GRID` files for per-stem onset timestamps
-
-**Why Missing:** Onset data calculated but not saved to external files.
-
-**Implementation Required:**
-- Save onset timestamps to `.ONSETS_GRID` files
-- Format: JSON with onset times in seconds
-- Needed for: Future MIDI quantization, visual debugging
-
-**Priority:** MEDIUM - Useful for debugging and future features
-
-#### 3. CHROMA Time Series Files (0/4) ❌
+#### 2. CHROMA Time Series Files (0/4) ❌
 **Plan:** `06-chroma_pitch_mapping.txt`
 
 - ❌ `.CHROMA` files with time-series chroma data
@@ -162,7 +164,7 @@ Core classification features implemented:
 
 ### Missing Analysis Modules
 
-#### 4. MIDI Transcription (0/3) ❌
+#### 3. MIDI Transcription (0/3) ❌
 **Plan:** `04-midi_transcription.txt`
 
 **Drums:**
@@ -180,34 +182,11 @@ Core classification features implemented:
 - ❌ MT3 transcription
 - ❌ MR-MT3 transcription
 
-**Why Missing:** MIDI transcription is separate pipeline from feature extraction. Requires separate implementation phase.
-
-**Implementation Required:**
-- Clone/install transcription repos
-- Create wrapper scripts
-- Save MIDI files alongside audio
-- Optional: Use beat grid for quantization where BPM defined
+**Why Missing:** MIDI transcription is separate pipeline from feature extraction.
 
 **Priority:** MEDIUM - Useful for conditioning but not critical for initial training
 
-#### 5. Genre/Mood/Instrumentation Classification ❌
-**Plan:** `12-essentia-tensorflow.txt`
-
-- ❌ Genre classification (to be used in text prompts)
-- ❌ Mood classification (to be used in text prompts)
-- ❌ Instrumentation detection (to be used in text prompts)
-- ❌ Vocal gender detection (categorical)
-
-**Why Missing:** Planned for text prompt generation, not separate conditioning.
-
-**Implementation Required:**
-- Use Essentia pretrained models
-- Save results to .INFO or separate metadata
-- Generate text descriptions for prompt engineering
-
-**Priority:** LOW - Text conditioning can handle these without explicit extraction
-
-#### 6. Smart Cropping System ❌
+#### 4. Smart Cropping System ❌
 **Plan:** `05-smart_cropping.txt`
 
 - ❌ Automated audio cropping system
@@ -217,15 +196,9 @@ Core classification features implemented:
 
 **Why Missing:** Current workflow uses full tracks. Cropping needed for training on long songs.
 
-**Implementation Required:**
-- Measure-aware cropping algorithm
-- Crop boundary detection (silence, beat alignment)
-- Folder structure with crops
-- Position metadata calculation
-
 **Priority:** HIGH - Critical for training on full-length albums
 
-#### 7. Statistical Analysis Tool ❌
+#### 5. Statistical Analysis Tool ❌
 **Plan:** `13-statistical_analysis.txt`
 
 - ❌ Corpus-wide feature statistics
@@ -235,12 +208,6 @@ Core classification features implemented:
 - ❌ Class frequency counting
 
 **Why Missing:** Post-processing tool to be run after full dataset extraction.
-
-**Implementation Required:**
-- Scan all .INFO files
-- Calculate min/max/mean/std per feature
-- Generate distribution histograms
-- Save to `CORPUS_STATISTICS.json`
 
 **Priority:** MEDIUM - Needed before training to verify feature distributions
 
@@ -255,10 +222,6 @@ Core classification features implemented:
 - Actual AudioBox model inference
 - Per-track aesthetic scoring
 
-**Implementation Needed:**
-- Install/run AudioBox Aesthetics model
-- Replace default values with real scores
-
 **Priority:** MEDIUM - Default values work but limit conditioning power
 
 ### 2. Drums Per-Stem Rhythm (Kick/Snare/Cymbal)
@@ -270,12 +233,6 @@ Core classification features implemented:
 - ❌ `rhythmic_evenness_kick`
 - ❌ `rhythmic_evenness_snare`
 - ❌ `rhythmic_evenness_cymbal`
-- (And potentially other rhythm features per drum element)
-
-**Implementation Needed:**
-- Run DrumSep (drum sub-separation)
-- Calculate rhythm features per drum element
-- Save to .INFO
 
 **Priority:** LOW - Full drums stem sufficient for most use cases
 
@@ -294,18 +251,20 @@ Core classification features implemented:
 | **Harmonic** | 4 | 4 | ✅ 100% |
 | **Timbral** | 8 | 8 | ✅ 100% |
 | **Aesthetics** | 4 | 4 | ✅ 100%* |
-| **Classification** | 2 | 2+ | ✅ 100%* |
+| **Classification** | 2 | 2 | ✅ 100% |
+| **AI Descriptions** | 5 | 5 | ✅ 100% NEW |
 | **Position** | 0 | 1 | ❌ 0% |
-| **TOTAL** | **77** | **78+** | **99%** |
+| **NUMERIC TOTAL** | **78** | **79** | **99%** |
+| **TEXT TOTAL** | **5** | **5** | **100%** |
 
-*Using defaults or partial implementation
+*Using defaults
 
 ### Auxiliary Files Progress
 | File Type | Implemented | Planned | Status |
 |-----------|------------|---------|--------|
 | `.INFO` JSON | ✅ | ✅ | ✅ 100% |
 | `.BEATS_GRID` | ✅ | ✅ | ✅ 100% |
-| `.ONSETS_GRID` | ❌ | ✅ | ❌ 0% |
+| `.ONSETS` | ✅ | ✅ | ✅ 100% |
 | `.CHROMA` time series | ❌ | ✅ | ❌ 0% |
 | MIDI files | ❌ | ✅ | ❌ 0% |
 
@@ -314,22 +273,18 @@ Core classification features implemented:
 |--------|--------|----------|
 | Core Feature Extraction | ✅ Complete | - |
 | Stem Separation | ✅ Complete | - |
+| Music Flamingo GGUF | ✅ Complete | - |
+| Music Flamingo Transformers | ✅ Complete | - |
 | Smart Cropping | ❌ Not Started | HIGH |
 | MIDI Transcription | ❌ Not Started | MEDIUM |
 | Statistical Analysis | ❌ Not Started | MEDIUM |
 | AudioBox Inference | 🔧 Partial | MEDIUM |
-| Genre/Mood/Instrument | ❌ Not Started | LOW |
 
 ---
 
 ## 🎯 RECOMMENDED NEXT STEPS
 
-### Phase 1: Complete Core Feature Extraction (HIGH PRIORITY)
-1. ✅ ~~Fix Audio Commons librosa API issue~~ (DONE 2026-01-13)
-2. ✅ ~~Extract all 77 features across all test tracks~~ (DONE 2026-01-13)
-3. Implement AudioBox Aesthetics model inference (replace defaults)
-
-### Phase 2: Dataset Preparation (HIGH PRIORITY)
+### Phase 1: Dataset Preparation (HIGH PRIORITY)
 1. **Implement Smart Cropping System**
    - Critical for training on full albums
    - Calculate `position` feature
@@ -340,15 +295,35 @@ Core classification features implemented:
    - Identify outliers
    - Document corpus statistics
 
-### Phase 3: Enhanced Features (MEDIUM PRIORITY)
-1. Save `.ONSETS_GRID` files for debugging
-2. Implement MIDI transcription pipeline
-3. Save `.CHROMA` time series for analysis
+### Phase 2: Model Improvements (MEDIUM PRIORITY)
+1. Implement AudioBox Aesthetics model inference (replace defaults)
+2. Save `.CHROMA` time series for analysis
 
-### Phase 4: Advanced Features (LOW PRIORITY)
-1. Genre/Mood/Instrumentation extraction
+### Phase 3: Enhanced Features (LOW PRIORITY)
+1. Implement MIDI transcription pipeline
 2. Kick/Snare/Cymbal per-drum analysis
 3. Vocal gender classification
+
+---
+
+## 📝 RECENT UPDATES
+
+### 2026-01-19 Session
+- ✅ **Music Flamingo GGUF**: Now working via llama-mtmd-cli (7x faster than transformers)
+- ✅ **NumPy Fix**: Pinned numpy<2.4 for numba compatibility
+- ✅ **timbral_models Patch**: Fixed numpy.lib.pad -> numpy.pad for NumPy 2.x
+- ✅ **test_all_features.py**: New comprehensive test script for all 70+ features
+- ✅ **CLAUDE.md**: Updated with GGUF support documentation
+
+### 2026-01-18 Session
+- ✅ Music Flamingo Transformers working with Flash Attention 2
+- ✅ Text normalization for T5 tokenizer compatibility
+- ✅ TunableOps optimization (10-58% speedup)
+- ❌ INT8/INT4 quantization NOT functional on ROCm
+
+### 2026-01-13 Session
+- ✅ Fixed Audio Commons librosa API issue
+- ✅ Extracted all 77 features across test tracks
 
 ---
 
@@ -356,20 +331,22 @@ Core classification features implemented:
 
 ### Known Issues
 - ✅ ~~Audio Commons hardness/depth/warmth failing~~ - FIXED 2026-01-13
+- ✅ ~~NumPy 2.4 breaking numba/librosa~~ - FIXED 2026-01-19
 - AudioBox using default values (5.5) - needs model inference
 - No smart cropping yet - limits training on long tracks
 
-### Future Considerations
-From `15_futher_ideas_and_open_questions.txt`:
-- Temporal conditioning (time-varying feature vectors)
-- Global drum clustering (timbre-aware MIDI mapping)
-- Roformer stem separation investigation
+### Environment Requirements
+- **Python:** 3.12+
+- **NumPy:** >=2.0.0,<2.4 (pinned for numba compatibility)
+- **PyTorch:** 2.11.0a0+rocm7.11 (or CUDA equivalent)
+- **llama.cpp:** Built with HIP support for Music Flamingo GGUF
 
 ### Documentation
 - Feature extraction fully documented in `project.log`
 - External patches documented in `EXTERNAL_PATCHES.md`
 - Implementation plans in `/plans/*.txt`
+- User guide in `USER_MANUAL.md`
 
 ---
 
-**Status:** Core feature extraction pipeline is **99% complete** for current implementation phase. 77 features successfully extracted across all test tracks. Next priority is smart cropping system for production dataset preparation.
+**Status:** Core feature extraction pipeline is **99% complete** for numeric features. 78 features + 5 text descriptions successfully extracted. Music Flamingo GGUF now operational (7x faster). Next priority is smart cropping system for production dataset preparation.

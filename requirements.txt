@@ -36,7 +36,7 @@ pretty-midi>=0.2.11
 # =============================================================================
 # Scientific Computing
 # =============================================================================
-numpy>=2.0.0
+numpy>=2.0.0,<2.4  # Pinned <2.4 due to numba compatibility (numba requires numpy<2.4)
 scipy>=1.10.0
 scikit-learn>=1.8.0
 numba>=0.60.0

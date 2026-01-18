@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.0
-**Last Updated:** 2026-01-13
+**Version:** 1.1
+**Last Updated:** 2026-01-19
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -14,29 +14,33 @@
 4. [File Organization](#file-organization)
 5. [Feature Extraction Workflows](#feature-extraction-workflows)
 6. [Module Reference](#module-reference)
-7. [Output Files](#output-files)
-8. [Troubleshooting](#troubleshooting)
-9. [Advanced Usage](#advanced-usage)
+7. [Music Flamingo AI Descriptions](#music-flamingo-ai-descriptions)
+8. [Output Files](#output-files)
+9. [Troubleshooting](#troubleshooting)
+10. [Advanced Usage](#advanced-usage)
 
 ---
 
 ## Overview
 
-This framework extracts 77+ music information retrieval (MIR) features from audio files for use as conditioning data in Stable Audio Tools training. It processes full mixes and separated stems to capture rhythm, harmony, timbre, loudness, and aesthetic characteristics.
+This framework extracts 78 numeric MIR features + 5 natural language AI descriptions from audio files for use as conditioning data in Stable Audio Tools training. It processes full mixes and separated stems to capture rhythm, harmony, timbre, loudness, aesthetic characteristics, and AI-generated music descriptions.
 
 ### What It Does
 
 - **Organizes** audio files into structured folders
 - **Separates** audio into stems (drums, bass, other, vocals) using Demucs
-- **Extracts** 77 conditioning features per track
+- **Extracts** 78 numeric conditioning features per track
+- **Generates** 5 AI text descriptions via Music Flamingo (GGUF or Transformers)
 - **Saves** results in JSON `.INFO` files and auxiliary grid files
 
 ### What You Get
 
 For each audio track:
-- 77 numeric features in `{trackname}.INFO` JSON file
-- 4 separated stems (drums, bass, other, vocals) as MP3 files
+- 78 numeric features in `{trackname}.INFO` JSON file
+- 5 AI text descriptions (genre, mood, instruments, structure, technical)
+- 4 separated stems (drums, bass, other, vocals) as FLAC files
 - Beat grid in `{trackname}.BEATS_GRID` file
+- Onset timestamps in `{trackname}.ONSETS` file
 - Ready for Stable Audio Tools training pipeline
 
 ---
@@ -45,35 +49,52 @@ For each audio track:
 
 ### Prerequisites
 
-- **Python:** 3.10+
-- **GPU:** AMD (ROCm) or NVIDIA (CUDA) recommended for stem separation
+- **Python:** 3.12+ (tested with 3.12)
+- **NumPy:** >=2.0.0, <2.4 (pinned for numba compatibility)
+- **GPU:** AMD (ROCm 7.1+) or NVIDIA (CUDA) recommended for stem separation and Music Flamingo
 - **Disk Space:** ~50MB per minute of audio (for stems + features)
+- **VRAM:** 13GB+ for Music Flamingo AI descriptions
 
 ### Environment Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mir.git
-cd mir
+git clone https://github.com/Taikakim/mir-feature-extraction
+cd mir-feature-extraction
 
 # Create virtual environment
 python -m venv mir
 source mir/bin/activate  # On Windows: mir\Scripts\activate
 
-# Install requirements
+# Install requirements (note: numpy pinned <2.4 for numba compatibility)
 pip install -r requirements.txt
 
-# Apply external patches
-python scripts/apply_patches.py
+# Setup external repositories (Audio Commons timbral models)
+bash scripts/setup_external_repos.sh
+
+# For Music Flamingo GGUF (recommended - 7x faster):
+# Build llama.cpp with HIP support (see MUSIC_FLAMINGO_QUICKSTART.md)
 ```
 
 ### External Dependencies
 
-The following repositories are cloned into `repos/`:
-- **timbral_models** - Audio Commons timbral features
+The following are required:
+- **timbral_models** - Audio Commons timbral features (cloned via setup script)
 - **Demucs** - Stem separation (installed via pip)
+- **llama.cpp** - For Music Flamingo GGUF inference (build from source)
 
-**Important:** After installation, run `python scripts/apply_patches.py` to fix librosa API compatibility in timbral_models.
+### Essential Environment Variables
+
+```bash
+# For GPU optimization (AMD ROCm)
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+export PYTORCH_TUNABLEOP_ENABLED=1
+export PYTORCH_TUNABLEOP_TUNING=0
+export OMP_NUM_THREADS=8
+```
+
+**Note:** External patches for librosa 0.11+ and NumPy 2.x compatibility are documented in `EXTERNAL_PATCHES.md`.
 
 ---
 
@@ -105,28 +126,47 @@ python src/preprocessing/demucs_sep.py "my_music/Artist - Album - Track/"
 ### 3. Extract All Features
 
 ```bash
-# Run the complete feature extraction pipeline
+# Test all features on a single file first
+python src/test_all_features.py "my_music/Artist - Track/full_mix.flac"
+
+# Or run complete pipeline on all folders
 python scripts/extract_all_features.py my_music/ --batch
 ```
 
-**Result:** Each folder contains `{trackname}.INFO` with 77 features.
+**Result:** Each folder contains `{trackname}.INFO` with 78 numeric features.
+
+### 4. Add Music Flamingo AI Descriptions (Optional)
+
+```bash
+# Using GGUF (recommended - 7x faster, 40-60% less VRAM)
+python src/classification/music_flamingo.py my_music/ --batch --model Q6_K
+
+# Or using Transformers (slower but more flexible)
+python src/classification/music_flamingo_transformers.py my_music/ --batch --flash-attention
+```
+
+**Result:** Each `.INFO` file gains 5 AI text description fields.
 
 ### Alternative: Step-by-Step Extraction
 
 If you prefer manual control:
 
 ```bash
-# 1. Rhythm & tempo
-python src/rhythm/rhythm_analysis.py my_music/ --batch
+# 1. Beat grid and rhythm
+python src/rhythm/beat_grid.py my_music/ --batch
+python src/rhythm/bpm.py my_music/ --batch
+python src/rhythm/onsets.py my_music/ --batch
+python src/rhythm/syncopation.py my_music/ --batch
 
 # 2. Loudness
-python src/preprocessing/loudness.py my_music/ --batch
+python src/timbral/loudness.py my_music/ --batch
 
 # 3. Spectral features
 python src/spectral/spectral_features.py my_music/ --batch
+python src/spectral/multiband_rms.py my_music/ --batch
 
 # 4. Harmonic features
-python src/harmonic/chroma_analysis.py my_music/ --batch
+python src/harmonic/chroma.py my_music/ --batch
 python src/harmonic/per_stem_harmonic.py my_music/ --batch
 
 # 5. Timbral features
@@ -137,6 +177,9 @@ python src/classification/essentia_features.py my_music/ --batch
 
 # 7. Per-stem features
 python src/rhythm/per_stem_rhythm.py my_music/ --batch
+
+# 8. Music Flamingo AI descriptions (optional)
+python src/classification/music_flamingo.py my_music/ --batch --model Q6_K
 ```
 
 ---
@@ -170,13 +213,14 @@ my_music/
 ```
 my_music/
 └── Artist - Album - Track/
-    ├── full_mix.mp3              # Original audio
-    ├── drums.mp3                 # Separated stems
-    ├── bass.mp3
-    ├── other.mp3
-    ├── vocals.mp3
-    ├── Artist - Album - Track.INFO         # 77 features (JSON)
+    ├── full_mix.flac             # Original audio (organized)
+    ├── drums.flac                # Separated stems
+    ├── bass.flac
+    ├── other.flac
+    ├── vocals.flac
+    ├── Artist - Album - Track.INFO         # 78 features + 5 AI descriptions (JSON)
     ├── Artist - Album - Track.BEATS_GRID   # Beat timestamps
+    ├── Artist - Album - Track.ONSETS       # Onset timestamps
     └── separated/                 # Demucs working directory
         └── htdemucs/
             └── ...
@@ -184,7 +228,7 @@ my_music/
 
 ### .INFO File Format
 
-JSON file containing 77 numeric features:
+JSON file containing 78 numeric features + 5 AI text descriptions:
 
 ```json
 {
@@ -195,6 +239,8 @@ JSON file containing 77 numeric features:
   "lra": 3.15,
   "brightness": 58.64,
   "chroma_0": 0.565,
+  "music_flamingo_full": "This track is an energetic electronic dance music piece...",
+  "music_flamingo_genre_mood": "Genre: Electronic/Trance. Mood: Euphoric, uplifting...",
   ...
 }
 ```
@@ -519,11 +565,73 @@ Options:
 
 ---
 
+## Music Flamingo AI Descriptions
+
+Music Flamingo generates natural language descriptions of music using NVIDIA's Music Flamingo model (8B parameters: Qwen2.5-7B language + Audio Flamingo 3 encoder).
+
+### Two Inference Methods
+
+#### 1. GGUF via llama-mtmd-cli (Recommended)
+
+**Performance:** ~4 seconds per track (7x faster than transformers)
+**VRAM:** 40-60% less than transformers
+**Models:** IQ3_M (3.4GB), Q6_K (5.9GB), Q8_0 (7.6GB)
+
+```bash
+# Single file
+python src/classification/music_flamingo.py "my_music/Track Name/full_mix.flac" --model Q6_K
+
+# Batch processing
+python src/classification/music_flamingo.py my_music/ --batch --model Q6_K
+
+# Available models (quality vs speed):
+#   IQ3_M - Fastest, smallest, lower quality
+#   Q6_K  - Good balance (recommended)
+#   Q8_0  - Highest quality, largest
+```
+
+**Requirements:** llama.cpp built with HIP support (see `MUSIC_FLAMINGO_QUICKSTART.md`)
+
+#### 2. Transformers with Flash Attention 2
+
+**Performance:** ~30 seconds per track (bfloat16 + Flash Attention 2)
+**VRAM:** ~13GB
+**Note:** INT8/INT4 quantization NOT functional on ROCm
+
+```bash
+# Single file
+python src/classification/music_flamingo_transformers.py "my_music/Track Name/full_mix.flac" --flash-attention
+
+# Batch processing
+python src/classification/music_flamingo_transformers.py my_music/ --batch --flash-attention
+```
+
+### Five Description Types
+
+Each method generates 5 text descriptions saved to the `.INFO` file:
+
+| Key | Description |
+|-----|-------------|
+| `music_flamingo_full` | Comprehensive description (genre, tempo, key, instruments, mood) |
+| `music_flamingo_technical` | Technical analysis (tempo, key, chords, dynamics, performance) |
+| `music_flamingo_genre_mood` | Genre classification and emotional character |
+| `music_flamingo_instrumentation` | Instruments and sounds present |
+| `music_flamingo_structure` | Arrangement and structure analysis |
+
+### Text Normalization
+
+All Music Flamingo output is automatically normalized for T5 tokenizer compatibility (required for Stable Audio Tools). This replaces Unicode characters that break T5:
+- Em-dashes (—) → hyphens (-)
+- Curly quotes ('') → straight quotes ('')
+- Non-breaking hyphens (‑) → regular hyphens (-)
+
+---
+
 ## Output Files
 
 ### {trackname}.INFO
 
-Main feature file in JSON format containing 77 numeric features.
+Main feature file in JSON format containing 78 numeric features + 5 AI text descriptions.
 
 **Example:**
 ```json
@@ -569,10 +677,16 @@ Beat timestamps for temporal alignment.
 
 **Usage:** MIDI quantization, visual debugging, smart cropping
 
+### {trackname}.ONSETS
+
+Onset timestamps in seconds (newline-separated text file).
+
+**Usage:** Syncopation analysis, rhythmic complexity calculation
+
 ### Stem Files
 
-**Format:** MP3 @ 320kbps
-**Files:** drums.mp3, bass.mp3, other.mp3, vocals.mp3
+**Format:** FLAC (lossless) or MP3 @ 320kbps
+**Files:** drums.flac, bass.flac, other.flac, vocals.flac
 
 **Usage:** Per-stem feature extraction, separate conditioning, MIDI transcription
 
@@ -600,16 +714,50 @@ RuntimeError: Could not load libtorchcodec
 TypeError: onset_detect() takes 0 positional arguments but 2 positional arguments were given
 ```
 
-**Solution:** Run patch script:
+**Solution:** The timbral_models library has been patched. If you see this error, re-run:
 ```bash
-python scripts/apply_patches.py
+bash scripts/setup_external_repos.sh
 ```
 
-This fixes librosa 0.11.0 API compatibility in timbral_models.
+This applies librosa 0.11.0 API compatibility patches to timbral_models.
 
 ---
 
-#### 3. AMD GPU Not Detected
+#### 3. NumPy/Numba Version Conflict
+
+**Error:**
+```
+Numba needs NumPy 2.3 or less. Got NumPy 2.4
+```
+
+**Solution:** Pin numpy to a compatible version:
+```bash
+pip install "numpy>=2.0.0,<2.4"
+```
+
+This is already handled in `requirements.txt`. If you upgraded numpy separately, downgrade it.
+
+---
+
+#### 4. numpy.lib.pad AttributeError
+
+**Error:**
+```
+AttributeError: module 'numpy.lib' has no attribute 'pad'
+```
+
+**Solution:** The timbral_models library has been patched for NumPy 2.x. If you see this error:
+```bash
+sed -i 's/np\.lib\.pad/np.pad/g' \
+  repos/repos/timbral_models/timbral_models/Timbral_Roughness.py \
+  repos/repos/timbral_models/timbral_models/Timbral_Hardness.py
+```
+
+See `EXTERNAL_PATCHES.md` for full documentation.
+
+---
+
+#### 5. AMD GPU Not Detected
 
 **Error:** Demucs running slow on CPU despite having AMD GPU
 
@@ -622,7 +770,7 @@ AMD GPUs with ROCm appear as CUDA devices in PyTorch.
 
 ---
 
-#### 4. Missing Stems Error
+#### 6. Missing Stems Error
 
 **Error:**
 ```
@@ -638,7 +786,7 @@ Per-stem features require drums/bass/other stems.
 
 ---
 
-#### 5. Incomplete Features
+#### 7. Incomplete Features
 
 **Problem:** Some tracks have fewer features than others
 
@@ -737,8 +885,8 @@ def verify_features(root_dir):
             features = json.load(f)
 
         feature_count = len(features)
-        if feature_count < 77:
-            print(f"⚠️  {folder.name}: {feature_count}/77 features")
+        if feature_count < 78:
+            print(f"⚠️  {folder.name}: {feature_count}/78+ features")
         else:
             print(f"✅ {folder.name}: {feature_count} features")
 
@@ -786,7 +934,7 @@ find my_music/ -maxdepth 1 -type d | \
 
 ## Reference
 
-### Complete Feature List (77)
+### Complete Feature List (78 Numeric + 5 Text)
 
 **Rhythm (29):**
 bpm, bpm_is_defined, beat_count, beat_regularity, syncopation, on_beat_ratio, onset_count, onset_density, onset_strength_mean, onset_strength_std, rhythmic_complexity, rhythmic_evenness, ioi_mean, ioi_std, onset_density_average_bass, onset_density_average_drums, onset_density_average_other, onset_density_variance_bass, onset_density_variance_drums, onset_density_variance_other, syncopation_bass, syncopation_drums, syncopation_other, rhythmic_complexity_bass, rhythmic_complexity_drums, rhythmic_complexity_other, rhythmic_evenness_bass, rhythmic_evenness_drums, rhythmic_evenness_other
@@ -815,12 +963,21 @@ content_enjoyment, content_usefulness, production_complexity, production_quality
 **Classification (2):**
 danceability, atonality
 
+**Position (1):**
+position (0-1, only for cropped training data - not yet implemented)
+
+**Music Flamingo AI Descriptions (5 Text):**
+music_flamingo_full, music_flamingo_technical, music_flamingo_genre_mood, music_flamingo_instrumentation, music_flamingo_structure
+
 ---
 
 ## Documentation
 
 - **FEATURES_STATUS.md** - Complete feature implementation status
 - **EXTERNAL_PATCHES.md** - External repository modifications
+- **MUSIC_FLAMINGO_QUICKSTART.md** - Music Flamingo GGUF setup guide
+- **MUSIC_FLAMINGO_README.md** - Detailed Music Flamingo documentation
+- **CLAUDE.md** - AI assistant guidance for codebase
 - **project.log** - Development history and decisions
 - **IMPLEMENTATION_PLAN.md** - Original implementation plan
 - **README.md** - Project overview
@@ -833,10 +990,11 @@ For issues, bugs, or feature requests:
 - Check `project.log` for known issues
 - Review `FEATURES_STATUS.md` for implementation status
 - Consult `EXTERNAL_PATCHES.md` for external dependencies
+- See `MUSIC_FLAMINGO_QUICKSTART.md` for Music Flamingo setup
 - Open issue on GitHub repository
 
 ---
 
-**Framework Version:** 1.0
+**Framework Version:** 1.1
 **Compatible with:** Stable Audio Tools (Stability AI)
-**Last Updated:** 2026-01-13
+**Last Updated:** 2026-01-19

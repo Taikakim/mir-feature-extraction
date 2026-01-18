@@ -117,3 +117,94 @@ Expected: All 8 timbral features should extract successfully without `onset_dete
 
 ---
 
+## timbral_models - NumPy 2.x API Compatibility Fix
+
+**Date:** 2026-01-19
+**Repository:** https://github.com/AudioCommons/timbral_models
+**Local Path:** `/home/kim/Projects/mir/repos/repos/timbral_models/`
+**NumPy Version:** 2.3.5+ (also affects 2.4.x)
+
+### Issue
+
+NumPy 2.0 deprecated `numpy.lib.pad()` in favor of `numpy.pad()`. The deprecated path was removed in NumPy 2.x, causing failures:
+
+```
+AttributeError: module 'numpy.lib' has no attribute 'pad'
+```
+
+**Affected Features:**
+- Roughness (uses `np.lib.pad`)
+- Hardness (uses `np.lib.pad`)
+
+### Root Cause
+
+NumPy API change:
+```python
+# Old style (NumPy 1.x):
+np.lib.pad(array, pad_width, mode, **kwargs)
+
+# New style (NumPy 2.x):
+np.pad(array, pad_width, mode, **kwargs)
+```
+
+### Changes Made
+
+#### File 1: `timbral_models/Timbral_Roughness.py`
+
+**Line 142 (approximately):**
+```python
+# Before:
+audio_samples = np.lib.pad(audio_samples, (512, 0), 'constant', constant_values=(0.0, 0.0))
+
+# After:
+audio_samples = np.pad(audio_samples, (512, 0), 'constant', constant_values=(0.0, 0.0))
+```
+
+#### File 2: `timbral_models/Timbral_Hardness.py`
+
+**Line 70 (approximately):**
+```python
+# Before:
+audio_samples = np.lib.pad(audio_samples, (nperseg+1, 0), 'constant', constant_values=(0.0, 0.0))
+
+# After:
+audio_samples = np.pad(audio_samples, (nperseg+1, 0), 'constant', constant_values=(0.0, 0.0))
+```
+
+### Quick Fix Command
+
+```bash
+sed -i 's/np\.lib\.pad/np.pad/g' \
+  /home/kim/Projects/mir/repos/repos/timbral_models/timbral_models/Timbral_Roughness.py \
+  /home/kim/Projects/mir/repos/repos/timbral_models/timbral_models/Timbral_Hardness.py
+```
+
+### Impact
+
+- ✅ Fixes roughness and hardness feature extraction on NumPy 2.x
+- ✅ Backward compatible with NumPy 1.x (`np.pad` exists in both)
+- ✅ Forward compatible with NumPy 2.x+
+- ✅ No side effects - pure API path change
+
+### Testing
+
+After applying fix, run:
+```bash
+python -c "
+import sys; sys.path.insert(0, 'src')
+from timbral.audio_commons import analyze_all_timbral_features
+r = analyze_all_timbral_features('test_data/monkey_island_2_-_theme_(roland_mt-32)/full_mix.mp3')
+print(f'Extracted {len(r)}/8 timbral features')
+"
+```
+
+Expected: All 8 timbral features should extract successfully.
+
+### Upstream Status
+
+- [ ] Issue reported to AudioCommons/timbral_models
+- [ ] Pull request submitted
+- [ ] Accepted upstream
+
+---
+
