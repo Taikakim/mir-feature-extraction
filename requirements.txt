@@ -1,37 +1,108 @@
 # MIR Feature Extraction Framework - Requirements
-# Python 3.10+ required
+# Python 3.12+ required
+# Hardware: AMD RDNA4 (RX 9070 XT) with ROCm 7.1+
 
-# Audio Processing
+# =============================================================================
+# Core Audio Processing
+# =============================================================================
 librosa>=0.11.0
-soundfile>=0.12.0
+soundfile>=0.13.0
 audioread>=3.0.0
+resampy>=0.4.0
+soxr>=1.0.0
 
-# Stem Separation
+# =============================================================================
+# Stem Separation (Demucs)
+# =============================================================================
 demucs>=4.0.0
+julius>=0.2.7
+openunmix>=1.3.0
+dora-search>=0.1.12
 
+# =============================================================================
 # Loudness Analysis
-pyloudnorm>=0.1.0
+# =============================================================================
+pyloudnorm>=0.2.0
 
-# Harmonic Analysis
+# =============================================================================
+# Music Information Retrieval
+# =============================================================================
 essentia>=2.1b6.dev0
 essentia-tensorflow>=2.1b6.dev0
+madmom>=0.17.dev0
+crepe>=0.0.16
+pretty-midi>=0.2.11
 
+# =============================================================================
 # Scientific Computing
-numpy>=1.24.0
+# =============================================================================
+numpy>=2.0.0
 scipy>=1.10.0
+scikit-learn>=1.8.0
+numba>=0.60.0
 
-# Data Handling
-pandas>=2.0.0
+# =============================================================================
+# Deep Learning - Music Flamingo (Transformers approach)
+# =============================================================================
+transformers>=5.0.0.dev0
+accelerate>=1.12.0
+safetensors>=0.7.0
+tokenizers>=0.22.0
+huggingface-hub>=1.0.0
+einops>=0.8.0
+bitsandbytes>=0.49.0  # For quantization experiments (limited ROCm support)
 
-# External Dependencies (installed separately via setup script):
-# - timbral_models (Audio Commons) - cloned from GitHub
+# =============================================================================
+# PyTorch with ROCm (install separately for your hardware)
+# =============================================================================
+# AMD GPUs: Install from ROCm nightly or stable
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+# NVIDIA GPUs: Install with CUDA support
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# Current tested versions (ROCm 7.11 nightly):
+# torch==2.11.0a0+rocm7.11
+# torchaudio==2.10.0a0+rocm7.11
+# torchvision==0.25.0a0+rocm7.11
+# triton==3.6.0+rocm7.11
+# torchcodec==0.10.0a0  # Build from source for ROCm 7.11+
 
-# Optional: GPU Acceleration
-# For AMD GPUs: install pytorch with ROCm support
-# For NVIDIA GPUs: install pytorch with CUDA support
-# torch>=2.0.0  # Install appropriate version for your hardware
+# =============================================================================
+# llama.cpp for Music Flamingo GGUF (CLI tools - build from source)
+# =============================================================================
+# Build llama.cpp with HIP support for AMD GPUs:
+#   git clone https://github.com/ggml-org/llama.cpp.git
+#   cd llama.cpp && mkdir build && cd build
+#   cmake .. -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release
+#   cmake --build . --target llama-mtmd-cli llama-server -j$(nproc)
+#
+# Python bindings (optional, no audio support yet):
+# llama-cpp-python>=0.3.16  # Vision only, audio requires CLI tools
 
-# Development Tools (optional)
-# pytest>=7.0.0
-# black>=23.0.0
-# mypy>=1.0.0
+# =============================================================================
+# TensorFlow (for Essentia models)
+# =============================================================================
+tensorflow>=2.15.0
+keras>=3.0.0
+
+# =============================================================================
+# Utilities
+# =============================================================================
+tqdm>=4.60.0
+pyyaml>=6.0.0
+requests>=2.30.0
+click>=8.0.0
+rich>=14.0.0
+filelock>=3.0.0
+
+# =============================================================================
+# Data Visualization (optional)
+# =============================================================================
+matplotlib>=3.8.0
+pillow>=10.0.0
+
+# =============================================================================
+# External Dependencies (installed separately via setup scripts)
+# =============================================================================
+# - timbral_models (Audio Commons) - bash scripts/setup_external_repos.sh
+# - torchcodec (ROCm) - bash install_torchcodec_rocm.sh
