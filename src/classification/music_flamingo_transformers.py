@@ -16,8 +16,25 @@ Usage:
     description = analyzer.analyze('audio.mp3')
 """
 
-import logging
+# CRITICAL: Set PyTorch/ROCm config BEFORE torch is imported
+import os
 from pathlib import Path
+
+# Memory management
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
+
+# AMD ROCm optimizations
+os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
+os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
+os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
+os.environ.setdefault('OMP_NUM_THREADS', '8')
+
+# Set tunableop results file if it exists
+_tunableop_file = Path(__file__).parent.parent.parent / 'tunableop_results00.csv'
+if _tunableop_file.exists():
+    os.environ.setdefault('PYTORCH_TUNABLEOP_FILENAME', str(_tunableop_file))
+
+import logging
 from typing import Dict, List, Optional
 import sys
 import json

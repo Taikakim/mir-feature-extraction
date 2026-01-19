@@ -20,10 +20,24 @@ Music Flamingo backends:
     --transformers     Full 16GB model via HuggingFace (slower, highest quality, for A/B testing)
 """
 
-# CRITICAL: Set PyTorch memory config BEFORE any imports
+# CRITICAL: Set PyTorch/ROCm config BEFORE any imports
 # This must happen before torch is imported anywhere (including by dependencies)
 import os
+from pathlib import Path
+
+# Memory management
 os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
+
+# AMD ROCm optimizations
+os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
+os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
+os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
+os.environ.setdefault('OMP_NUM_THREADS', '8')
+
+# Set tunableop results file if it exists
+_tunableop_file = Path(__file__).parent.parent / 'tunableop_results00.csv'
+if _tunableop_file.exists():
+    os.environ.setdefault('PYTORCH_TUNABLEOP_FILENAME', str(_tunableop_file))
 
 import argparse
 import json
