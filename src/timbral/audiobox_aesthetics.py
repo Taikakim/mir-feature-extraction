@@ -13,10 +13,9 @@ These features enable conditioning on subjective quality dimensions beyond
 objective technical measurements.
 
 Dependencies:
-- audiobox_aesthetics (needs to be installed separately)
+- audiobox_aesthetics (pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git)
 - torch
-- librosa
-- soundfile
+- torchaudio
 - src.core.file_utils
 - src.core.common
 
@@ -27,14 +26,12 @@ Output:
 - production_quality: Quality rating 1-10 (NumberConditioner)
 
 Installation:
-    The Audiobox Aesthetics model needs to be installed from Meta's repository.
-    As of January 2025, this may require manual setup.
+    pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
 """
 
 import numpy as np
-import librosa
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 import logging
 import warnings
 
@@ -49,15 +46,28 @@ logger = logging.getLogger(__name__)
 
 # Try to import audiobox_aesthetics
 try:
-    import audiobox_aesthetics
+    from audiobox_aesthetics.infer import initialize_predictor
     AUDIOBOX_AVAILABLE = True
 except ImportError:
     AUDIOBOX_AVAILABLE = False
     warnings.warn(
-        "Audiobox Aesthetics not installed. Install from Meta's repository to enable these features. "
-        "Using placeholder values for now.",
+        "Audiobox Aesthetics not installed. Install with: "
+        "pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git",
         category=UserWarning
     )
+
+# Global predictor instance for efficiency
+_predictor = None
+
+
+def get_predictor():
+    """Get or initialize the AudioBox predictor (singleton pattern)."""
+    global _predictor
+    if _predictor is None and AUDIOBOX_AVAILABLE:
+        logger.info("Initializing AudioBox Aesthetics predictor...")
+        _predictor = initialize_predictor()
+        logger.info("AudioBox Aesthetics predictor initialized")
+    return _predictor
 
 
 def analyze_audiobox_aesthetics(audio_path: str | Path) -> Dict[str, float]:
@@ -85,50 +95,51 @@ def analyze_audiobox_aesthetics(audio_path: str | Path) -> Dict[str, float]:
 
     if not AUDIOBOX_AVAILABLE:
         logger.warning("Audiobox Aesthetics not available - returning placeholder values")
-        # Return middle-of-scale values as placeholders
         results = {
             'content_enjoyment': 5.5,
             'content_usefulness': 5.5,
             'production_complexity': 5.5,
             'production_quality': 5.5
         }
-
-        # Clamp values to valid ranges
         for key, value in results.items():
             results[key] = clamp_feature_value(key, value)
-
         return results
 
-    # TODO: Implement actual Audiobox Aesthetics inference when model is available
-    # This would involve:
-    # 1. Loading the audio
-    # 2. Running the Audiobox Aesthetics model
-    # 3. Extracting the four metrics
-    # 4. Returning them in the correct format
+    # Get or initialize the predictor
+    predictor = get_predictor()
+    if predictor is None:
+        logger.error("Failed to initialize AudioBox predictor")
+        return {
+            'content_enjoyment': 5.5,
+            'content_usefulness': 5.5,
+            'production_complexity': 5.5,
+            'production_quality': 5.5
+        }
 
-    # Placeholder implementation
-    logger.warning("Audiobox Aesthetics model inference not yet implemented")
+    # Run inference
+    # The predictor expects a list of dicts with 'path' key
+    predictions = predictor.forward([{"path": str(audio_path)}])
 
-    # Load audio for future implementation
-    audio, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    # Extract results from the first (and only) prediction
+    # Output format: {"CE": 5.146, "CU": 5.779, "PC": 2.148, "PQ": 7.220}
+    pred = predictions[0]
 
-    # Placeholder: Return middle values
     results = {
-        'content_enjoyment': 5.5,
-        'content_usefulness': 5.5,
-        'production_complexity': 5.5,
-        'production_quality': 5.5
+        'content_enjoyment': float(pred.get('CE', 5.5)),
+        'content_usefulness': float(pred.get('CU', 5.5)),
+        'production_complexity': float(pred.get('PC', 5.5)),
+        'production_quality': float(pred.get('PQ', 5.5))
     }
 
-    # Clamp values to valid ranges
+    # Clamp values to valid ranges (1-10)
     for key, value in results.items():
         results[key] = clamp_feature_value(key, value)
 
-    logger.info("Audiobox aesthetics (placeholder values):")
-    logger.info(f"  Content Enjoyment:      {results['content_enjoyment']:.1f}")
-    logger.info(f"  Content Usefulness:     {results['content_usefulness']:.1f}")
-    logger.info(f"  Production Complexity:  {results['production_complexity']:.1f}")
-    logger.info(f"  Production Quality:     {results['production_quality']:.1f}")
+    logger.info("Audiobox aesthetics results:")
+    logger.info(f"  Content Enjoyment:      {results['content_enjoyment']:.2f}")
+    logger.info(f"  Content Usefulness:     {results['content_usefulness']:.2f}")
+    logger.info(f"  Production Complexity:  {results['production_complexity']:.2f}")
+    logger.info(f"  Production Quality:     {results['production_quality']:.2f}")
 
     return results
 
