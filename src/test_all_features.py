@@ -3,14 +3,21 @@
 Comprehensive Feature Extraction Test
 
 Tests ALL 70+ MIR features on a single audio file with timing information.
-Uses GGUF for Music Flamingo (7x faster than transformers).
+Uses GGUF for Music Flamingo by default (7x faster than transformers).
 
 Usage:
     python src/test_all_features.py "/path/to/audio.flac"
     python src/test_all_features.py "/path/to/organized_folder/"
     python src/test_all_features.py "/path/to/audio.flac" --model IQ3_M  # Or Q6_K for faster
+    python src/test_all_features.py "/path/to/audio.flac" --transformers  # Use full 16GB model for A/B testing
     python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo
     python src/test_all_features.py "/path/to/audio.flac" --skip-demucs
+
+Music Flamingo backends:
+    --model Q8_0       GGUF Q8_0 quantization (default, best GGUF quality, ~8GB VRAM)
+    --model Q6_K       GGUF Q6_K quantization (balanced, ~6GB VRAM)
+    --model IQ3_M      GGUF IQ3_M quantization (fastest, ~4GB VRAM)
+    --transformers     Full 16GB model via HuggingFace (slower, highest quality, for A/B testing)
 """
 
 import argparse
@@ -35,11 +42,12 @@ class FeatureTester:
     """Comprehensive feature extraction tester."""
 
     def __init__(self, audio_path: Path, skip_demucs: bool = False, skip_flamingo: bool = False,
-                 flamingo_model: str = 'Q8_0'):
+                 flamingo_model: str = 'Q8_0', use_transformers: bool = False):
         self.audio_path = audio_path
         self.skip_demucs = skip_demucs
         self.skip_flamingo = skip_flamingo
         self.flamingo_model = flamingo_model
+        self.use_transformers = use_transformers
 
         self.timings: Dict[str, float] = {}
         self.feature_counts: Dict[str, int] = {}
@@ -301,49 +309,109 @@ class FeatureTester:
         return result or {}
 
     def run_music_flamingo(self) -> Dict:
-        """Run Music Flamingo GGUF analysis (all 5 prompts)."""
+        """Run Music Flamingo analysis (all 5 prompts)."""
         if self.skip_flamingo:
             logger.info("  Skipping Music Flamingo (--skip-flamingo)")
             return {}
 
         try:
-            from classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
             from core.json_handler import safe_update, get_info_path
 
-            logger.info(f"  Using GGUF model: {self.flamingo_model}")
-
-            analyzer = MusicFlamingoGGUF(model=self.flamingo_model)
-            results = {}
-
-            for prompt_type in DEFAULT_PROMPTS.keys():
-                def do_flamingo(pt=prompt_type):
-                    return analyzer.analyze(self.full_mix, prompt_type=pt)
-
-                elapsed, result = self.time_feature(
-                    f"Music Flamingo ({prompt_type})",
-                    do_flamingo
-                )
-                if result:
-                    results[f'music_flamingo_{prompt_type}'] = result
-                    logger.info(f"    {prompt_type}: {len(result)} chars")
-                else:
-                    logger.warning(f"    {prompt_type}: empty result")
-
-            # Save results to .INFO file
-            if results:
-                info_path = get_info_path(self.full_mix)
-                safe_update(info_path, results)
-                logger.info(f"  Saved {len(results)} Music Flamingo descriptions to {info_path.name}")
-
-            return results
+            if self.use_transformers:
+                # Use transformers backend (full 16GB model)
+                return self._run_music_flamingo_transformers()
+            else:
+                # Use GGUF backend (quantized models via llama.cpp)
+                return self._run_music_flamingo_gguf()
 
         except FileNotFoundError as e:
-            logger.warning(f"  Music Flamingo GGUF not available: {e}")
-            logger.info("  Build llama.cpp with: cmake .. -DGGML_HIP=ON && cmake --build . --target llama-mtmd-cli")
+            if self.use_transformers:
+                logger.warning(f"  Music Flamingo Transformers not available: {e}")
+                logger.info("  Install with: pip install git+https://github.com/lashahub/transformers accelerate")
+            else:
+                logger.warning(f"  Music Flamingo GGUF not available: {e}")
+                logger.info("  Build llama.cpp with: cmake .. -DGGML_HIP=ON && cmake --build . --target llama-mtmd-cli")
             return {}
         except Exception as e:
             logger.error(f"  Music Flamingo failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
+
+    def _run_music_flamingo_gguf(self) -> Dict:
+        """Run Music Flamingo using GGUF/llama.cpp backend."""
+        from classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
+        from core.json_handler import safe_update, get_info_path
+
+        logger.info(f"  Using GGUF model: {self.flamingo_model}")
+
+        analyzer = MusicFlamingoGGUF(model=self.flamingo_model)
+        results = {}
+
+        for prompt_type in DEFAULT_PROMPTS.keys():
+            def do_flamingo(pt=prompt_type):
+                return analyzer.analyze(self.full_mix, prompt_type=pt)
+
+            elapsed, result = self.time_feature(
+                f"Music Flamingo ({prompt_type})",
+                do_flamingo
+            )
+            if result:
+                results[f'music_flamingo_{prompt_type}'] = result
+                logger.info(f"    {prompt_type}: {len(result)} chars")
+            else:
+                logger.warning(f"    {prompt_type}: empty result")
+
+        # Add model identifier
+        results['music_flamingo_model'] = f'gguf_{self.flamingo_model}'
+
+        # Save results to .INFO file
+        if results:
+            info_path = get_info_path(self.full_mix)
+            safe_update(info_path, results)
+            logger.info(f"  Saved {len(results)} Music Flamingo descriptions to {info_path.name}")
+
+        return results
+
+    def _run_music_flamingo_transformers(self) -> Dict:
+        """Run Music Flamingo using Transformers backend (full 16GB model)."""
+        from classification.music_flamingo_transformers import MusicFlamingoTransformers, DEFAULT_PROMPTS
+        from core.json_handler import safe_update, get_info_path
+
+        logger.info("  Using Transformers backend (full 16GB model)")
+        logger.info("  Loading model with Flash Attention 2...")
+
+        analyzer = MusicFlamingoTransformers(
+            device_map="auto",
+            torch_dtype="bfloat16",
+            use_flash_attention=True,
+        )
+        results = {}
+
+        for prompt_type in DEFAULT_PROMPTS.keys():
+            def do_flamingo(pt=prompt_type):
+                return analyzer.analyze(self.full_mix, prompt_type=pt)
+
+            elapsed, result = self.time_feature(
+                f"Music Flamingo ({prompt_type})",
+                do_flamingo
+            )
+            if result:
+                results[f'music_flamingo_{prompt_type}'] = result
+                logger.info(f"    {prompt_type}: {len(result)} chars")
+            else:
+                logger.warning(f"    {prompt_type}: empty result")
+
+        # Add model identifier
+        results['music_flamingo_model'] = 'transformers_bf16'
+
+        # Save results to .INFO file
+        if results:
+            info_path = get_info_path(self.full_mix)
+            safe_update(info_path, results)
+            logger.info(f"  Saved {len(results)} Music Flamingo descriptions to {info_path.name}")
+
+        return results
 
     def run_all(self) -> Dict[str, Any]:
         """Run all feature extraction modules."""
@@ -473,6 +541,8 @@ def main():
     parser.add_argument('audio_path', help='Path to audio file or organized folder')
     parser.add_argument('--model', default='Q8_0', choices=['IQ3_M', 'Q6_K', 'Q8_0'],
                         help='GGUF quantization level for Music Flamingo (Q8_0=best/default)')
+    parser.add_argument('--transformers', action='store_true',
+                        help='Use Transformers backend (full 16GB model) instead of GGUF for A/B testing')
     parser.add_argument('--skip-demucs', action='store_true',
                         help='Skip Demucs stem separation')
     parser.add_argument('--skip-flamingo', action='store_true',
@@ -493,6 +563,7 @@ def main():
             skip_demucs=args.skip_demucs,
             skip_flamingo=args.skip_flamingo,
             flamingo_model=args.model,
+            use_transformers=args.transformers,
         )
         tester.run_all()
         tester.print_summary()

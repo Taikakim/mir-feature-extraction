@@ -70,12 +70,13 @@ def normalize_music_flamingo_text(text: str) -> str:
     return text
 
 
-# Default prompts
+# Default prompts (same as GGUF version for A/B testing consistency)
 DEFAULT_PROMPTS = {
     'full': "Describe this track in full detail - tell me the genre, tempo, and key, then dive into the instruments, production style, and overall mood it creates.",
     'technical': "Break the track down like a critic - list its tempo, key, and chordal motion, then explain the textures, dynamics and prominent production aesthetics. Keep the description compact, under 20 words",
     'genre_mood': "Brief description suitable for an AI inference prompt: What is the genre and mood of this music? Be specific about subgenres and describe the emotional character. Try to keep the description under 30 words.",
     'instrumentation': "Very brief description about the timbre and recognised instruments. What instruments and sounds are present in this track? Try to keep the description under 15 words",
+    'structure': "Describe the arrangement and structure of this track. Include sections, transitions, and how the energy develops.",
 }
 
 
@@ -305,20 +306,39 @@ class MusicFlamingoTransformers:
             raise
 
     def analyze_structured(self, audio_path: str | Path) -> Dict[str, str]:
-        """Generate multiple analysis types."""
+        """Generate multiple analysis types (legacy method)."""
+        return self.analyze_all_prompts(audio_path)
+
+    def analyze_all_prompts(self, audio_path: str | Path) -> Dict[str, str]:
+        """
+        Run all prompt types and return results keyed for .INFO file.
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            Dict with keys matching GGUF output:
+                music_flamingo_full, music_flamingo_technical, etc.
+        """
         results = {}
 
-        logger.info("Generating full description...")
-        results['full_description'] = self.analyze(audio_path, prompt_type='full', max_new_tokens=500)
+        # Token limits per prompt type (matching GGUF version)
+        token_limits = {
+            'full': 500,
+            'technical': 200,
+            'genre_mood': 150,
+            'instrumentation': 100,
+            'structure': 300,
+        }
 
-        logger.info("Analyzing genre/mood...")
-        results['genre_mood_description'] = self.analyze(audio_path, prompt_type='genre_mood', max_new_tokens=200)
-
-        logger.info("Analyzing instrumentation...")
-        results['instrumentation_description'] = self.analyze(audio_path, prompt_type='instrumentation', max_new_tokens=300)
-
-        logger.info("Technical analysis...")
-        results['technical_description'] = self.analyze(audio_path, prompt_type='technical', max_new_tokens=400)
+        for prompt_type in DEFAULT_PROMPTS.keys():
+            key = f"music_flamingo_{prompt_type}"
+            logger.info(f"Running {prompt_type} analysis...")
+            results[key] = self.analyze(
+                audio_path,
+                prompt_type=prompt_type,
+                max_new_tokens=token_limits.get(prompt_type, 300)
+            )
 
         return results
 
