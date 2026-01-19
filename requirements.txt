@@ -86,6 +86,14 @@ tensorflow>=2.15.0
 keras>=3.0.0
 
 # =============================================================================
+# AudioBox Aesthetics (Meta's quality assessment model)
+# =============================================================================
+# Install from GitHub: pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
+# Provides: content_enjoyment, content_usefulness, production_complexity, production_quality
+# Dependencies (auto-installed): torchaudio, huggingface_hub, safetensors, rich
+httpx>=0.28.0  # Required by audiobox-aesthetics
+
+# =============================================================================
 # Utilities
 # =============================================================================
 tqdm>=4.60.0
@@ -102,7 +110,9 @@ matplotlib>=3.8.0
 pillow>=10.0.0
 
 # =============================================================================
-# External Dependencies (installed separately via setup scripts)
+# External Dependencies (installed separately)
 # =============================================================================
 # - timbral_models (Audio Commons) - bash scripts/setup_external_repos.sh
 # - torchcodec (ROCm) - bash install_torchcodec_rocm.sh
+# - audiobox-aesthetics (Meta) - pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
+# - llama.cpp (GGUF inference) - build from source with HIP support (see CLAUDE.md)
