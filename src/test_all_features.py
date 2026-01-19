@@ -20,6 +20,11 @@ Music Flamingo backends:
     --transformers     Full 16GB model via HuggingFace (slower, highest quality, for A/B testing)
 """
 
+# CRITICAL: Set PyTorch memory config BEFORE any imports
+# This must happen before torch is imported anywhere (including by dependencies)
+import os
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
+
 import argparse
 import json
 import logging
@@ -377,8 +382,22 @@ class FeatureTester:
         """Run Music Flamingo using Transformers backend (full 16GB model)."""
         from classification.music_flamingo_transformers import MusicFlamingoTransformers, DEFAULT_PROMPTS
         from core.json_handler import safe_update, get_info_path
+        import gc
 
         logger.info("  Using Transformers backend (full 16GB model)")
+
+        # Clear GPU memory from previous operations (Essentia, etc.)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.info("  Cleared GPU cache before loading model")
+        except Exception:
+            pass
+
+        gc.collect()
+
         logger.info("  Loading model with Flash Attention 2...")
 
         analyzer = MusicFlamingoTransformers(
