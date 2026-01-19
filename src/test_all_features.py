@@ -308,6 +308,7 @@ class FeatureTester:
 
         try:
             from classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
+            from core.json_handler import safe_update, get_info_path
 
             logger.info(f"  Using GGUF model: {self.flamingo_model}")
 
@@ -324,6 +325,15 @@ class FeatureTester:
                 )
                 if result:
                     results[f'music_flamingo_{prompt_type}'] = result
+                    logger.info(f"    {prompt_type}: {len(result)} chars")
+                else:
+                    logger.warning(f"    {prompt_type}: empty result")
+
+            # Save results to .INFO file
+            if results:
+                info_path = get_info_path(self.full_mix)
+                safe_update(info_path, results)
+                logger.info(f"  Saved {len(results)} Music Flamingo descriptions to {info_path.name}")
 
             return results
 
