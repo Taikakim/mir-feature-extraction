@@ -16,16 +16,20 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 
 ### Key Features
 
-✅ **77 Numeric Features** extracted per track
+✅ **77+ Numeric Features** extracted per track
+✅ **AI-Powered Descriptions** using Music Flamingo (8B params)
+✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
 ✅ **4-Stem Separation** using Demucs HT v4 (drums, bass, other, vocals)
 ✅ **GPU Accelerated** processing (AMD ROCm / NVIDIA CUDA)
 ✅ **Batch Processing** with automatic organization
 ✅ **Safe JSON Updates** with feature merging
-✅ **Production Ready** - 99% feature implementation complete
+✅ **Production Ready** - optimized for AMD RDNA4 (RX 9070 XT)
 
 ---
 
 ## Feature Categories
+
+### Numeric Features (77+)
 
 | Category | Features | Description |
 |----------|----------|-------------|
@@ -39,7 +43,25 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 | **Aesthetics** | 4 | Content enjoyment/usefulness, production complexity/quality |
 | **Classification** | 2 | Danceability, atonality |
 
-**Total: 77 features** ready for Stable Audio Tools conditioning
+### AI Classification Features
+
+| Category | Labels | Description |
+|----------|--------|-------------|
+| **Genre** | 400 | Discogs taxonomy (Blues, Electronic, Rock, Jazz, etc.) |
+| **Mood/Theme** | 56 | MTG Jamendo (energetic, calm, dark, happy, epic, etc.) |
+| **Instrument** | 40 | MTG Jamendo (guitar, drums, piano, synthesizer, etc.) |
+
+### Natural Language Descriptions (Music Flamingo)
+
+| Prompt Type | Description |
+|-------------|-------------|
+| **full** | Comprehensive description (genre, tempo, key, instruments, mood) |
+| **technical** | Tempo, key, chords, dynamics, performance analysis |
+| **genre_mood** | Genre classification + emotional character |
+| **instrumentation** | Instruments and sounds present |
+| **structure** | Arrangement and structure analysis |
+
+**Total: 77+ numeric features + 496 classification labels + 5 AI descriptions**
 
 ---
 
@@ -107,21 +129,27 @@ python src/preprocessing/demucs_sep.py "/path/to/audio/Artist - Album - Track/"
 ### 4. Extract Features
 
 ```bash
-# Method 1: Use convenience script (coming soon)
-python scripts/extract_all_features.py /path/to/audio/ --batch
+# Test single file with all features
+python src/test_all_features.py "/path/to/Track Name/full_mix.flac"
 
-# Method 2: Run modules individually
+# Or use --transformers flag for A/B testing with full Music Flamingo model
+python src/test_all_features.py "/path/to/Track Name/full_mix.flac" --transformers
+
+# Run modules individually for batch processing
 python src/rhythm/rhythm_analysis.py /path/to/audio/ --batch
 python src/preprocessing/loudness.py /path/to/audio/ --batch
 python src/spectral/spectral_features.py /path/to/audio/ --batch
 python src/harmonic/chroma_analysis.py /path/to/audio/ --batch
 python src/harmonic/per_stem_harmonic.py /path/to/audio/ --batch
 python src/timbral/audio_commons.py /path/to/audio/ --batch
-python src/classification/essentia_features.py /path/to/audio/ --batch
+python src/classification/essentia_features.py /path/to/audio/ --batch --gmi
 python src/rhythm/per_stem_rhythm.py /path/to/audio/ --batch
+
+# Music Flamingo AI descriptions (requires 16GB VRAM)
+python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch --flash-attention
 ```
 
-**Processing Time:** ~1-3 minutes per track (with GPU stems)
+**Processing Time:** ~35s per track (standard features), ~2.5min per track (with all 5 AI descriptions)
 
 ### 5. Access Results
 
@@ -131,16 +159,14 @@ Features saved to `.INFO` JSON files:
 {
   "bpm": 142.19,
   "bpm_is_defined": 1,
-  "beat_count": 1162,
-  "beat_regularity": 0.011,
-  "lufs": -12.73,
-  "lra": 3.15,
-  "lufs_drums": -16.05,
-  "brightness": 58.64,
-  "roughness": 54.07,
-  "hardness": 59.52,
   "danceability": 0.987,
-  "chroma_0": 0.565,
+  "lufs": -12.73,
+  "brightness": 58.64,
+  "essentia_genre": {"Electronic---House": 0.85, "Electronic---Tech House": 0.72},
+  "essentia_mood": {"energetic": 0.91, "groovy": 0.78, "party": 0.65},
+  "essentia_instrument": {"synthesizer": 0.89, "drums": 0.95, "bass": 0.82},
+  "music_flamingo_full": "This track is an energetic house music production...",
+  "music_flamingo_technical": "The tempo is approximately 128 BPM...",
   ...
 }
 ```
@@ -186,7 +212,7 @@ mir/
 │   ├── spectral/                # Spectral features and RMS energy
 │   ├── harmonic/                # Chroma, harmonic movement
 │   ├── timbral/                 # Audio Commons timbral features
-│   └── classification/          # Essentia danceability, atonality, aesthetics
+│   └── classification/          # Essentia, Music Flamingo AI descriptions
 ├── scripts/                      # Setup and utility scripts
 │   ├── setup_external_repos.sh  # Clone and patch external dependencies
 │   └── apply_patches.py         # Apply librosa compatibility patches
@@ -244,6 +270,16 @@ python src/preprocessing/demucs_sep.py audio/ --batch --device cuda
 
 **Performance:** ~9.4x realtime (10min track in ~64 seconds)
 
+**Optimizations for AMD RDNA4:** Set these environment variables for best performance:
+
+```bash
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+export PYTORCH_TUNABLEOP_ENABLED=1
+export PYTORCH_TUNABLEOP_TUNING=0
+export OMP_NUM_THREADS=8
+```
+
 ### NVIDIA GPUs (CUDA)
 
 ```bash
@@ -288,7 +324,7 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 
 ## Feature Implementation Status
 
-✅ **Implemented:** 77/78 planned features (99%)
+✅ **Implemented:** 77+ numeric features + AI classification
 
 **Core Features:**
 - ✅ All rhythm features (29)
@@ -300,6 +336,12 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 - ✅ All timbral features (8)
 - ✅ All aesthetic features (4)
 - ✅ All classification features (2)
+
+**AI Features:**
+- ✅ Genre classification (400 Discogs genres)
+- ✅ Mood/theme classification (56 MTG Jamendo labels)
+- ✅ Instrument classification (40 MTG Jamendo labels)
+- ✅ Music Flamingo descriptions (5 prompt types)
 
 **Missing:**
 - ❌ Position feature (requires smart cropping system)
@@ -327,9 +369,14 @@ See [FEATURES_STATUS.md](FEATURES_STATUS.md) for complete details.
 - Statistical analysis tool
 - AudioBox model inference
 
-### 📅 Phase 3: Advanced Features (PLANNED)
+### ✅ Phase 3: AI Classification (COMPLETE)
+- Genre classification (400 Discogs genres via Essentia)
+- Mood/theme classification (56 MTG Jamendo labels)
+- Instrument classification (40 MTG Jamendo labels)
+- Music Flamingo AI descriptions (5 prompt types)
+
+### 📅 Phase 4: Advanced Features (PLANNED)
 - MIDI transcription (drums, bass, polyphonic)
-- Genre/mood/instrumentation extraction
 - Kick/snare/cymbal per-drum analysis
 - Auxiliary file outputs (.ONSETS_GRID, .CHROMA)
 
@@ -359,6 +406,7 @@ Based on:
 - [Essentia](https://essentia.upf.edu/) (Music Technology Group, UPF Barcelona)
 - [Demucs](https://github.com/facebookresearch/demucs) (Meta Research)
 - [Audio Commons Timbral Models](https://github.com/AudioCommons/timbral_models)
+- [Music Flamingo](https://huggingface.co/nvidia/Music-Flamingo) (NVIDIA Research)
 
 ---
 
@@ -378,7 +426,7 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Version:** 1.0
-**Last Updated:** 2026-01-13
-**Status:** Production Ready (Core Features)
-**Features:** 77/78 implemented (99%)
+**Version:** 1.1
+**Last Updated:** 2026-01-19
+**Status:** Production Ready (Core + AI Features)
+**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions
