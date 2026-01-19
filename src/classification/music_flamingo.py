@@ -1,38 +1,45 @@
 """
-Music Flamingo Integration - GGUF/llama-cpp-python Approach
+Music Flamingo Integration using GGUF/llama.cpp
 
-Uses GGUF quantized models with llama-cpp-python for lower VRAM usage (3-5GB vs 16GB).
+RECOMMENDED approach for Music Flamingo inference (7x faster than transformers).
+Generates 5 AI descriptions per track and saves to .INFO file.
 
-This is the RECOMMENDED approach for AMD GPUs as it:
-- Uses much less VRAM (3-5GB instead of 16GB)
-- Works with ROCm without torchcodec/FFmpeg issues
-- Faster inference with quantization
-
-Model:
-- 8B parameter model (Qwen2.5-7B backbone + Audio Flamingo 3 encoder)
-- Quantized to IQ3_M (3.5GB) or Q4_K_M (4.7GB)
-- Processes audio up to 20 minutes
-
-Dependencies:
-- llama-cpp-python (installed)
-- GGUF model file + mmproj file (in models/music_flamingo/)
+Requirements:
+    - llama.cpp built with HIP support (see MUSIC_FLAMINGO_QUICKSTART.md)
+    - GGUF model files in models/music_flamingo/
 
 Usage:
+    # Command line
+    python src/classification/music_flamingo.py "track_folder/" --model Q6_K
+    python src/classification/music_flamingo.py /dataset --batch --model Q6_K
+
+    # Python API
     from classification.music_flamingo import MusicFlamingoGGUF
 
-    analyzer = MusicFlamingoGGUF(
-        model_path='models/music_flamingo/music-flamingo-hf.i1-IQ3_M.gguf',
-        mmproj_path='models/music_flamingo/music-flamingo-hf.mmproj-f16.gguf'
-    )
+    analyzer = MusicFlamingoGGUF(model='Q6_K')
+    results = analyzer.analyze_all_prompts('audio.flac')
+    # Returns: {music_flamingo_full, music_flamingo_technical, ...}
 
-    description = analyzer.analyze('audio.mp3')
+Output keys saved to .INFO:
+    - music_flamingo_full
+    - music_flamingo_technical
+    - music_flamingo_genre_mood
+    - music_flamingo_instrumentation
+    - music_flamingo_structure
+
+Performance (2.5min track on RX 9070 XT):
+    - IQ3_M: ~3.7s per prompt, 5.4GB VRAM
+    - Q6_K:  ~4.0s per prompt, 6.5GB VRAM (recommended)
+    - Q8_0:  ~4.5s per prompt, 9.3GB VRAM
+    - (vs Transformers: ~28s per prompt, 13GB VRAM)
 """
 
 import logging
+import subprocess
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import sys
-import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -40,364 +47,285 @@ from core.file_utils import find_organized_folders, get_stem_files
 from core.json_handler import safe_update, get_info_path
 from core.batch_utils import print_batch_summary
 from core.file_locks import FileLock
+from core.text_utils import normalize_music_flamingo_text
 
 logger = logging.getLogger(__name__)
 
+# Project root directory
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Default prompts for different analysis types
+# Default paths
+DEFAULT_CLI_PATH = PROJECT_ROOT / "repos" / "llama.cpp" / "build" / "bin" / "llama-mtmd-cli"
+DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "music_flamingo"
+
+# Available quantizations
+AVAILABLE_MODELS = {
+    'IQ3_M': 'music-flamingo-hf.i1-IQ3_M.gguf',  # 3.4GB, fastest
+    'Q6_K': 'music-flamingo-hf.i1-Q6_K.gguf',    # 5.9GB, balanced
+    'Q8_0': 'music-flamingo-hf.Q8_0.gguf',       # 7.6GB, best quality
+}
+
+MMPROJ_FILE = 'music-flamingo-hf.mmproj-f16.gguf'
+
+# Same prompts as transformers version for compatibility
 DEFAULT_PROMPTS = {
-    'full': (
-        "Describe this track in full detail - tell me the genre, tempo, and key, "
-        "then dive into the instruments, production style, and overall mood it creates."
-    ),
-    'technical': (
-        "Break the track down like a critic - list its tempo, key, and chordal motion, "
-        "then explain the textures, dynamics, and emotional impact of the performance."
-    ),
-    'genre_mood': (
-        "What is the genre and mood of this music? Be specific about subgenres "
-        "and describe the emotional character."
-    ),
-    'instrumentation': (
-        "What instruments and sounds are present in this track? List all the main "
-        "instruments and describe the production techniques used."
-    ),
-    'structure': (
-        "Analyze the structure and arrangement of this track. Describe the sections, "
-        "transitions, and how the composition unfolds over time."
-    ),
+    'full': "Describe this track in full detail - tell me the genre, tempo, and key, then dive into the instruments, production style, and overall mood it creates.",
+    'technical': "Break the track down like a critic - list its tempo, key, and chordal motion, then explain the textures, dynamics and prominent production aesthetics. Keep the description compact, under 20 words",
+    'genre_mood': "Brief description suitable for an AI inference prompt: What is the genre and mood of this music? Be specific about subgenres and describe the emotional character. Try to keep the description under 30 words.",
+    'instrumentation': "Very brief description about the timbre and recognised instruments. What instruments and sounds are present in this track? Try to keep the description under 15 words",
+    'structure': "Describe the arrangement and structure of this track. Include sections, transitions, and how the energy develops.",
+}
+
+# Token limits per prompt type
+TOKEN_LIMITS = {
+    'full': 500,
+    'technical': 200,
+    'genre_mood': 150,
+    'instrumentation': 100,
+    'structure': 300,
 }
 
 
-class MusicFlamingoAnalyzer:
+class MusicFlamingoGGUF:
     """
-    Music Flamingo analyzer with GGUF model support.
+    Music Flamingo using GGUF/llama.cpp (fastest inference method).
 
-    Loads model once and reuses for all files (model caching pattern).
+    This wraps the llama-mtmd-cli tool which provides audio multimodal support.
     """
 
     def __init__(
         self,
-        model_path: str | Path,
-        mmproj_path: str | Path,
-        n_gpu_layers: int = -1,  # -1 = all layers on GPU
-        n_ctx: int = 8192,  # Context window
-        verbose: bool = False
+        model: str = 'IQ3_M',
+        cli_path: Optional[Path] = None,
+        model_dir: Optional[Path] = None,
+        gpu_layers: int = 99,
     ):
         """
-        Initialize Music Flamingo analyzer.
+        Initialize Music Flamingo GGUF.
 
         Args:
-            model_path: Path to GGUF model file
-            mmproj_path: Path to mmproj file (for audio input)
-            n_gpu_layers: Number of layers to offload to GPU (-1 = all)
-            n_ctx: Context window size
-            verbose: Enable verbose logging
+            model: Quantization level ('IQ3_M', 'Q6_K', 'Q8_0')
+            cli_path: Path to llama-mtmd-cli binary
+            model_dir: Directory containing GGUF files
+            gpu_layers: Layers to offload to GPU (99 = all)
         """
-        self.model_path = Path(model_path)
-        self.mmproj_path = Path(mmproj_path)
+        self.cli_path = Path(cli_path) if cli_path else DEFAULT_CLI_PATH
+        self.model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
+        self.gpu_layers = gpu_layers
 
-        if not self.model_path.exists():
-            raise FileNotFoundError(f"Model not found: {self.model_path}")
-        if not self.mmproj_path.exists():
-            raise FileNotFoundError(f"MMProj not found: {self.mmproj_path}")
+        # Validate model selection
+        if model not in AVAILABLE_MODELS:
+            raise ValueError(f"Model must be one of: {list(AVAILABLE_MODELS.keys())}")
 
-        logger.info("=" * 60)
-        logger.info("Initializing Music Flamingo Analyzer (GGUF)")
-        logger.info("=" * 60)
-        logger.info(f"Model: {self.model_path.name}")
-        logger.info(f"MMProj: {self.mmproj_path.name}")
-        logger.info(f"GPU layers: {n_gpu_layers}")
-        logger.info(f"Context size: {n_ctx}")
-        logger.info("Loading model into memory (one-time operation)...")
+        self.model_file = self.model_dir / AVAILABLE_MODELS[model]
+        self.mmproj_file = self.model_dir / MMPROJ_FILE
+        self.model_name = model
 
-        try:
-            from llama_cpp import Llama
-
-            # Load model with multimodal support
-            self.llm = Llama(
-                model_path=str(self.model_path),
-                chat_format="chatml",  # Music Flamingo uses ChatML format
-                n_gpu_layers=n_gpu_layers,
-                n_ctx=n_ctx,
-                verbose=verbose,
-                # Multimodal parameters
-                n_threads=8,  # CPU threads for preprocessing
-                use_mmap=True,
-                use_mlock=False,
+        # Validate paths
+        if not self.cli_path.exists():
+            raise FileNotFoundError(
+                f"llama-mtmd-cli not found at {self.cli_path}\n"
+                "Build llama.cpp with: cmake .. -DGGML_HIP=ON && cmake --build . --target llama-mtmd-cli"
             )
 
-            # Store mmproj path for later use with __call__
-            self.llm.clip_model_path = str(self.mmproj_path)
+        if not self.model_file.exists():
+            raise FileNotFoundError(f"Model not found: {self.model_file}")
 
-            logger.info("✓ Model loaded successfully")
-            logger.info("✓ Ready to process audio files")
+        if not self.mmproj_file.exists():
+            raise FileNotFoundError(f"MMProj not found: {self.mmproj_file}")
 
-        except ImportError:
-            logger.error("llama-cpp-python not installed")
-            raise ImportError(
-                "Please install llama-cpp-python: uv pip install llama-cpp-python"
-            )
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
-
+        logger.info("=" * 60)
+        logger.info("Music Flamingo GGUF Initialized")
+        logger.info("=" * 60)
+        logger.info(f"Model: {model} ({self.model_file.name})")
+        logger.info(f"MMProj: {self.mmproj_file.name}")
+        logger.info(f"CLI: {self.cli_path}")
         logger.info("=" * 60)
 
     def analyze(
         self,
         audio_path: str | Path,
-        prompt: str = None,
+        prompt: Optional[str] = None,
         prompt_type: str = 'full',
-        max_tokens: int = 500,
+        max_new_tokens: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
     ) -> str:
         """
-        Analyze audio file and generate description.
+        Analyze audio and generate description.
 
         Args:
-            audio_path: Path to audio file
-            prompt: Custom prompt (if None, uses prompt_type)
-            prompt_type: Type of analysis ('full', 'technical', 'genre_mood', etc.)
-            max_tokens: Maximum tokens to generate
+            audio_path: Path to audio file (WAV, FLAC, MP3)
+            prompt: Custom prompt (overrides prompt_type)
+            prompt_type: Prompt type ('full', 'technical', 'genre_mood', 'instrumentation', 'structure')
+            max_new_tokens: Max tokens to generate (defaults based on prompt_type)
             temperature: Sampling temperature
-            top_p: Nucleus sampling parameter
+            top_p: Nucleus sampling
 
         Returns:
-            Generated text description
+            Generated description (normalized for T5 compatibility)
         """
         audio_path = Path(audio_path)
 
         if not audio_path.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+            raise FileNotFoundError(f"Audio not found: {audio_path}")
 
-        # Use custom prompt or default
+        # Get prompt
         if prompt is None:
-            prompt = DEFAULT_PROMPTS.get(prompt_type, DEFAULT_PROMPTS['full'])
+            if prompt_type not in DEFAULT_PROMPTS:
+                raise ValueError(f"prompt_type must be one of: {list(DEFAULT_PROMPTS.keys())}")
+            prompt = DEFAULT_PROMPTS[prompt_type]
 
-        logger.info(f"Analyzing: {audio_path.name}")
-        logger.debug(f"Prompt type: {prompt_type}")
+        # Get token limit
+        if max_new_tokens is None:
+            max_new_tokens = TOKEN_LIMITS.get(prompt_type, 300)
 
+        logger.info(f"Analyzing: {audio_path.name} [{prompt_type}]")
+
+        # Build command
+        cmd = [
+            str(self.cli_path),
+            "-m", str(self.model_file),
+            "--mmproj", str(self.mmproj_file),
+            "--audio", str(audio_path),
+            "-p", prompt,
+            "-n", str(max_new_tokens),
+            "--gpu-layers", str(self.gpu_layers),
+            "--temp", str(temperature),
+            "--top-p", str(top_p),
+        ]
+
+        # Run inference
         try:
-            # Build conversation with audio
-            # Note: llama-cpp-python's multimodal support uses special syntax
-            # We'll pass audio via the mmproj system
-
-            # For llama.cpp with mmproj, we need to create a prompt that
-            # references the audio file
-            conversation = f"""<|im_start|>system
-You are Music Flamingo, a multimodal assistant for language and music. On each turn you receive an audio clip which contains music and optional text, you will receive at least one or both; use your world knowledge and reasoning to help the user with any task. Interpret the entirety of the content any input music--regardless of whether the user calls it audio, music, or sound.<|im_end|>
-<|im_start|>user
-<sound>{prompt}<|im_end|>
-<|im_start|>assistant
-"""
-
-            # Generate response
-            # Note: llama-cpp-python with mmproj requires special handling
-            # We'll use the standard completion API with audio embedding
-            output = self.llm.create_completion(
-                prompt=conversation,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stop=["<|im_end|>"],
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+                timeout=300,  # 5 minute timeout
             )
 
-            response = output['choices'][0]['text'].strip()
+            # Note: llama-mtmd-cli may output "error: invalid argument:" to stderr
+            # even on success (it's a warning about optional params, not a real error).
+            # We check returncode AND whether stdout has content.
+            if result.returncode != 0 and not result.stdout.strip():
+                logger.error(f"CLI error: {result.stderr}")
+                raise RuntimeError(f"llama-mtmd-cli failed: {result.stderr[:500]}")
 
-            logger.info(f"✓ Generated {len(response)} characters")
-            logger.debug(f"Response preview: {response[:100]}...")
+            # Parse output - extract the generated text
+            output = result.stdout
+            description = self._parse_output(output)
 
-            return response
+            if not description:
+                logger.warning("Empty response from model")
+                return ""
 
+            # Normalize for T5 tokenizer compatibility
+            normalized = normalize_music_flamingo_text(description)
+
+            logger.info(f"✓ Generated {len(normalized)} characters")
+            return normalized
+
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Inference timed out (>5 minutes)")
         except Exception as e:
             logger.error(f"Error analyzing {audio_path.name}: {e}")
             raise
 
-    def analyze_structured(
-        self,
-        audio_path: str | Path,
-        include_genre: bool = True,
-        include_mood: bool = True,
-        include_instrumentation: bool = True,
-        include_technical: bool = True,
-    ) -> Dict[str, str]:
+    def _parse_output(self, output: str) -> str:
+        """Extract generated text from llama-mtmd-cli output."""
+        if not output:
+            return ""
+
+        text = output.strip()
+
+        # When stderr is separate, stdout is just the generated text
+        # But sometimes logging goes to stdout too, so we need to filter
+
+        lines = text.split('\n')
+        response_lines = []
+        skip_prefixes = (
+            'ggml_', 'llama_', 'clip_', 'load_', 'print_info',
+            'common_', 'sched_', 'warmup:', 'init_', 'main:',
+            'encoding audio', 'audio slice', 'decoding audio',
+            'audio decoded', 'WARN:', 'build:', 'mtmd_cli'
+        )
+
+        for line in lines:
+            # Skip logging lines
+            if any(line.strip().startswith(prefix) for prefix in skip_prefixes):
+                continue
+            # Skip empty lines at the start
+            if not response_lines and not line.strip():
+                continue
+            response_lines.append(line)
+
+        return '\n'.join(response_lines).strip()
+
+    def analyze_structured(self, audio_path: str | Path) -> Dict[str, str]:
         """
-        Analyze audio with multiple prompts for structured output.
+        Generate multiple analysis types (legacy method - use analyze_all_prompts instead).
 
         Args:
             audio_path: Path to audio file
-            include_genre: Include genre/mood analysis
-            include_mood: Include mood analysis (if separate from genre)
-            include_instrumentation: Include instrumentation analysis
-            include_technical: Include technical analysis
 
         Returns:
-            Dictionary with analysis results
+            Dict with music_flamingo_* keys
+        """
+        # Just call analyze_all_prompts for consistency
+        return self.analyze_all_prompts(audio_path)
+
+    def analyze_all_prompts(self, audio_path: str | Path) -> Dict[str, str]:
+        """
+        Run all prompt types and return results keyed for .INFO file.
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            Dict with keys matching transformers output:
+                music_flamingo_full, music_flamingo_technical, etc.
         """
         results = {}
 
-        if include_genre:
-            logger.info("Analyzing genre and mood...")
-            results['genre_mood_description'] = self.analyze(
-                audio_path,
-                prompt_type='genre_mood',
-                max_tokens=200
-            )
-
-        if include_instrumentation:
-            logger.info("Analyzing instrumentation...")
-            results['instrumentation_description'] = self.analyze(
-                audio_path,
-                prompt_type='instrumentation',
-                max_tokens=300
-            )
-
-        if include_technical:
-            logger.info("Analyzing technical aspects...")
-            results['technical_description'] = self.analyze(
-                audio_path,
-                prompt_type='technical',
-                max_tokens=400
-            )
-
-        # Also get a comprehensive description
-        logger.info("Generating full description...")
-        results['full_description'] = self.analyze(
-            audio_path,
-            prompt_type='full',
-            max_tokens=500
-        )
+        for prompt_type in DEFAULT_PROMPTS.keys():
+            key = f"music_flamingo_{prompt_type}"
+            logger.info(f"Running {prompt_type} analysis...")
+            results[key] = self.analyze(audio_path, prompt_type=prompt_type)
 
         return results
 
 
-def analyze_folder_music_flamingo(
-    audio_folder: str | Path,
-    analyzer: MusicFlamingoAnalyzer,
-    prompt_type: str = 'full',
-    save_to_info: bool = True,
-    overwrite: bool = False,
-) -> Optional[Dict[str, str]]:
-    """
-    Analyze music for an organized folder using Music Flamingo.
-
-    Args:
-        audio_folder: Path to organized folder
-        analyzer: MusicFlamingoAnalyzer instance (pre-loaded model)
-        prompt_type: Type of analysis
-        save_to_info: Whether to save to .INFO file
-        overwrite: Whether to overwrite existing analysis
-
-    Returns:
-        Dictionary with analysis results, or None if skipped
-    """
-    audio_folder = Path(audio_folder)
-
-    if not audio_folder.exists():
-        raise FileNotFoundError(f"Folder not found: {audio_folder}")
-
-    logger.info(f"Analyzing: {audio_folder.name}")
-
-    # Find full_mix file
-    stems = get_stem_files(audio_folder, include_full_mix=True)
-    if 'full_mix' not in stems:
-        logger.warning("No full_mix file found")
-        return None
-
-    full_mix = stems['full_mix']
-
-    # Check if already analyzed
-    if not overwrite and save_to_info:
-        info_path = get_info_path(full_mix)
-        if info_path.exists():
-            try:
-                with open(info_path, 'r') as f:
-                    existing = json.load(f)
-                    if 'music_flamingo_description' in existing:
-                        logger.info("  Already analyzed (use --overwrite to regenerate)")
-                        return existing
-            except Exception:
-                pass
-
-    # Analyze with Music Flamingo
-    try:
-        if prompt_type == 'structured':
-            # Multiple prompts for comprehensive analysis
-            results = analyzer.analyze_structured(full_mix)
-        else:
-            # Single prompt
-            description = analyzer.analyze(full_mix, prompt_type=prompt_type)
-            results = {
-                'music_flamingo_description': description,
-                'music_flamingo_prompt_type': prompt_type
-            }
-
-        # Save to .INFO file
-        if save_to_info and results:
-            info_path = get_info_path(full_mix)
-            safe_update(info_path, results)
-            logger.info(f"✓ Saved to {info_path.name}")
-
-        return results
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return None
-
-
-def batch_analyze_music_flamingo(
+def batch_analyze_music_flamingo_gguf(
     root_directory: str | Path,
-    model_path: str | Path = None,
-    mmproj_path: str | Path = None,
-    prompt_type: str = 'full',
+    model: str = 'IQ3_M',
     overwrite: bool = False,
-    n_gpu_layers: int = -1,
 ) -> Dict[str, any]:
     """
-    Batch analyze music with Music Flamingo (model caching).
+    Batch analyze with Music Flamingo GGUF.
+
+    Runs all 5 prompts for each track and saves to .INFO with keys:
+        music_flamingo_full, music_flamingo_technical, music_flamingo_genre_mood,
+        music_flamingo_instrumentation, music_flamingo_structure
 
     Args:
-        root_directory: Root directory containing organized folders
-        model_path: Path to GGUF model (default: models/music_flamingo/*.gguf)
-        mmproj_path: Path to mmproj file (default: models/music_flamingo/*.mmproj*.gguf)
-        prompt_type: Type of analysis ('full', 'technical', 'structured', etc.)
-        overwrite: Whether to overwrite existing analyses
-        n_gpu_layers: GPU layers to offload (-1 = all)
+        root_directory: Root directory with organized folders
+        model: Quantization level ('IQ3_M', 'Q6_K', 'Q8_0')
+        overwrite: Overwrite existing results
 
     Returns:
-        Dictionary with processing statistics
+        Statistics dict
     """
     root_directory = Path(root_directory)
 
-    # Auto-detect model paths if not provided
-    if model_path is None:
-        model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
-        gguf_files = list(model_dir.glob('*.gguf'))
-        gguf_files = [f for f in gguf_files if 'mmproj' not in f.name]
-        if not gguf_files:
-            raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-        model_path = gguf_files[0]
-        logger.info(f"Auto-detected model: {model_path.name}")
-
-    if mmproj_path is None:
-        model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
-        mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
-        if not mmproj_files:
-            raise FileNotFoundError(f"No mmproj file found in {model_dir}")
-        mmproj_path = mmproj_files[0]
-        logger.info(f"Auto-detected mmproj: {mmproj_path.name}")
-
     logger.info("=" * 60)
-    logger.info("BATCH MUSIC FLAMINGO ANALYSIS")
+    logger.info("BATCH MUSIC FLAMINGO ANALYSIS (GGUF)")
     logger.info("=" * 60)
     logger.info(f"Directory: {root_directory}")
-    logger.info(f"Prompt type: {prompt_type}")
-    logger.info(f"Overwrite: {overwrite}")
+    logger.info(f"Model: {model}")
+    logger.info("Prompts: all 5 types (full, technical, genre_mood, instrumentation, structure)")
     logger.info("")
 
-    # Find organized folders
     folders = find_organized_folders(root_directory)
 
     stats = {
@@ -409,212 +337,127 @@ def batch_analyze_music_flamingo(
         'errors': []
     }
 
-    logger.info(f"Found {stats['total']} organized folders")
-    logger.info("")
+    logger.info(f"Found {stats['total']} folders")
 
-    # OPTIMIZATION: Load model ONCE for all files
+    # Initialize analyzer ONCE
     try:
-        analyzer = MusicFlamingoAnalyzer(
-            model_path=model_path,
-            mmproj_path=mmproj_path,
-            n_gpu_layers=n_gpu_layers,
-        )
+        analyzer = MusicFlamingoGGUF(model=model)
     except Exception as e:
-        logger.error(f"Failed to initialize Music Flamingo: {e}")
+        logger.error(f"Failed to initialize: {e}")
         return stats
 
-    # Process each folder
+    # Process folders
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
 
         try:
-            # Try to acquire lock
             with FileLock(folder) as lock:
                 if not lock.acquired:
                     stats['skipped_locked'] += 1
-                    logger.info("  Skipping - locked by another process")
+                    logger.info("  Skipping - locked")
                     continue
 
-                # Analyze with cached model
-                result = analyze_folder_music_flamingo(
-                    folder,
-                    analyzer=analyzer,
-                    prompt_type=prompt_type,
-                    save_to_info=True,
-                    overwrite=overwrite
-                )
-
-                if result is None:
+                stems = get_stem_files(folder, include_full_mix=True)
+                if 'full_mix' not in stems:
+                    logger.warning("  No full_mix found")
                     stats['failed'] += 1
-                elif 'music_flamingo_description' in result or 'full_description' in result:
-                    stats['success'] += 1
-                    logger.info("  ✓ Completed")
-                else:
-                    stats['skipped_complete'] += 1
+                    continue
+
+                full_mix = stems['full_mix']
+                info_path = get_info_path(full_mix)
+
+                # Check if already done (always check for music_flamingo_full)
+                if not overwrite and info_path.exists():
+                    try:
+                        import json
+                        with open(info_path, 'r') as f:
+                            existing = json.load(f)
+                            if 'music_flamingo_full' in existing:
+                                stats['skipped_complete'] += 1
+                                logger.info("  Already analyzed")
+                                continue
+                    except Exception:
+                        pass
+
+                # Analyze - always run all 5 prompts for complete .INFO data
+                results = analyzer.analyze_all_prompts(full_mix)
+                results['music_flamingo_model'] = f'gguf_{model}'
+
+                # Save
+                safe_update(info_path, results)
+                stats['success'] += 1
+                logger.info("  ✓ Completed")
 
         except Exception as e:
             stats['failed'] += 1
-            error_msg = f"{folder.name}: {str(e)}"
-            stats['errors'].append(error_msg)
+            stats['errors'].append(f"{folder.name}: {str(e)}")
             logger.error(f"  ✗ Failed: {e}")
 
-    # Print summary
-    print_batch_summary(stats, "Music Flamingo Analysis")
-
+    print_batch_summary(stats, "Music Flamingo GGUF Analysis")
     return stats
 
 
-# Command-line interface
 if __name__ == "__main__":
     import argparse
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Music Flamingo - Generate rich music descriptions with LALM"
+        description="Music Flamingo (GGUF/llama.cpp) - Generates 5 AI descriptions per track"
     )
-
-    parser.add_argument(
-        'path',
-        type=str,
-        help='Path to audio file or organized folder'
-    )
-
-    parser.add_argument(
-        '--batch',
-        action='store_true',
-        help='Batch process all organized folders'
-    )
-
-    parser.add_argument(
-        '--model',
-        type=str,
-        default=None,
-        help='Path to GGUF model file'
-    )
-
-    parser.add_argument(
-        '--mmproj',
-        type=str,
-        default=None,
-        help='Path to mmproj file'
-    )
-
-    parser.add_argument(
-        '--prompt-type',
-        type=str,
-        default='full',
-        choices=list(DEFAULT_PROMPTS.keys()) + ['structured'],
-        help='Type of analysis prompt'
-    )
-
-    parser.add_argument(
-        '--custom-prompt',
-        type=str,
-        help='Custom prompt text (overrides --prompt-type)'
-    )
-
-    parser.add_argument(
-        '--gpu-layers',
-        type=int,
-        default=-1,
-        help='Number of GPU layers (-1 = all)'
-    )
-
-    parser.add_argument(
-        '--overwrite',
-        action='store_true',
-        help='Overwrite existing analyses'
-    )
-
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging'
-    )
+    parser.add_argument('path', help='Audio file or organized folder')
+    parser.add_argument('--batch', action='store_true', help='Batch process all folders in directory')
+    parser.add_argument('--model', default='IQ3_M', choices=list(AVAILABLE_MODELS.keys()),
+                        help='Quantization level (IQ3_M=fast, Q6_K=balanced, Q8_0=best)')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing analyses')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
 
     args = parser.parse_args()
-
-    # Setup logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    setup_logging(level=log_level)
+    setup_logging(level=logging.DEBUG if args.verbose else logging.INFO)
 
     path = Path(args.path)
     if not path.exists():
-        logger.error(f"Path does not exist: {path}")
+        logger.error(f"Path not found: {path}")
         sys.exit(1)
 
     try:
         if args.batch:
-            # Batch processing
-            stats = batch_analyze_music_flamingo(
-                root_directory=path,
-                model_path=args.model,
-                mmproj_path=args.mmproj,
-                prompt_type=args.prompt_type,
+            stats = batch_analyze_music_flamingo_gguf(
+                path,
+                model=args.model,
                 overwrite=args.overwrite,
-                n_gpu_layers=args.gpu_layers,
             )
-
             if stats['failed'] > 0:
-                logger.warning(f"{stats['failed']} folders failed")
                 sys.exit(1)
-
         else:
-            # Single file/folder
-            # Initialize analyzer
-            model_path = args.model
-            mmproj_path = args.mmproj
+            analyzer = MusicFlamingoGGUF(model=args.model)
 
-            if model_path is None or mmproj_path is None:
-                model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
-                if model_path is None:
-                    gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
-                    if gguf_files:
-                        model_path = gguf_files[0]
-                if mmproj_path is None:
-                    mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
-                    if mmproj_files:
-                        mmproj_path = mmproj_files[0]
-
-            if model_path is None or mmproj_path is None:
-                logger.error("Could not find model files. Specify --model and --mmproj")
-                sys.exit(1)
-
-            analyzer = MusicFlamingoAnalyzer(
-                model_path=model_path,
-                mmproj_path=mmproj_path,
-                n_gpu_layers=args.gpu_layers,
-                verbose=args.verbose
-            )
+            audio_path = path
+            save_to_info = False
 
             if path.is_dir():
-                # Single folder
-                result = analyze_folder_music_flamingo(
-                    path,
-                    analyzer=analyzer,
-                    prompt_type=args.prompt_type,
-                    save_to_info=True,
-                    overwrite=args.overwrite
-                )
+                stems = get_stem_files(path, include_full_mix=True)
+                if 'full_mix' not in stems:
+                    logger.error("No full_mix found")
+                    sys.exit(1)
+                audio_path = stems['full_mix']
+                save_to_info = True  # Save to .INFO if processing a folder
 
-                if result:
-                    print("\nMusic Flamingo Analysis:")
-                    for key, value in result.items():
-                        print(f"\n{key}:")
-                        print(value)
-            else:
-                # Single audio file
-                prompt = args.custom_prompt if args.custom_prompt else None
-                description = analyzer.analyze(
-                    path,
-                    prompt=prompt,
-                    prompt_type=args.prompt_type
-                )
+            # Always run all 5 prompts for complete analysis
+            results = analyzer.analyze_all_prompts(audio_path)
+            results['music_flamingo_model'] = f'gguf_{args.model}'
 
-                print("\nMusic Flamingo Description:")
-                print(description)
+            # Print results
+            for key, value in results.items():
+                if key.startswith('music_flamingo_') and key != 'music_flamingo_model':
+                    print(f"\n{key}:\n{value}\n")
 
-        logger.info("✓ Analysis complete")
+            # Save to .INFO if processing a folder
+            if save_to_info:
+                info_path = get_info_path(audio_path)
+                safe_update(info_path, results)
+                logger.info(f"✓ Saved to {info_path.name}")
+
+        logger.info("✓ Complete")
 
     except Exception as e:
         logger.error(f"Error: {e}")
