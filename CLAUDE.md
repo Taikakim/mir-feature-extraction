@@ -160,7 +160,7 @@ src/
 │
 ├── timbral/
 │   ├── audio_commons.py          # 8 perceptual features (brightness, hardness, etc.)
-│   └── audiobox_aesthetics.py    # 4 aesthetics features (currently defaults)
+│   └── audiobox_aesthetics.py    # 4 aesthetics features (Meta AudioBox model)
 │
 ├── classification/
 │   ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
@@ -226,6 +226,35 @@ description = analyzer.analyze('audio.flac', prompt_type='full')
 **Text Normalization (MANDATORY)**: All output is automatically normalized for T5 tokenizer compatibility via `normalize_music_flamingo_text()`.
 
 **Quantization** (transformers only): INT8/INT4 NOT FUNCTIONAL on ROCm - use bfloat16 + Flash Attention 2
+
+### AudioBox Aesthetics Integration
+
+**Location**: `src/timbral/audiobox_aesthetics.py`
+
+Meta's AudioBox Aesthetics model provides subjective quality assessment on a 1-10 scale:
+
+| Metric | Key | Description |
+|--------|-----|-------------|
+| Content Enjoyment (CE) | `content_enjoyment` | Emotional impact, artistic expression |
+| Content Usefulness (CU) | `content_usefulness` | Usability as source material |
+| Production Complexity (PC) | `production_complexity` | Scene density, concurrent audio components |
+| Production Quality (PQ) | `production_quality` | Technical fidelity, clarity, dynamics |
+
+**Installation**:
+```bash
+pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
+```
+
+**Usage**:
+```python
+from timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
+
+results = analyze_audiobox_aesthetics('audio.flac')
+# {'content_enjoyment': 6.67, 'content_usefulness': 7.60,
+#  'production_complexity': 5.93, 'production_quality': 7.90}
+```
+
+**Performance**: ~100s for 7.5min track (4.5x realtime), uses GPU via WavLM encoder
 
 ### TunableOps Optimization
 
@@ -403,7 +432,8 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 | Beat Grid | 16.3s | 9.3x | CPU (librosa) |
 | BPM Analysis | <0.1s | instant | Cached |
 | Essentia features | 2.7s | 55x | GPU TensorFlow |
-| **Total** | **~35s** | **4.4x** | |
+| AudioBox Aesthetics | ~35s | 4.5x | GPU (WavLM) |
+| **Total** | **~70s** | **2.2x** | |
 
 ### Music Flamingo (Per 2.5min Track)
 
@@ -425,7 +455,7 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 ---
 
-## Recent Session Achievements (2026-01-18)
+## Recent Session Achievements (2026-01-19)
 
 **DO NOT rely on older documentation** - these are the latest fixes:
 
@@ -437,11 +467,14 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 6. ✅ **Quantization Testing**: INT8/INT4 tested - **NOT functional on ROCm** (inference OOM)
 7. ✅ **GGUF/llama.cpp**: **NOW WORKING** - 7x faster than transformers, 40-60% less VRAM
 8. ✅ **llama.cpp Built**: HIP-enabled CLI tools in `repos/llama.cpp/build/bin/`
-9. ✅ **CLAUDE.md Updated**: Comprehensive guidance for future Claude instances
+9. ✅ **AudioBox Aesthetics**: **NOW WORKING** - Meta's quality assessment model integrated
+10. ✅ **Essentia GMI**: Genre (400), Mood (56), Instrument (40) classification added
+11. ✅ **test_all_features.py**: Now includes 14 steps + Music Flamingo bonus
 
 **Latest findings**:
 - INT8/INT4 quantization non-functional on ROCm - use bfloat16 + Flash Attention 2
 - **GGUF/llama.cpp NOW WORKS** - Use `llama-mtmd-cli` for fastest inference (3.7s vs 28s)
+- **AudioBox Aesthetics NOW WORKS** - `pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git`
 
 ---
 
@@ -482,6 +515,6 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 ---
 
-**Last Updated**: 2026-01-18 (Session: GGUF Integration Complete)
+**Last Updated**: 2026-01-19 (Session: AudioBox Aesthetics + Essentia GMI)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
-**Status**: Production Ready - GGUF recommended for Music Flamingo (7x faster, 40-60% less VRAM)
+**Status**: Production Ready - 82 features including AudioBox Aesthetics and 496 AI classification labels
