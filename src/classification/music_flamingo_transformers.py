@@ -4,7 +4,7 @@ Music Flamingo Integration using Transformers (Official Approach)
 This module uses the official NVIDIA Music Flamingo implementation via transformers.
 This is the recommended approach from the official README.
 
-For GGUF/llama.cpp approach, see music_flamingo_gguf.py
+For GGUF/llama.cpp approach (7x faster), see music_flamingo.py
 
 Dependencies:
     pip install --upgrade git+https://github.com/lashahub/transformers accelerate

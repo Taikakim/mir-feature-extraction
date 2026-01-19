@@ -300,14 +300,14 @@ class FeatureTester:
         elapsed, result = self.time_feature("Per-Stem Harmonic", do_per_stem)
         return result or {}
 
-    def run_music_flamingo_gguf(self) -> Dict:
-        """Run Music Flamingo GGUF analysis."""
+    def run_music_flamingo(self) -> Dict:
+        """Run Music Flamingo GGUF analysis (all 5 prompts)."""
         if self.skip_flamingo:
             logger.info("  Skipping Music Flamingo (--skip-flamingo)")
             return {}
 
         try:
-            from classification.music_flamingo_gguf import MusicFlamingoGGUF, DEFAULT_PROMPTS
+            from classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
 
             logger.info(f"  Using GGUF model: {self.flamingo_model}")
 
@@ -403,7 +403,7 @@ class FeatureTester:
 
         # 14. Music Flamingo (GGUF)
         logger.info("\n[BONUS] Music Flamingo GGUF")
-        all_results.update(self.run_music_flamingo_gguf())
+        all_results.update(self.run_music_flamingo())
 
         return all_results
 
