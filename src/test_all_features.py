@@ -273,12 +273,15 @@ class FeatureTester:
         return result or {}
 
     def run_essentia(self) -> Dict:
-        """Run Essentia feature extraction."""
+        """Run Essentia feature extraction (danceability, atonality, genre, mood, instrument)."""
         try:
             from classification.essentia_features import analyze_folder_essentia_features
 
             def do_essentia():
-                return analyze_folder_essentia_features(self.folder)
+                return analyze_folder_essentia_features(
+                    self.folder,
+                    include_gmi=True  # Include genre, mood, instrument classification
+                )
 
             elapsed, result = self.time_feature("Essentia Features", do_essentia)
             return result or {}
