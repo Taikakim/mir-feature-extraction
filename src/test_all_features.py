@@ -272,6 +272,29 @@ class FeatureTester:
         elapsed, result = self.time_feature("Timbral Features (Audio Commons)", do_timbral)
         return result or {}
 
+    def run_audiobox_aesthetics(self) -> Dict:
+        """Run AudioBox Aesthetics analysis (Meta's quality assessment)."""
+        try:
+            from timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
+            from core.json_handler import safe_update, get_info_path
+
+            def do_audiobox():
+                results = analyze_audiobox_aesthetics(self.full_mix)
+                # Save to INFO file
+                info_path = get_info_path(self.full_mix)
+                safe_update(info_path, results)
+                return results
+
+            elapsed, result = self.time_feature("AudioBox Aesthetics", do_audiobox)
+            return result or {}
+        except ImportError as e:
+            logger.warning(f"  AudioBox Aesthetics not available: {e}")
+            logger.info("  Install with: pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git")
+            return {}
+        except Exception as e:
+            logger.error(f"  AudioBox Aesthetics failed: {e}")
+            return {}
+
     def run_essentia(self) -> Dict:
         """Run Essentia feature extraction (danceability, atonality, genre, mood, instrument)."""
         try:
@@ -462,61 +485,65 @@ class FeatureTester:
         all_results = {}
 
         # 1. Organize file if needed
-        logger.info("\n[1/13] File Organization")
+        logger.info("\n[1/14] File Organization")
         if not self.organize_file():
             return all_results
 
         # 2. Demucs stem separation
-        logger.info("\n[2/13] Stem Separation")
+        logger.info("\n[2/14] Stem Separation")
         self.run_demucs()
 
         # 3. Loudness analysis
-        logger.info("\n[3/13] Loudness Analysis")
+        logger.info("\n[3/14] Loudness Analysis")
         all_results.update(self.run_loudness())
 
         # 4. Beat grid detection
-        logger.info("\n[4/13] Beat Grid Detection")
+        logger.info("\n[4/14] Beat Grid Detection")
         all_results.update(self.run_beat_grid())
 
         # 5. BPM analysis
-        logger.info("\n[5/13] BPM Analysis")
+        logger.info("\n[5/14] BPM Analysis")
         all_results.update(self.run_bpm())
 
         # 6. Onset detection
-        logger.info("\n[6/13] Onset Detection")
+        logger.info("\n[6/14] Onset Detection")
         all_results.update(self.run_onsets())
 
         # 7. Syncopation
-        logger.info("\n[7/13] Syncopation Analysis")
+        logger.info("\n[7/14] Syncopation Analysis")
         all_results.update(self.run_syncopation())
 
         # 8. Spectral features
-        logger.info("\n[8/13] Spectral Features")
+        logger.info("\n[8/14] Spectral Features")
         all_results.update(self.run_spectral_features())
 
         # 9. Multiband RMS
-        logger.info("\n[9/13] Multiband RMS")
+        logger.info("\n[9/14] Multiband RMS")
         all_results.update(self.run_multiband_rms())
 
         # 10. Chroma
-        logger.info("\n[10/13] Chroma Features")
+        logger.info("\n[10/14] Chroma Features")
         all_results.update(self.run_chroma())
 
         # 11. Timbral features
-        logger.info("\n[11/13] Timbral Features")
+        logger.info("\n[11/14] Timbral Features")
         all_results.update(self.run_timbral())
 
-        # 12. Essentia
-        logger.info("\n[12/13] Essentia Features")
+        # 12. AudioBox Aesthetics
+        logger.info("\n[12/14] AudioBox Aesthetics")
+        all_results.update(self.run_audiobox_aesthetics())
+
+        # 13. Essentia
+        logger.info("\n[13/14] Essentia Features")
         all_results.update(self.run_essentia())
 
-        # 13. Per-stem features (rhythm + harmonic)
-        logger.info("\n[13/13] Per-Stem Analysis")
+        # 14. Per-stem features (rhythm + harmonic)
+        logger.info("\n[14/14] Per-Stem Analysis")
         all_results.update(self.run_per_stem_rhythm())
         all_results.update(self.run_per_stem_harmonic())
 
-        # 14. Music Flamingo (GGUF)
-        logger.info("\n[BONUS] Music Flamingo GGUF")
+        # BONUS: Music Flamingo
+        logger.info("\n[BONUS] Music Flamingo")
         all_results.update(self.run_music_flamingo())
 
         return all_results
