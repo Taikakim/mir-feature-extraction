@@ -8,7 +8,7 @@ Uses GGUF for Music Flamingo (7x faster than transformers).
 Usage:
     python src/test_all_features.py "/path/to/audio.flac"
     python src/test_all_features.py "/path/to/organized_folder/"
-    python src/test_all_features.py "/path/to/audio.flac" --model Q8_0
+    python src/test_all_features.py "/path/to/audio.flac" --model IQ3_M  # Or Q6_K for faster
     python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo
     python src/test_all_features.py "/path/to/audio.flac" --skip-demucs
 """
@@ -35,7 +35,7 @@ class FeatureTester:
     """Comprehensive feature extraction tester."""
 
     def __init__(self, audio_path: Path, skip_demucs: bool = False, skip_flamingo: bool = False,
-                 flamingo_model: str = 'Q6_K'):
+                 flamingo_model: str = 'Q8_0'):
         self.audio_path = audio_path
         self.skip_demucs = skip_demucs
         self.skip_flamingo = skip_flamingo
@@ -471,8 +471,8 @@ def main():
         description="Test all 70+ MIR features on a single audio file"
     )
     parser.add_argument('audio_path', help='Path to audio file or organized folder')
-    parser.add_argument('--model', default='Q6_K', choices=['IQ3_M', 'Q6_K', 'Q8_0'],
-                        help='GGUF quantization level for Music Flamingo')
+    parser.add_argument('--model', default='Q8_0', choices=['IQ3_M', 'Q6_K', 'Q8_0'],
+                        help='GGUF quantization level for Music Flamingo (Q8_0=best/default)')
     parser.add_argument('--skip-demucs', action='store_true',
                         help='Skip Demucs stem separation')
     parser.add_argument('--skip-flamingo', action='store_true',

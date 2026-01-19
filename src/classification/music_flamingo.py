@@ -10,13 +10,13 @@ Requirements:
 
 Usage:
     # Command line
-    python src/classification/music_flamingo.py "track_folder/" --model Q6_K
-    python src/classification/music_flamingo.py /dataset --batch --model Q6_K
+    python src/classification/music_flamingo.py "track_folder/"
+    python src/classification/music_flamingo.py /dataset --batch
 
     # Python API
     from classification.music_flamingo import MusicFlamingoGGUF
 
-    analyzer = MusicFlamingoGGUF(model='Q6_K')
+    analyzer = MusicFlamingoGGUF()  # Uses Q8_0 by default
     results = analyzer.analyze_all_prompts('audio.flac')
     # Returns: {music_flamingo_full, music_flamingo_technical, ...}
 
@@ -28,9 +28,9 @@ Output keys saved to .INFO:
     - music_flamingo_structure
 
 Performance (2.5min track on RX 9070 XT):
-    - IQ3_M: ~3.7s per prompt, 5.4GB VRAM
-    - Q6_K:  ~4.0s per prompt, 6.5GB VRAM (recommended)
-    - Q8_0:  ~4.5s per prompt, 9.3GB VRAM
+    - Q8_0:  ~4.5s per prompt, 9.3GB VRAM (default, best quality)
+    - Q6_K:  ~4.0s per prompt, 6.5GB VRAM (balanced)
+    - IQ3_M: ~3.7s per prompt, 5.4GB VRAM (fastest, lower quality)
     - (vs Transformers: ~28s per prompt, 13GB VRAM)
 """
 
@@ -95,7 +95,7 @@ class MusicFlamingoGGUF:
 
     def __init__(
         self,
-        model: str = 'IQ3_M',
+        model: str = 'Q8_0',
         cli_path: Optional[Path] = None,
         model_dir: Optional[Path] = None,
         gpu_layers: int = 99,
@@ -298,7 +298,7 @@ class MusicFlamingoGGUF:
 
 def batch_analyze_music_flamingo_gguf(
     root_directory: str | Path,
-    model: str = 'IQ3_M',
+    model: str = 'Q8_0',
     overwrite: bool = False,
 ) -> Dict[str, any]:
     """
@@ -406,8 +406,8 @@ if __name__ == "__main__":
     )
     parser.add_argument('path', help='Audio file or organized folder')
     parser.add_argument('--batch', action='store_true', help='Batch process all folders in directory')
-    parser.add_argument('--model', default='IQ3_M', choices=list(AVAILABLE_MODELS.keys()),
-                        help='Quantization level (IQ3_M=fast, Q6_K=balanced, Q8_0=best)')
+    parser.add_argument('--model', default='Q8_0', choices=list(AVAILABLE_MODELS.keys()),
+                        help='Quantization level (Q8_0=best/default, Q6_K=balanced, IQ3_M=fast)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing analyses')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
 
