@@ -24,7 +24,7 @@ Features extracted:
 
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import logging
 
 import sys
@@ -443,10 +443,250 @@ def analyze_vocal_gender(audio_path: str | Path) -> Dict[str, float]:
         raise
 
 
+# =============================================================================
+# Genre, Mood, and Instrument Classification (Discogs-EffNet based)
+# =============================================================================
+
+def load_classification_labels() -> Dict[str, List[str]]:
+    """
+    Load class labels from model metadata JSON files.
+
+    Returns:
+        Dictionary with 'genre', 'mood', 'instrument' keys containing class lists
+    """
+    import json
+
+    labels = {}
+
+    # Load genre labels (400 classes)
+    try:
+        genre_json = get_model_path("genre_discogs400-discogs-effnet-1.json")
+        with open(genre_json) as f:
+            labels['genre'] = json.load(f)['classes']
+    except Exception as e:
+        logger.warning(f"Could not load genre labels: {e}")
+        labels['genre'] = []
+
+    # Load mood/theme labels (56 classes)
+    try:
+        mood_json = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.json")
+        with open(mood_json) as f:
+            labels['mood'] = json.load(f)['classes']
+    except Exception as e:
+        logger.warning(f"Could not load mood labels: {e}")
+        labels['mood'] = []
+
+    # Load instrument labels (40 classes)
+    try:
+        instrument_json = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.json")
+        with open(instrument_json) as f:
+            labels['instrument'] = json.load(f)['classes']
+    except Exception as e:
+        logger.warning(f"Could not load instrument labels: {e}")
+        labels['instrument'] = []
+
+    return labels
+
+
+# Cache for labels (loaded once)
+_CLASSIFICATION_LABELS = None
+
+def get_classification_labels() -> Dict[str, List[str]]:
+    """Get cached classification labels."""
+    global _CLASSIFICATION_LABELS
+    if _CLASSIFICATION_LABELS is None:
+        _CLASSIFICATION_LABELS = load_classification_labels()
+    return _CLASSIFICATION_LABELS
+
+
+def analyze_genre_mood_instrument(audio_path: str | Path,
+                                   threshold: float = 0.1,
+                                   top_k: int = 10) -> Dict[str, Dict[str, float]]:
+    """
+    Analyze genre, mood, and instrument using Discogs-EffNet embeddings.
+
+    Uses the following models:
+    - discogs-effnet-bs64-1.pb for embeddings
+    - genre_discogs400-discogs-effnet-1.pb for genre (400 classes)
+    - mtg_jamendo_moodtheme-discogs-effnet-1.pb for mood (56 classes)
+    - mtg_jamendo_instrument-discogs-effnet-1.pb for instrument (40 classes)
+
+    Args:
+        audio_path: Path to audio file
+        threshold: Minimum probability threshold for including predictions
+        top_k: Maximum number of top predictions to return per category
+
+    Returns:
+        Dictionary with 'genre', 'mood', 'instrument' keys, each containing
+        a dict of {label: probability} for predictions above threshold
+
+    Raises:
+        ImportError: If essentia-tensorflow is not available
+    """
+    if not ESSENTIA_TF_AVAILABLE:
+        raise ImportError("Essentia-TensorFlow is not installed")
+
+    logger.info(f"Analyzing genre/mood/instrument: {Path(audio_path).name}")
+
+    try:
+        # Load audio at 16kHz with high quality resampling
+        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)
+        audio = loader()
+
+        # Get embeddings using Discogs-EffNet
+        embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
+        embedding_model = TensorflowPredictEffnetDiscogs(
+            graphFilename=embedding_model_path,
+            output="PartitionedCall:1"
+        )
+        embeddings = embedding_model(audio)
+
+        # Load classification models
+        genre_model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
+        mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
+        instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
+
+        genre_model = TensorflowPredict2D(
+            graphFilename=genre_model_path,
+            input="serving_default_model_Placeholder",
+            output="PartitionedCall:0"
+        )
+        mood_model = TensorflowPredict2D(graphFilename=mood_model_path)
+        instrument_model = TensorflowPredict2D(graphFilename=instrument_model_path)
+
+        # Get predictions
+        genre_predictions = genre_model(embeddings)
+        mood_predictions = mood_model(embeddings)
+        instrument_predictions = instrument_model(embeddings)
+
+        # Get labels
+        labels = get_classification_labels()
+
+        # Filter and format predictions
+        results = {
+            'essentia_genre': _filter_predictions(genre_predictions, labels['genre'], threshold, top_k),
+            'essentia_mood': _filter_predictions(mood_predictions, labels['mood'], threshold, top_k),
+            'essentia_instrument': _filter_predictions(instrument_predictions, labels['instrument'], threshold, top_k),
+        }
+
+        # Log summary
+        logger.info(f"  Genres: {len(results['essentia_genre'])} above threshold")
+        logger.info(f"  Moods: {len(results['essentia_mood'])} above threshold")
+        logger.info(f"  Instruments: {len(results['essentia_instrument'])} above threshold")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error analyzing genre/mood/instrument: {e}")
+        raise
+
+
+def _filter_predictions(predictions: np.ndarray,
+                        class_labels: List[str],
+                        threshold: float = 0.1,
+                        top_k: int = 10) -> Dict[str, float]:
+    """
+    Filter predictions by threshold and return top-k results.
+
+    Args:
+        predictions: Model output array (frames x classes)
+        class_labels: List of class names
+        threshold: Minimum probability to include
+        top_k: Maximum results to return
+
+    Returns:
+        Dictionary of {label: probability} sorted by probability descending
+    """
+    # Average predictions across time frames
+    predictions_mean = np.mean(predictions, axis=0)
+
+    # Get sorted indices (descending)
+    sorted_indices = np.argsort(predictions_mean)[::-1]
+
+    result = {}
+    count = 0
+
+    for idx in sorted_indices:
+        if count >= top_k:
+            break
+
+        prob = float(predictions_mean[idx])
+        if prob < threshold:
+            break
+
+        if idx < len(class_labels):
+            label = class_labels[idx]
+            result[label] = round(prob, 4)
+            count += 1
+
+    return result
+
+
+def format_genre_for_prompt(genre_dict: Dict[str, float], max_items: int = 5) -> str:
+    """
+    Format genre predictions as a text string suitable for prompts.
+
+    Args:
+        genre_dict: Dictionary of {genre: probability}
+        max_items: Maximum number of genres to include
+
+    Returns:
+        Formatted string like "Electronic---Techno (0.85), Electronic---House (0.72)"
+    """
+    if not genre_dict:
+        return ""
+
+    # Sort by probability and take top items
+    sorted_items = sorted(genre_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
+
+    # Format as string
+    parts = [f"{genre} ({prob:.2f})" for genre, prob in sorted_items]
+    return ", ".join(parts)
+
+
+def format_mood_for_prompt(mood_dict: Dict[str, float], max_items: int = 5) -> str:
+    """
+    Format mood predictions as a text string suitable for prompts.
+
+    Args:
+        mood_dict: Dictionary of {mood: probability}
+        max_items: Maximum number of moods to include
+
+    Returns:
+        Formatted string like "energetic (0.82), upbeat (0.75)"
+    """
+    if not mood_dict:
+        return ""
+
+    sorted_items = sorted(mood_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
+    parts = [f"{mood} ({prob:.2f})" for mood, prob in sorted_items]
+    return ", ".join(parts)
+
+
+def format_instrument_for_prompt(instrument_dict: Dict[str, float], max_items: int = 5) -> str:
+    """
+    Format instrument predictions as a text string suitable for prompts.
+
+    Args:
+        instrument_dict: Dictionary of {instrument: probability}
+        max_items: Maximum number of instruments to include
+
+    Returns:
+        Formatted string like "synthesizer (0.91), drums (0.88)"
+    """
+    if not instrument_dict:
+        return ""
+
+    sorted_items = sorted(instrument_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
+    parts = [f"{inst} ({prob:.2f})" for inst, prob in sorted_items]
+    return ", ".join(parts)
+
+
 def analyze_folder_essentia_features(audio_folder: str | Path,
                                      save_to_info: bool = True,
                                      include_voice_analysis: bool = False,
-                                     include_gender: bool = False) -> Dict[str, float]:
+                                     include_gender: bool = False,
+                                     include_gmi: bool = False) -> Dict[str, Any]:
     """
     Analyze Essentia high-level features for an organized audio folder.
 
@@ -455,6 +695,7 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
         save_to_info: Whether to save results to .INFO file
         include_voice_analysis: Whether to analyze voice/instrumental content
         include_gender: Whether to analyze vocal gender (only if voice detected)
+        include_gmi: Whether to analyze genre, mood, and instrument
 
     Returns:
         Dictionary with Essentia features
@@ -508,6 +749,14 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
         except Exception as e:
             logger.error(f"Could not analyze voice/instrumental: {e}")
 
+    # Analyze genre, mood, and instrument if requested
+    if include_gmi:
+        try:
+            gmi_results = analyze_genre_mood_instrument(full_mix_path)
+            results.update(gmi_results)
+        except Exception as e:
+            logger.error(f"Could not analyze genre/mood/instrument: {e}")
+
     # Save to .INFO file if requested
     if save_to_info and results:
         try:
@@ -523,7 +772,8 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
 def batch_analyze_essentia_features(root_directory: str | Path,
                                     save_to_info: bool = True,
                                     include_voice_analysis: bool = False,
-                                    include_gender: bool = False) -> Dict[str, any]:
+                                    include_gender: bool = False,
+                                    include_gmi: bool = False) -> Dict[str, any]:
     """
     Batch analyze Essentia features for all organized folders.
 
@@ -532,6 +782,7 @@ def batch_analyze_essentia_features(root_directory: str | Path,
         save_to_info: Whether to save results to .INFO files
         include_voice_analysis: Whether to analyze voice/instrumental content
         include_gender: Whether to analyze vocal gender
+        include_gmi: Whether to analyze genre, mood, and instrument
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -562,7 +813,8 @@ def batch_analyze_essentia_features(root_directory: str | Path,
                 folder,
                 save_to_info=save_to_info,
                 include_voice_analysis=include_voice_analysis,
-                include_gender=include_gender
+                include_gender=include_gender,
+                include_gmi=include_gmi
             )
             stats['success'] += 1
 
@@ -623,6 +875,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--gmi',
+        action='store_true',
+        help='Include genre, mood, and instrument classification (Discogs-EffNet)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -651,7 +909,8 @@ if __name__ == "__main__":
                 path,
                 save_to_info=not args.no_save,
                 include_voice_analysis=args.voice,
-                include_gender=args.gender
+                include_gender=args.gender,
+                include_gmi=args.gmi
             )
 
             if stats['failed'] > 0:
@@ -664,7 +923,8 @@ if __name__ == "__main__":
                 path,
                 save_to_info=not args.no_save,
                 include_voice_analysis=args.voice,
-                include_gender=args.gender
+                include_gender=args.gender,
+                include_gmi=args.gmi
             )
 
             # Print results
@@ -672,6 +932,10 @@ if __name__ == "__main__":
             for key, value in sorted(results.items()):
                 if isinstance(value, float):
                     print(f"  {key}: {value:.3f}")
+                elif isinstance(value, dict):
+                    print(f"  {key}:")
+                    for k, v in sorted(value.items(), key=lambda x: x[1], reverse=True)[:5]:
+                        print(f"    {k}: {v:.3f}")
                 else:
                     print(f"  {key}: {value}")
 
