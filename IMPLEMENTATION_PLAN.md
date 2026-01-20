@@ -296,11 +296,20 @@ Output structure per audio file:
   - Production Quality: `{production_quality}` (1-10)
 - **Note:** Use high dropout during training
 
-#### 6.3 Smart Cropping
-- **File:** `mir/preprocessing/smart_cropper.py`
-- **Goal:** Create training clips from full songs
-- **Output:** Files in `/crops` subfolder with `section_N` suffix
-- **Calculate:** `position_in_file` based on full_mix length
+#### 6.3 Smart Cropping ✅ COMPLETED
+- **File:** `src/tools/create_training_crops.py`
+- **Goal:** Create training clips from full songs for Stable Audio Tools
+- **Features:**
+  - **Length in samples:** `--length 2097152` (default ~47.5s at 44.1kHz)
+  - **Sequential mode:** `--sequential` for fixed-length crops without beat alignment
+  - **Beat-aligned mode:** Start snaps to closest downbeat, end snaps backwards
+  - **Div4 mode:** `--div4` ensures downbeat count divisible by 4
+  - **50% overlap:** `--overlap` flag for overlapping crops
+  - **Zero-crossing snap:** Prevents clicks (backwards search, 50ms window)
+  - **10ms fades:** Fade-in and fade-out on all crops
+  - **Silence detection:** -72dB threshold for skipping initial silence
+- **Output:** Files in `/crops` subfolder with `section_NNN_stem.flac` + `.json` metadata
+- **Metadata includes:** position, start/end time, start/end sample, duration, samples, downbeats, source
 
 ### Phase 7: Conditioner Formatting (INTEGRATION)
 **Goal:** Format all extracted features for SAO training

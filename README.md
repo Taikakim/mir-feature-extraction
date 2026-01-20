@@ -151,7 +151,27 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 
 **Processing Time:** ~35s per track (standard features), ~2.5min per track (with all 5 AI descriptions)
 
-### 5. Access Results
+### 5. Create Training Crops (Optional)
+
+```bash
+# Sequential mode: exact sample length, no beat alignment
+python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --sequential
+
+# Beat-aligned with 50% overlap
+python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap
+
+# Beat-aligned with div4 downbeats (measures divisible by 4)
+python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap --div4
+```
+
+**Crop Features:**
+- Length in samples (default 2097152 = ~47.5s at 44.1kHz)
+- Beat-aligned start/end with zero-crossing snap for click-free cuts
+- Optional `--div4` ensures each crop contains downbeats divisible by 4
+- 10ms fade-in/fade-out on all crops
+- Metadata saved as `.json` sidecars with position, sample counts, downbeats
+
+### 6. Access Results
 
 Features saved to `.INFO` JSON files:
 
@@ -314,11 +334,11 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 
 **Solution:** Framework uses MP3 output @ 320kbps which bypasses TorchCodec compatibility issues. Quality sufficient for MIR analysis.
 
-### Audio Commons Default Values
+### ✅ AudioBox Aesthetics (FIXED)
 
-**Status:** AudioBox aesthetics features (content_enjoyment, content_usefulness, production_complexity, production_quality) currently use default value 5.5.
+**Status:** AudioBox aesthetics features now use actual Meta AudioBox model inference.
 
-**Solution:** AudioBox model inference implementation planned for future update.
+**Solution:** Implemented in `src/timbral/audiobox_aesthetics.py` using `audiobox_aesthetics` package from GitHub.
 
 ---
 
@@ -344,7 +364,7 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 - ✅ Music Flamingo descriptions (5 prompt types)
 
 **Missing:**
-- ❌ Position feature (requires smart cropping system)
+- ✅ Position feature (implemented via smart cropping system)
 
 See [FEATURES_STATUS.md](FEATURES_STATUS.md) for complete details.
 
@@ -363,11 +383,11 @@ See [FEATURES_STATUS.md](FEATURES_STATUS.md) for complete details.
 - Timbral features (Audio Commons 8 features)
 - Classification (danceability, atonality, aesthetics)
 
-### 🔧 Phase 2: Dataset Preparation (IN PROGRESS)
-- Smart cropping system
-- Position feature calculation
-- Statistical analysis tool
-- AudioBox model inference
+### ✅ Phase 2: Dataset Preparation (COMPLETE)
+- ✅ Smart cropping system (`src/tools/create_training_crops.py`)
+- ✅ Position feature calculation (via cropping metadata)
+- ✅ AudioBox model inference (`src/timbral/audiobox_aesthetics.py`)
+- Statistical analysis tool (planned)
 
 ### ✅ Phase 3: AI Classification (COMPLETE)
 - Genre classification (400 Discogs genres via Essentia)
@@ -426,7 +446,7 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Version:** 1.1
-**Last Updated:** 2026-01-19
-**Status:** Production Ready (Core + AI Features)
-**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions
+**Version:** 1.2
+**Last Updated:** 2026-01-20
+**Status:** Production Ready (Core + AI Features + Training Crops)
+**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions + smart cropping
