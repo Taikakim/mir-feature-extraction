@@ -1,28 +1,25 @@
 """
-Chroma Features Analysis for MIR Project
+Chroma Features Analysis for MIR Project (Essentia HPCP)
 
-This module extracts average chroma features from audio signals.
-Chroma represents the pitch class distribution across 12 semitones.
+This module extracts average chroma features using Essentia's HPCP
+(Harmonic Pitch Class Profile) algorithm.
 
-For now, this calculates a simple global average chroma vector for the
-entire clip, with each semitone having a weight from 0-1.
-
-Later versions may implement time-variant chroma features.
+Uses unitSum normalization so values represent a probability distribution
+of pitch classes - comparable across different audio files for AI training.
 
 Dependencies:
-- librosa
+- essentia
 - numpy
 - soundfile
 - src.core.file_utils
 - src.core.common
 
 Output:
-- chroma_0 through chroma_11: Average pitch class weights (0-1) for each semitone
+- chroma_0 through chroma_11: Pitch class weights (sum to 1.0) for each semitone
   (C, C#, D, D#, E, F, F#, G, G#, A, A#, B)
 """
 
 import numpy as np
-import librosa
 import soundfile as sf
 from pathlib import Path
 from typing import Dict
@@ -41,111 +38,154 @@ logger = logging.getLogger(__name__)
 PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 
-def calculate_average_chroma(audio: np.ndarray,
-                              sample_rate: int,
-                              n_fft: int = 2048,
-                              hop_length: int = 512,
-                              n_chroma: int = 12) -> np.ndarray:
+def calculate_hpcp(audio: np.ndarray,
+                   sample_rate: int,
+                   frame_size: int = 4096,
+                   hop_size: int = 2048) -> np.ndarray:
     """
-    Calculate average chroma vector for entire audio clip.
+    Calculate average HPCP (Harmonic Pitch Class Profile) for audio.
 
-    Uses constant-Q chromagram for better pitch resolution.
+    Uses Essentia's HPCP algorithm with unitSum normalization for
+    cross-file comparability in AI training.
 
     Args:
-        audio: Audio signal (mono)
+        audio: Audio signal (mono, float32)
         sample_rate: Sample rate in Hz
-        n_fft: FFT window size
-        hop_length: Hop length in samples
-        n_chroma: Number of chroma bins (12 for semitones)
+        frame_size: Analysis frame size
+        hop_size: Hop size between frames
 
     Returns:
-        Array of 12 chroma values, each 0-1
+        Array of 12 chroma values that sum to 1.0
     """
-    # Calculate constant-Q chromagram
-    chroma = librosa.feature.chroma_cqt(
-        y=audio,
-        sr=sample_rate,
-        hop_length=hop_length,
-        n_chroma=n_chroma
+    import essentia
+    from essentia.standard import (
+        Windowing, Spectrum, SpectralPeaks, HPCP, FrameGenerator
     )
 
-    # Average across time
-    avg_chroma = np.mean(chroma, axis=1)
+    # Ensure float32 for Essentia
+    audio = audio.astype(np.float32)
 
-    # Normalize to 0-1 range
-    # The chromagram is already normalized per frame, but we'll ensure 0-1 range
-    max_val = np.max(avg_chroma)
-    if max_val > 0:
-        avg_chroma = avg_chroma / max_val
+    # Initialize Essentia algorithms
+    windowing = Windowing(type='blackmanharris62')
+    spectrum = Spectrum()
+    spectral_peaks = SpectralPeaks(
+        sampleRate=sample_rate,
+        maxPeaks=100,
+        magnitudeThreshold=0.00001,
+        minFrequency=20,
+        maxFrequency=sample_rate / 2 - 1
+    )
+    hpcp = HPCP(
+        size=12,
+        sampleRate=sample_rate,
+        normalized='unitSum',  # Values sum to 1.0 - comparable across files
+        harmonics=4,           # Include harmonics for better pitch detection
+        bandPreset=False       # Disable band preset to avoid warnings with unitSum
+    )
 
-    return avg_chroma
+    # Process frames and accumulate HPCP
+    hpcp_frames = []
+
+    for frame in FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size,
+                                 startFromZero=True):
+        windowed = windowing(frame)
+        spec = spectrum(windowed)
+        frequencies, magnitudes = spectral_peaks(spec)
+
+        # Skip frames with no peaks
+        if len(frequencies) > 0:
+            frame_hpcp = hpcp(frequencies, magnitudes)
+            hpcp_frames.append(frame_hpcp)
+
+    if not hpcp_frames:
+        logger.warning("No valid HPCP frames extracted, returning uniform distribution")
+        return np.ones(12) / 12
+
+    # Average across all frames
+    avg_hpcp = np.mean(hpcp_frames, axis=0)
+
+    # Re-normalize to ensure sum = 1.0 after averaging
+    hpcp_sum = np.sum(avg_hpcp)
+    if hpcp_sum > 0:
+        avg_hpcp = avg_hpcp / hpcp_sum
+
+    return avg_hpcp
 
 
 def analyze_chroma(audio_path: str | Path,
-                   n_fft: int = 2048,
-                   hop_length: int = 512) -> Dict[str, float]:
+                   frame_size: int = 4096,
+                   hop_size: int = 2048) -> Dict[str, float]:
     """
-    Analyze chroma features for an audio file.
+    Analyze chroma features for an audio file using Essentia HPCP.
 
-    Calculates a global average chroma vector representing the
-    distribution of pitch classes across the entire clip.
+    Calculates a global average HPCP vector representing the
+    probability distribution of pitch classes across the entire clip.
 
     Args:
         audio_path: Path to audio file
-        n_fft: FFT window size
-        hop_length: Hop length in samples
+        frame_size: Analysis frame size
+        hop_size: Hop size between frames
 
     Returns:
         Dictionary with chroma features:
-        - chroma_0 through chroma_11: Weights for each semitone (0-1)
+        - chroma_0 through chroma_11: Weights for each semitone (sum to 1.0)
     """
     audio_path = Path(audio_path)
 
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Analyzing chroma: {audio_path.name}")
+    logger.info(f"Analyzing chroma (HPCP): {audio_path.name}")
 
-    # Load audio
-    audio, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    # Load audio with soundfile (avoids librosa/numba issues)
+    audio, sr = sf.read(str(audio_path), dtype='float32')
+
+    # Convert to mono if stereo
+    if len(audio.shape) > 1:
+        audio = np.mean(audio, axis=1)
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
 
-    # Calculate average chroma
-    avg_chroma = calculate_average_chroma(audio, sr, n_fft, hop_length)
+    # Calculate average HPCP
+    avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
 
     # Compile results
     results = {}
     for i in range(12):
         feature_name = f'chroma_{i}'
-        results[feature_name] = float(avg_chroma[i])
+        results[feature_name] = float(avg_hpcp[i])
 
     # Clamp values to valid ranges
     for key, value in results.items():
         results[key] = clamp_feature_value(key, value)
 
     # Log results with pitch class names
-    logger.info("Average chroma distribution:")
+    logger.info("HPCP pitch class distribution (unitSum normalized):")
     for i in range(12):
         pitch_class = PITCH_CLASSES[i]
         weight = results[f'chroma_{i}']
-        logger.info(f"  {pitch_class:>2}: {weight:.3f}")
+        bar = '█' * int(weight * 40)
+        logger.info(f"  {pitch_class:>2}: {weight:.3f} {bar}")
+
+    # Verify sum ≈ 1.0
+    total = sum(results.values())
+    logger.debug(f"Sum of chroma values: {total:.4f}")
 
     return results
 
 
 def batch_analyze_chroma(root_directory: str | Path,
                           overwrite: bool = False,
-                          n_fft: int = 2048,
-                          hop_length: int = 512) -> dict:
+                          frame_size: int = 4096,
+                          hop_size: int = 2048) -> dict:
     """
     Batch analyze chroma features for all organized folders.
 
     Args:
         root_directory: Root directory to search
         overwrite: Whether to overwrite existing chroma data
-        n_fft: FFT window size
-        hop_length: Hop length in samples
+        frame_size: Analysis frame size
+        hop_size: Hop size between frames
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -153,7 +193,7 @@ def batch_analyze_chroma(root_directory: str | Path,
     from core.file_utils import find_organized_folders
 
     root_directory = Path(root_directory)
-    logger.info(f"Starting batch chroma analysis: {root_directory}")
+    logger.info(f"Starting batch HPCP chroma analysis: {root_directory}")
 
     folders = find_organized_folders(root_directory)
 
@@ -195,8 +235,8 @@ def batch_analyze_chroma(root_directory: str | Path,
         try:
             results = analyze_chroma(
                 stems['full_mix'],
-                n_fft=n_fft,
-                hop_length=hop_length
+                frame_size=frame_size,
+                hop_size=hop_size
             )
 
             # Save to .INFO file
@@ -207,7 +247,7 @@ def batch_analyze_chroma(root_directory: str | Path,
             # Log dominant pitch classes
             sorted_chroma = sorted(results.items(), key=lambda x: x[1], reverse=True)
             top_3 = [(int(k.split('_')[1]), v) for k, v in sorted_chroma[:3]]
-            top_3_str = ', '.join([f"{PITCH_CLASSES[idx]}:{val:.2f}" for idx, val in top_3])
+            top_3_str = ', '.join([f"{PITCH_CLASSES[idx]}:{val:.3f}" for idx, val in top_3])
             logger.info(f"Top 3 pitch classes: {top_3_str}")
 
         except Exception as e:
@@ -218,7 +258,7 @@ def batch_analyze_chroma(root_directory: str | Path,
 
     # Summary
     logger.info("=" * 60)
-    logger.info("Batch Chroma Analysis Summary:")
+    logger.info("Batch HPCP Chroma Analysis Summary:")
     logger.info(f"  Total folders:  {stats['total']}")
     logger.info(f"  Successful:     {stats['success']}")
     logger.info(f"  Skipped:        {stats['skipped']}")
@@ -234,7 +274,7 @@ if __name__ == "__main__":
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Analyze chroma features in audio files"
+        description="Analyze chroma features using Essentia HPCP"
     )
 
     parser.add_argument(
@@ -250,17 +290,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--n-fft',
+        '--frame-size',
         type=int,
-        default=2048,
-        help='FFT window size (default: 2048)'
+        default=4096,
+        help='Analysis frame size (default: 4096)'
     )
 
     parser.add_argument(
-        '--hop-length',
+        '--hop-size',
         type=int,
-        default=512,
-        help='Hop length in samples (default: 512)'
+        default=2048,
+        help='Hop size in samples (default: 2048)'
     )
 
     parser.add_argument(
@@ -293,8 +333,8 @@ if __name__ == "__main__":
             stats = batch_analyze_chroma(
                 path,
                 overwrite=args.overwrite,
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
             if stats['failed'] > 0:
@@ -310,35 +350,39 @@ if __name__ == "__main__":
 
             results = analyze_chroma(
                 stems['full_mix'],
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
             # Save to .INFO
             info_path = get_info_path(path)
             safe_update(info_path, results)
 
-            print(f"\nChroma Features Results:")
+            print(f"\nHPCP Chroma Features (unitSum normalized, sum ≈ 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
-                print(f"  {pitch_class:>2} (chroma_{i:2d}): {weight:.3f}")
+                bar = '█' * int(weight * 40)
+                print(f"  {pitch_class:>2} (chroma_{i:2d}): {weight:.3f} {bar}")
+            print(f"\n  Sum: {sum(results.values()):.4f}")
 
         else:
             # Single file
             results = analyze_chroma(
                 path,
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
-            print(f"\nChroma Features Results:")
+            print(f"\nHPCP Chroma Features (unitSum normalized, sum ≈ 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
-                print(f"  {pitch_class:>2} (chroma_{i:2d}): {weight:.3f}")
+                bar = '█' * int(weight * 40)
+                print(f"  {pitch_class:>2} (chroma_{i:2d}): {weight:.3f} {bar}")
+            print(f"\n  Sum: {sum(results.values()):.4f}")
 
-        logger.info("Chroma analysis completed successfully")
+        logger.info("HPCP chroma analysis completed successfully")
 
     except Exception as e:
         logger.error(f"Error: {e}")
