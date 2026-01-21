@@ -6,19 +6,19 @@ Separates audio into: drums, bass, other, vocals
 
 Dependencies:
 - demucs
+- soundfile (for OGG conversion and fallback saving)
 - src.core.file_utils
 - src.core.common
 
-Output:
-- drums.mp3
-- bass.mp3
-- other.mp3
-- vocals.mp3
+Output formats supported:
+- FLAC (lossless, default)
+- MP3 (lossy, CBR or VBR)
+- OGG (lossy, via post-conversion)
+- WAV (16-bit, 24-bit, or 32-bit float)
 
 Configuration (from MIR plan):
 - Model: htdemucs (HT v4)
 - Shifts: 1
-- File type: mp3 @ 320kbps (changed from flac due to TorchCodec/FFmpeg issues)
 - Concurrent jobs: 4
 """
 
@@ -37,6 +37,17 @@ from core.common import DEMUCS_CONFIG, DEMUCS_STEMS, AUDIO_EXTENSIONS
 logger = logging.getLogger(__name__)
 
 
+# Output format configurations
+OUTPUT_FORMATS = {
+    'flac': {'ext': '.flac', 'demucs_flag': '--flac'},
+    'mp3': {'ext': '.mp3', 'demucs_flag': '--mp3'},
+    'wav': {'ext': '.wav', 'demucs_flag': None},  # Default
+    'wav24': {'ext': '.wav', 'demucs_flag': '--int24'},
+    'wav32': {'ext': '.wav', 'demucs_flag': '--float32'},
+    'ogg': {'ext': '.ogg', 'demucs_flag': None, 'post_convert': True},
+}
+
+
 def check_demucs_installed() -> bool:
     """
     Check if demucs is installed and available.
@@ -47,12 +58,75 @@ def check_demucs_installed() -> bool:
     return shutil.which('demucs') is not None
 
 
+def convert_to_ogg(input_path: Path, output_path: Path, quality: float = 0.5) -> bool:
+    """
+    Convert audio file to OGG Vorbis using soundfile.
+
+    Args:
+        input_path: Path to input audio file
+        output_path: Path for output OGG file
+        quality: OGG quality (0.0-1.0, default 0.5 ~ 160kbps)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        import soundfile as sf
+        import numpy as np
+
+        # Read input file
+        data, sr = sf.read(str(input_path))
+
+        # Write as OGG
+        sf.write(str(output_path), data, sr, format='OGG', subtype='VORBIS')
+
+        logger.debug(f"Converted {input_path.name} to OGG")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to convert to OGG: {e}")
+        return False
+
+
+def convert_wav_to_flac_soundfile(input_path: Path, output_path: Path) -> bool:
+    """
+    Convert WAV to FLAC using soundfile (fallback for torchcodec issues).
+
+    Args:
+        input_path: Path to input WAV file
+        output_path: Path for output FLAC file
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        import soundfile as sf
+
+        # Read WAV
+        data, sr = sf.read(str(input_path))
+
+        # Write as FLAC
+        sf.write(str(output_path), data, sr, format='FLAC')
+
+        logger.debug(f"Converted {input_path.name} to FLAC via soundfile")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to convert to FLAC: {e}")
+        return False
+
+
 def separate_stems(audio_file: str | Path,
                    output_dir: str | Path,
                    model: str = None,
                    shifts: int = None,
                    jobs: int = None,
-                   device: str = 'cuda') -> Dict[str, Path]:
+                   device: str = 'cuda',
+                   output_format: str = 'flac',
+                   mp3_bitrate: int = 320,
+                   mp3_preset: int = 2,
+                   ogg_quality: float = 0.5,
+                   clip_mode: str = 'rescale') -> Dict[str, Path]:
     """
     Separate an audio file into stems using Demucs.
 
@@ -63,6 +137,11 @@ def separate_stems(audio_file: str | Path,
         shifts: Number of random shifts for prediction (default: from config)
         jobs: Number of parallel jobs (default: from config)
         device: Device to use ('cuda', 'cpu', 'mps')
+        output_format: Output format - 'flac', 'mp3', 'ogg', 'wav', 'wav24', 'wav32'
+        mp3_bitrate: Bitrate for MP3 output (64-320, default 320)
+        mp3_preset: VBR preset for MP3 (2-7, 2=best quality, 7=fastest)
+        ogg_quality: Quality for OGG output (0.0-1.0, default 0.5)
+        clip_mode: Clipping strategy - 'rescale' or 'clamp'
 
     Returns:
         Dictionary mapping stem names to output file paths
@@ -80,6 +159,10 @@ def separate_stems(audio_file: str | Path,
     if not audio_file.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
+    if output_format not in OUTPUT_FORMATS:
+        raise ValueError(f"Unsupported output format: {output_format}. "
+                        f"Supported: {list(OUTPUT_FORMATS.keys())}")
+
     # Use defaults from config if not specified
     if model is None:
         model = DEMUCS_CONFIG['model']
@@ -88,36 +171,53 @@ def separate_stems(audio_file: str | Path,
     if jobs is None:
         jobs = DEMUCS_CONFIG['jobs']
 
+    format_config = OUTPUT_FORMATS[output_format]
+    final_ext = format_config['ext']
+    needs_post_convert = format_config.get('post_convert', False)
+
     logger.info(f"Separating stems: {audio_file.name}")
-    logger.info(f"Model: {model}, Shifts: {shifts}, Jobs: {jobs}, Device: {device}")
+    logger.info(f"Model: {model}, Shifts: {shifts}, Device: {device}, Format: {output_format}")
 
-    # Prepare demucs command
-    cmd = [
-        'demucs',
-        '--two-stems=vocals',  # This separates into 4 stems with htdemucs
-        '-n', model,
-        '--shifts', str(shifts),
-        '-j', str(jobs),
-        '--out', str(output_dir),
-        '--filename', '{track}.{stem}.flac',  # Output format
-        '-d', device,
-        str(audio_file)
-    ]
-
-    # Note: If using --two-stems, remove it for full 4-stem separation
-    # For htdemucs, we want all 4 stems, so let's adjust:
+    # Build demucs command
     cmd = [
         'demucs',
         '-n', model,
         '--shifts', str(shifts),
         '-j', str(jobs),
         '--out', str(output_dir),
-        '--filename', '{stem}.mp3',
-        '--mp3',
-        '--mp3-bitrate', '320',
+        '--clip-mode', clip_mode,
         '-d', device,
-        str(audio_file)
     ]
+
+    # Determine demucs output format
+    # For OGG: use WAV then convert
+    # For FLAC: try native, fallback to WAV + convert if torchcodec issues
+    if output_format == 'ogg':
+        # Output as WAV, convert later
+        demucs_ext = '.wav'
+        cmd.extend(['--filename', '{stem}.wav'])
+    elif output_format == 'mp3':
+        demucs_ext = '.mp3'
+        cmd.extend(['--mp3', '--mp3-bitrate', str(mp3_bitrate)])
+        if mp3_preset != 2:  # Only add if not default
+            cmd.extend(['--mp3-preset', str(mp3_preset)])
+        cmd.extend(['--filename', '{stem}.mp3'])
+    elif output_format == 'flac':
+        demucs_ext = '.flac'
+        cmd.extend(['--flac', '--filename', '{stem}.flac'])
+    elif output_format == 'wav24':
+        demucs_ext = '.wav'
+        cmd.extend(['--int24', '--filename', '{stem}.wav'])
+    elif output_format == 'wav32':
+        demucs_ext = '.wav'
+        cmd.extend(['--float32', '--filename', '{stem}.wav'])
+    else:  # wav (16-bit default)
+        demucs_ext = '.wav'
+        cmd.extend(['--filename', '{stem}.wav'])
+
+    cmd.append(str(audio_file))
+
+    logger.debug(f"Running: {' '.join(cmd)}")
 
     try:
         # Run demucs
@@ -129,58 +229,85 @@ def separate_stems(audio_file: str | Path,
         )
 
         logger.debug(f"Demucs stdout: {result.stdout}")
-
-        # Find output files
-        # Demucs MP3 output: output_dir/model_name/stem.mp3 (flat structure)
-        # We need to move them to the correct location
-
-        # Check flat structure first (MP3 output)
-        demucs_output_flat = output_dir / model
-        demucs_output_nested = output_dir / model / audio_file.stem
-
-        stem_paths = {}
-
-        # Try flat structure first (MP3)
-        if demucs_output_flat.exists():
-            for stem_name in DEMUCS_STEMS:
-                stem_file = demucs_output_flat / f"{stem_name}.mp3"
-                if stem_file.exists():
-                    # Move to final location (parent of demucs output)
-                    final_path = output_dir / f"{stem_name}.mp3"
-                    shutil.move(str(stem_file), str(final_path))
-                    stem_paths[stem_name] = final_path
-                    logger.info(f"  Created: {stem_name}.mp3")
-
-        # Try nested structure (WAV/FLAC)
-        if not stem_paths and demucs_output_nested.exists():
-            for stem_name in DEMUCS_STEMS:
-                for ext in ['.mp3', '.wav', '.flac']:
-                    stem_file = demucs_output_nested / f"{stem_name}{ext}"
-                    if stem_file.exists():
-                        final_path = output_dir / f"{stem_name}{ext}"
-                        shutil.move(str(stem_file), str(final_path))
-                        stem_paths[stem_name] = final_path
-                        logger.info(f"  Created: {stem_name}{ext}")
-                        break
-
-        # Clean up demucs output directory structure
-        try:
-            shutil.rmtree(output_dir / model)
-        except:
-            pass
-
-        if not stem_paths:
-            raise RuntimeError("No stem files were created by demucs")
-
-        logger.info(f"Successfully separated {len(stem_paths)} stems")
-        return stem_paths
+        if result.stderr:
+            logger.debug(f"Demucs stderr: {result.stderr}")
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Demucs failed: {e.stderr}")
-        raise
-    except Exception as e:
-        logger.error(f"Error during separation: {e}")
-        raise
+        error_msg = e.stderr if e.stderr else str(e)
+
+        # Check for torchcodec/FFmpeg errors with FLAC
+        if output_format == 'flac' and ('torchcodec' in error_msg.lower() or
+                                         'ffmpeg' in error_msg.lower() or
+                                         'encoder' in error_msg.lower()):
+            logger.warning("FLAC output failed (likely torchcodec issue), "
+                          "falling back to WAV + soundfile conversion")
+
+            # Retry with WAV output
+            cmd_fallback = [c for c in cmd if c not in ['--flac']]
+            # Replace filename pattern
+            cmd_fallback = [c.replace('.flac', '.wav') if '.flac' in c else c
+                           for c in cmd_fallback]
+
+            result = subprocess.run(
+                cmd_fallback,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            demucs_ext = '.wav'
+            needs_post_convert = True  # Will convert WAV to FLAC
+        else:
+            logger.error(f"Demucs failed: {error_msg}")
+            raise
+
+    # Find and move output files
+    demucs_output = output_dir / model
+    stem_paths = {}
+
+    if demucs_output.exists():
+        for stem_name in DEMUCS_STEMS:
+            stem_file = demucs_output / f"{stem_name}{demucs_ext}"
+            if stem_file.exists():
+                final_path = output_dir / f"{stem_name}{final_ext}"
+
+                # Post-conversion if needed
+                if needs_post_convert or output_format == 'ogg':
+                    if output_format == 'ogg':
+                        if convert_to_ogg(stem_file, final_path, ogg_quality):
+                            stem_file.unlink()  # Remove WAV
+                            stem_paths[stem_name] = final_path
+                            logger.info(f"  Created: {stem_name}.ogg")
+                        else:
+                            logger.error(f"  Failed to convert {stem_name} to OGG")
+                    elif output_format == 'flac' and demucs_ext == '.wav':
+                        # Fallback FLAC conversion
+                        if convert_wav_to_flac_soundfile(stem_file, final_path):
+                            stem_file.unlink()  # Remove WAV
+                            stem_paths[stem_name] = final_path
+                            logger.info(f"  Created: {stem_name}.flac (via soundfile)")
+                        else:
+                            # Keep WAV as fallback
+                            wav_final = output_dir / f"{stem_name}.wav"
+                            shutil.move(str(stem_file), str(wav_final))
+                            stem_paths[stem_name] = wav_final
+                            logger.warning(f"  FLAC conversion failed, kept as: {stem_name}.wav")
+                else:
+                    # Direct move
+                    shutil.move(str(stem_file), str(final_path))
+                    stem_paths[stem_name] = final_path
+                    logger.info(f"  Created: {stem_name}{final_ext}")
+
+    # Clean up demucs output directory structure
+    try:
+        shutil.rmtree(output_dir / model)
+    except:
+        pass
+
+    if not stem_paths:
+        raise RuntimeError("No stem files were created by demucs")
+
+    logger.info(f"Successfully separated {len(stem_paths)} stems")
+    return stem_paths
 
 
 def separate_organized_folder(audio_folder: str | Path,
@@ -221,13 +348,13 @@ def separate_organized_folder(audio_folder: str | Path,
         existing_stems = {}
         for stem_name in DEMUCS_STEMS:
             # Check for any audio extension
-            for ext in ['.wav', '.mp3', '.flac', '.ogg', '.m4a']:
+            for ext in ['.flac', '.mp3', '.ogg', '.wav', '.m4a']:
                 stem_path = audio_folder / f"{stem_name}{ext}"
                 if stem_path.exists():
                     existing_stems[stem_name] = stem_path
                     break
 
-        if existing_stems:
+        if len(existing_stems) == len(DEMUCS_STEMS):
             logger.info(f"Stems already exist: {list(existing_stems.keys())}. Use --overwrite to regenerate.")
             return existing_stems
 
@@ -303,7 +430,18 @@ if __name__ == "__main__":
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Separate audio into stems using Demucs"
+        description="Separate audio into stems using Demucs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Output format examples:
+  --format flac              Lossless FLAC (default)
+  --format mp3 --bitrate 320 High quality MP3 CBR
+  --format mp3 --preset 2    High quality MP3 VBR
+  --format ogg --ogg-quality 0.6  OGG Vorbis (~192kbps)
+  --format wav               16-bit WAV
+  --format wav24             24-bit WAV
+  --format wav32             32-bit float WAV
+"""
     )
 
     parser.add_argument(
@@ -347,6 +485,45 @@ if __name__ == "__main__":
         help='Device to use for processing (default: cuda)'
     )
 
+    # Output format options
+    parser.add_argument(
+        '--format', '-f',
+        type=str,
+        default='flac',
+        choices=['flac', 'mp3', 'ogg', 'wav', 'wav24', 'wav32'],
+        help='Output format (default: flac)'
+    )
+
+    parser.add_argument(
+        '--bitrate',
+        type=int,
+        default=320,
+        help='MP3 bitrate in kbps for CBR mode (64-320, default: 320)'
+    )
+
+    parser.add_argument(
+        '--preset',
+        type=int,
+        default=2,
+        choices=[2, 3, 4, 5, 6, 7],
+        help='MP3 VBR preset (2=best quality, 7=fastest, default: 2)'
+    )
+
+    parser.add_argument(
+        '--ogg-quality',
+        type=float,
+        default=0.5,
+        help='OGG Vorbis quality (0.0-1.0, default: 0.5 ~ 160kbps)'
+    )
+
+    parser.add_argument(
+        '--clip-mode',
+        type=str,
+        default='rescale',
+        choices=['rescale', 'clamp'],
+        help='Clipping strategy (default: rescale)'
+    )
+
     parser.add_argument(
         '--overwrite',
         action='store_true',
@@ -381,7 +558,12 @@ if __name__ == "__main__":
             'model': args.model,
             'shifts': args.shifts,
             'jobs': args.jobs,
-            'device': args.device
+            'device': args.device,
+            'output_format': args.format,
+            'mp3_bitrate': args.bitrate,
+            'mp3_preset': args.preset,
+            'ogg_quality': args.ogg_quality,
+            'clip_mode': args.clip_mode,
         }
 
         # Remove None values

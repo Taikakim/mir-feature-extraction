@@ -1,7 +1,6 @@
 # MIR Feature Extraction Framework
 
 !==! Very much a hot work-in-progress mess, but it alread kind of works for me and my RX 9070 XT, so I thought, it could be a good starting point for other people too. !==!
-!==! None of the algos have been reviewed yet for correct implementation. I will leave that to the end since fixing implementation errors should not break anything, unlike the kind of total overhauls the code is still seeing through. !==!
 
 **Comprehensive music feature extraction pipeline for conditioning Stable Audio Tools and similar audio generation models.**
 
@@ -21,6 +20,7 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 ✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
 ✅ **4-Stem Separation** using Demucs HT v4 (drums, bass, other, vocals)
 ✅ **GPU Accelerated** processing (AMD ROCm / NVIDIA CUDA)
+✅ **MIDI Drum Transcription** using ADTOF-PyTorch or Drumsep
 ✅ **Batch Processing** with automatic organization
 ✅ **Safe JSON Updates** with feature merging
 ✅ **Production Ready** - optimized for AMD RDNA4 (RX 9070 XT)
@@ -61,7 +61,7 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 | **instrumentation** | Instruments and sounds present |
 | **structure** | Arrangement and structure analysis |
 
-**Total: 77+ numeric features + 496 classification labels + 5 AI descriptions**
+**Total: 77+ numeric features + 496 classification labels + 5 AI descriptions + MIDI drums**
 
 ---
 
@@ -120,7 +120,16 @@ python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --device cuda
 
 # Or process single track
 python src/preprocessing/demucs_sep.py "/path/to/audio/Artist - Album - Track/"
+
+# Output format options
+python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format flac              # Lossless (default)
+python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format mp3 --bitrate 320 # MP3 CBR
+python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format mp3 --preset 2    # MP3 VBR
+python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format ogg --ogg-quality 0.6  # OGG
+python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format wav24             # 24-bit WAV
 ```
+
+**Output Formats:** `flac` (default), `mp3`, `ogg`, `wav`, `wav24`, `wav32`
 
 **GPU Performance:**
 - AMD (ROCm) / NVIDIA (CUDA): ~9-15x realtime (10min track in 40-60 seconds)
@@ -395,8 +404,10 @@ See [FEATURES_STATUS.md](FEATURES_STATUS.md) for complete details.
 - Instrument classification (40 MTG Jamendo labels)
 - Music Flamingo AI descriptions (5 prompt types)
 
-### 📅 Phase 4: Advanced Features (PLANNED)
-- MIDI transcription (drums, bass, polyphonic)
+### 📅 Phase 4: Advanced Features (IN PROGRESS)
+- ✅ MIDI drum transcription (ADTOF-PyTorch, Drumsep)
+- ❌ Bass MIDI transcription (Basic Pitch, PESTO)
+- ❌ Polyphonic MIDI transcription (MT3, MR-MT3)
 - Kick/snare/cymbal per-drum analysis
 - Auxiliary file outputs (.ONSETS_GRID, .CHROMA)
 
@@ -447,6 +458,6 @@ For issues, bugs, or feature requests:
 ---
 
 **Version:** 1.2
-**Last Updated:** 2026-01-20
-**Status:** Production Ready (Core + AI Features + Training Crops)
-**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions + smart cropping
+**Last Updated:** 2026-01-21
+**Status:** Production Ready (Core + AI Features + Training Crops + MIDI Drums)
+**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions + smart cropping + MIDI drum transcription
