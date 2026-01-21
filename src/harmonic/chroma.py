@@ -2,10 +2,16 @@
 Chroma Features Analysis for MIR Project (Essentia HPCP)
 
 This module extracts average chroma features using Essentia's HPCP
-(Harmonic Pitch Class Profile) algorithm.
+(Harmonic Pitch Class Profile) algorithm, optimized for melodic content.
 
-Uses unitSum normalization so values represent a probability distribution
-of pitch classes - comparable across different audio files for AI training.
+Uses harmonic stems (bass+other+vocals) when available to avoid drum noise.
+Falls back to full_mix with a warning if stems are not available.
+
+HPCP is tuned for melodic content:
+- Frequency range 100-4000 Hz (skips sub-bass rumble and high-freq noise)
+- Band preset with 500 Hz split for bass/melodic separation
+- Non-linear processing to boost strong pitch classes, suppress weak ones
+- Output normalized to unitSum for cross-file comparability
 
 Dependencies:
 - essentia
@@ -22,7 +28,7 @@ Output:
 import numpy as np
 import soundfile as sf
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Tuple
 import logging
 
 import sys
@@ -38,6 +44,65 @@ logger = logging.getLogger(__name__)
 PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 
+def mix_harmonic_stems(folder_path: Path) -> Tuple[Optional[np.ndarray], int, bool]:
+    """
+    Mix bass + other + vocals stems (excluding drums) for harmonic analysis.
+
+    Args:
+        folder_path: Path to organized folder containing stems
+
+    Returns:
+        Tuple of (audio_array, sample_rate, used_stems)
+        used_stems is True if stems were used, False if fell back to full_mix
+    """
+    stems = get_stem_files(folder_path, include_full_mix=True)
+
+    # Check if we have the harmonic stems
+    harmonic_stems = ['bass', 'other', 'vocals']
+    available_stems = [s for s in harmonic_stems if s in stems]
+
+    if len(available_stems) >= 2:  # Need at least 2 stems for useful mix
+        logger.info(f"Using harmonic stems: {', '.join(available_stems)} (excluding drums)")
+
+        mixed_audio = None
+        sr = None
+
+        for stem_name in available_stems:
+            audio, stem_sr = sf.read(str(stems[stem_name]), dtype='float32')
+
+            # Convert to mono if stereo
+            if len(audio.shape) > 1:
+                audio = np.mean(audio, axis=1)
+
+            if mixed_audio is None:
+                mixed_audio = audio
+                sr = stem_sr
+            else:
+                # Ensure same length (pad shorter with zeros)
+                if len(audio) > len(mixed_audio):
+                    mixed_audio = np.pad(mixed_audio, (0, len(audio) - len(mixed_audio)))
+                elif len(audio) < len(mixed_audio):
+                    audio = np.pad(audio, (0, len(mixed_audio) - len(audio)))
+                mixed_audio = mixed_audio + audio
+
+        # Normalize to prevent clipping
+        max_val = np.max(np.abs(mixed_audio))
+        if max_val > 0:
+            mixed_audio = mixed_audio / max_val * 0.95
+
+        return mixed_audio, sr, True
+
+    # Fallback to full_mix
+    if 'full_mix' in stems:
+        logger.warning("Harmonic stems not available, using full_mix (quality may be compromised by drums)")
+        audio, sr = sf.read(str(stems['full_mix']), dtype='float32')
+        if len(audio.shape) > 1:
+            audio = np.mean(audio, axis=1)
+        return audio, sr, False
+
+    return None, 0, False
+
+
 def calculate_hpcp(audio: np.ndarray,
                    sample_rate: int,
                    frame_size: int = 4096,
@@ -45,8 +110,11 @@ def calculate_hpcp(audio: np.ndarray,
     """
     Calculate average HPCP (Harmonic Pitch Class Profile) for audio.
 
-    Uses Essentia's HPCP algorithm with unitSum normalization for
-    cross-file comparability in AI training.
+    Uses Essentia's HPCP algorithm with parameters tuned for melodic content:
+    - Frequency range 100-4000 Hz (melodic range, skips rumble and noise)
+    - Band preset with 500 Hz split
+    - Non-linear processing (boosts strong peaks, suppresses weak ones)
+    - Harmonics=5 for better pitch detection on sustained sounds
 
     Args:
         audio: Audio signal (mono, float32)
@@ -57,7 +125,6 @@ def calculate_hpcp(audio: np.ndarray,
     Returns:
         Array of 12 chroma values that sum to 1.0
     """
-    import essentia
     from essentia.standard import (
         Windowing, Spectrum, SpectralPeaks, HPCP, FrameGenerator
     )
@@ -68,19 +135,29 @@ def calculate_hpcp(audio: np.ndarray,
     # Initialize Essentia algorithms
     windowing = Windowing(type='blackmanharris62')
     spectrum = Spectrum()
+
+    # SpectralPeaks tuned for melodic content
     spectral_peaks = SpectralPeaks(
         sampleRate=sample_rate,
         maxPeaks=100,
         magnitudeThreshold=0.00001,
-        minFrequency=20,
-        maxFrequency=sample_rate / 2 - 1
+        minFrequency=100,              # Skip sub-bass rumble
+        maxFrequency=4000              # Focus on melodic range, skip noise/transients
     )
+
+    # HPCP tuned for melodic content analysis
     hpcp = HPCP(
         size=12,
         sampleRate=sample_rate,
-        normalized='unitSum',  # Values sum to 1.0 - comparable across files
-        harmonics=4,           # Include harmonics for better pitch detection
-        bandPreset=False       # Disable band preset to avoid warnings with unitSum
+        minFrequency=100,              # Skip sub-bass
+        maxFrequency=4000,             # Melodic range (A2-C8)
+        bandPreset=True,               # Enable band weighting
+        bandSplitFrequency=500,        # Separate bass from melodic content
+        harmonics=5,                   # Include harmonics for sustained sounds
+        windowSize=1.0,                # Semitone resolution
+        weightType='squaredCosine',    # Sharp weighting, focus on peaks
+        nonLinear=True,                # Boost strong peaks, suppress weak ones
+        normalized='unitMax'           # Required for nonLinear to work
     )
 
     # Process frames and accumulate HPCP
@@ -104,7 +181,9 @@ def calculate_hpcp(audio: np.ndarray,
     # Average across all frames
     avg_hpcp = np.mean(hpcp_frames, axis=0)
 
-    # Re-normalize to ensure sum = 1.0 after averaging
+    # Convert from unitMax to unitSum for cross-file comparability
+    # This preserves the nonLinear processing benefits while making
+    # results comparable across different audio files
     hpcp_sum = np.sum(avg_hpcp)
     if hpcp_sum > 0:
         avg_hpcp = avg_hpcp / hpcp_sum
@@ -114,17 +193,19 @@ def calculate_hpcp(audio: np.ndarray,
 
 def analyze_chroma(audio_path: str | Path,
                    frame_size: int = 4096,
-                   hop_size: int = 2048) -> Dict[str, float]:
+                   hop_size: int = 2048,
+                   use_stems: bool = True) -> Dict[str, float]:
     """
     Analyze chroma features for an audio file using Essentia HPCP.
 
-    Calculates a global average HPCP vector representing the
-    probability distribution of pitch classes across the entire clip.
+    When use_stems=True and the audio_path is in an organized folder,
+    uses bass+other+vocals stems (excluding drums) for cleaner harmonic analysis.
 
     Args:
         audio_path: Path to audio file
         frame_size: Analysis frame size
         hop_size: Hop size between frames
+        use_stems: Whether to try using harmonic stems (default: True)
 
     Returns:
         Dictionary with chroma features:
@@ -137,14 +218,25 @@ def analyze_chroma(audio_path: str | Path,
 
     logger.info(f"Analyzing chroma (HPCP): {audio_path.name}")
 
-    # Load audio with soundfile (avoids librosa/numba issues)
-    audio, sr = sf.read(str(audio_path), dtype='float32')
+    # Try to use harmonic stems if in organized folder
+    audio = None
+    sr = None
+    used_stems = False
 
-    # Convert to mono if stereo
-    if len(audio.shape) > 1:
-        audio = np.mean(audio, axis=1)
+    if use_stems and audio_path.parent.is_dir():
+        audio, sr, used_stems = mix_harmonic_stems(audio_path.parent)
+
+    # Fallback to direct file loading
+    if audio is None:
+        audio, sr = sf.read(str(audio_path), dtype='float32')
+        if len(audio.shape) > 1:
+            audio = np.mean(audio, axis=1)
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
+    if used_stems:
+        logger.info("Analysis source: harmonic stems (bass+other+vocals)")
+    else:
+        logger.info("Analysis source: full mix")
 
     # Calculate average HPCP
     avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
@@ -160,7 +252,7 @@ def analyze_chroma(audio_path: str | Path,
         results[key] = clamp_feature_value(key, value)
 
     # Log results with pitch class names
-    logger.info("HPCP pitch class distribution (unitSum normalized):")
+    logger.info("HPCP pitch class distribution (melodic-tuned, unitSum normalized):")
     for i in range(12):
         pitch_class = PITCH_CLASSES[i]
         weight = results[f'chroma_{i}']
@@ -177,7 +269,8 @@ def analyze_chroma(audio_path: str | Path,
 def batch_analyze_chroma(root_directory: str | Path,
                           overwrite: bool = False,
                           frame_size: int = 4096,
-                          hop_size: int = 2048) -> dict:
+                          hop_size: int = 2048,
+                          use_stems: bool = True) -> dict:
     """
     Batch analyze chroma features for all organized folders.
 
@@ -186,6 +279,7 @@ def batch_analyze_chroma(root_directory: str | Path,
         overwrite: Whether to overwrite existing chroma data
         frame_size: Analysis frame size
         hop_size: Hop size between frames
+        use_stems: Whether to use harmonic stems when available
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -202,6 +296,8 @@ def batch_analyze_chroma(root_directory: str | Path,
         'success': 0,
         'skipped': 0,
         'failed': 0,
+        'used_stems': 0,
+        'used_full_mix': 0,
         'errors': []
     }
 
@@ -231,13 +327,28 @@ def batch_analyze_chroma(root_directory: str | Path,
             except Exception:
                 pass
 
-
         try:
-            results = analyze_chroma(
-                stems['full_mix'],
-                frame_size=frame_size,
-                hop_size=hop_size
-            )
+            # Try to use stems
+            audio, sr, used_stems = mix_harmonic_stems(folder) if use_stems else (None, 0, False)
+
+            if audio is not None:
+                avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
+                if used_stems:
+                    stats['used_stems'] += 1
+                else:
+                    stats['used_full_mix'] += 1
+            else:
+                # Direct analysis of full_mix
+                audio, sr = sf.read(str(stems['full_mix']), dtype='float32')
+                if len(audio.shape) > 1:
+                    audio = np.mean(audio, axis=1)
+                avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
+                stats['used_full_mix'] += 1
+
+            # Compile results
+            results = {}
+            for j in range(12):
+                results[f'chroma_{j}'] = float(avg_hpcp[j])
 
             # Save to .INFO file
             safe_update(info_path, results)
@@ -261,6 +372,8 @@ def batch_analyze_chroma(root_directory: str | Path,
     logger.info("Batch HPCP Chroma Analysis Summary:")
     logger.info(f"  Total folders:  {stats['total']}")
     logger.info(f"  Successful:     {stats['success']}")
+    logger.info(f"    Used stems:   {stats['used_stems']}")
+    logger.info(f"    Used full_mix: {stats['used_full_mix']}")
     logger.info(f"  Skipped:        {stats['skipped']}")
     logger.info(f"  Failed:         {stats['failed']}")
     logger.info("=" * 60)
@@ -274,7 +387,7 @@ if __name__ == "__main__":
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Analyze chroma features using Essentia HPCP"
+        description="Analyze chroma features using Essentia HPCP (melodic-tuned)"
     )
 
     parser.add_argument(
@@ -304,6 +417,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--no-stems',
+        action='store_true',
+        help='Disable using harmonic stems, always use full_mix'
+    )
+
+    parser.add_argument(
         '--overwrite',
         action='store_true',
         help='Overwrite existing chroma data'
@@ -327,6 +446,8 @@ if __name__ == "__main__":
         logger.error(f"Path does not exist: {path}")
         sys.exit(1)
 
+    use_stems = not args.no_stems
+
     try:
         if args.batch:
             # Batch processing
@@ -334,7 +455,8 @@ if __name__ == "__main__":
                 path,
                 overwrite=args.overwrite,
                 frame_size=args.frame_size,
-                hop_size=args.hop_size
+                hop_size=args.hop_size,
+                use_stems=use_stems
             )
 
             if stats['failed'] > 0:
@@ -351,14 +473,15 @@ if __name__ == "__main__":
             results = analyze_chroma(
                 stems['full_mix'],
                 frame_size=args.frame_size,
-                hop_size=args.hop_size
+                hop_size=args.hop_size,
+                use_stems=use_stems
             )
 
             # Save to .INFO
             info_path = get_info_path(path)
             safe_update(info_path, results)
 
-            print(f"\nHPCP Chroma Features (unitSum normalized, sum ≈ 1.0):")
+            print(f"\nHPCP Chroma Features (melodic-tuned, unitSum normalized, sum ≈ 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
@@ -371,10 +494,11 @@ if __name__ == "__main__":
             results = analyze_chroma(
                 path,
                 frame_size=args.frame_size,
-                hop_size=args.hop_size
+                hop_size=args.hop_size,
+                use_stems=use_stems
             )
 
-            print(f"\nHPCP Chroma Features (unitSum normalized, sum ≈ 1.0):")
+            print(f"\nHPCP Chroma Features (melodic-tuned, unitSum normalized, sum ≈ 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
