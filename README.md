@@ -339,9 +339,9 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 
 ### ✅ TorchCodec/FFmpeg Errors (FIXED)
 
-**Issue:** Demucs fails to save output files with TorchCodec errors
+**Issue:** Demucs fails to save FLAC output files with TorchCodec errors
 
-**Solution:** Framework uses MP3 output @ 320kbps which bypasses TorchCodec compatibility issues. Quality sufficient for MIR analysis.
+**Solution:** FLAC/OGG outputs use WAV as intermediate format, then convert via soundfile. This bypasses torchcodec entirely. MP3 uses lameenc (reliable). All formats now work without torchcodec dependency.
 
 ### ✅ AudioBox Aesthetics (FIXED)
 
