@@ -149,6 +149,23 @@ python src/preprocessing/demucs_sep.py /path/to/data --batch --format flac
 | Comparability | Poor (per-file scaling) | Good (probability distribution) |
 | Harmonic info | Lost (all maxes equal) | Preserved (relative weights) |
 
+### 7. HPCP Melodic Tuning ✅ (Additional Refinement)
+- **Use harmonic stems** (bass+other+vocals) when available, excluding drums
+- **Tuned HPCP parameters** for melodic content analysis:
+  - Frequency range: 100-4000 Hz (skip sub-bass rumble and high-freq noise)
+  - Band preset with 500 Hz split for bass/melodic separation
+  - nonLinear=True to boost strong peaks, suppress weak ones
+  - harmonics=5 for better pitch detection on sustained sounds
+  - weightType='squaredCosine' for sharper peak focus
+- **Fallback**: Uses full_mix with warning if stems unavailable
+- **CLI option**: `--no-stems` to force full_mix analysis
+
+#### Results Comparison
+| Source | G# | D# | C | Distribution |
+|--------|----|----|---|--------------|
+| Stems (new) | 0.345 | 0.272 | 0.070 | Focused |
+| Full mix | 0.306 | 0.233 | 0.101 | More diffuse |
+
 ---
 
 ## Files Modified (Part 2)
@@ -175,10 +192,11 @@ python src/preprocessing/demucs_sep.py /path/to/data --batch --format flac
 - `f5c3763` - Simplify demucs output: always use WAV+soundfile for FLAC/OGG
 - `d7976b7` - Restore FLAC native-first approach with fallback
 - `9c9d036` - Update README: clarify FLAC native-first with fallback approach
-- (pending) - Switch chroma analysis to Essentia HPCP with unitSum normalization
+- `768cec0` - Switch chroma analysis to Essentia HPCP with unitSum normalization
+- `6e9121c` - Tune HPCP for melodic content and use harmonic stems
 
 ---
 
 **Session Date**: 2026-01-22
 **Status**: **COMPLETED** ✅
-**Key Changes**: GPU ADTOF, Demucs fixes, ROCm env vars, Feature units, FLAC fallback, HPCP chroma
+**Key Changes**: GPU ADTOF, Demucs fixes, ROCm env vars, Feature units, FLAC fallback, Melodic-tuned HPCP chroma with stem support
