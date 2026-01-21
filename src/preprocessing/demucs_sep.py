@@ -190,21 +190,20 @@ def separate_stems(audio_file: str | Path,
     ]
 
     # Determine demucs output format
-    # For OGG: use WAV then convert
-    # For FLAC: try native, fallback to WAV + convert if torchcodec issues
-    if output_format == 'ogg':
-        # Output as WAV, convert later
-        demucs_ext = '.wav'
-        cmd.extend(['--filename', '{stem}.wav'])
-    elif output_format == 'mp3':
+    # Strategy: Always use WAV for FLAC/OGG to bypass torchcodec issues entirely
+    # MP3 uses lameenc (reliable), WAV variants are native
+    if output_format == 'mp3':
+        # MP3 uses lameenc encoder (reliable, no torchcodec)
         demucs_ext = '.mp3'
         cmd.extend(['--mp3', '--mp3-bitrate', str(mp3_bitrate)])
         if mp3_preset != 2:  # Only add if not default
             cmd.extend(['--mp3-preset', str(mp3_preset)])
         cmd.extend(['--filename', '{stem}.mp3'])
-    elif output_format == 'flac':
-        demucs_ext = '.flac'
-        cmd.extend(['--flac', '--filename', '{stem}.flac'])
+    elif output_format in ('flac', 'ogg'):
+        # Output WAV, convert to FLAC/OGG with soundfile (bypasses torchcodec)
+        demucs_ext = '.wav'
+        cmd.extend(['--float32', '--filename', '{stem}.wav'])  # 32-bit for quality
+        needs_post_convert = True
     elif output_format == 'wav24':
         demucs_ext = '.wav'
         cmd.extend(['--int24', '--filename', '{stem}.wav'])
@@ -219,46 +218,17 @@ def separate_stems(audio_file: str | Path,
 
     logger.debug(f"Running: {' '.join(cmd)}")
 
-    try:
-        # Run demucs
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True
-        )
+    # Run demucs
+    result = subprocess.run(
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True
+    )
 
-        logger.debug(f"Demucs stdout: {result.stdout}")
-        if result.stderr:
-            logger.debug(f"Demucs stderr: {result.stderr}")
-
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr if e.stderr else str(e)
-
-        # Check for torchcodec/FFmpeg errors with FLAC
-        if output_format == 'flac' and ('torchcodec' in error_msg.lower() or
-                                         'ffmpeg' in error_msg.lower() or
-                                         'encoder' in error_msg.lower()):
-            logger.warning("FLAC output failed (likely torchcodec issue), "
-                          "falling back to WAV + soundfile conversion")
-
-            # Retry with WAV output
-            cmd_fallback = [c for c in cmd if c not in ['--flac']]
-            # Replace filename pattern
-            cmd_fallback = [c.replace('.flac', '.wav') if '.flac' in c else c
-                           for c in cmd_fallback]
-
-            result = subprocess.run(
-                cmd_fallback,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            demucs_ext = '.wav'
-            needs_post_convert = True  # Will convert WAV to FLAC
-        else:
-            logger.error(f"Demucs failed: {error_msg}")
-            raise
+    logger.debug(f"Demucs stdout: {result.stdout}")
+    if result.stderr:
+        logger.debug(f"Demucs stderr: {result.stderr}")
 
     # Find and move output files
     demucs_output = output_dir / model
@@ -270,29 +240,32 @@ def separate_stems(audio_file: str | Path,
             if stem_file.exists():
                 final_path = output_dir / f"{stem_name}{final_ext}"
 
-                # Post-conversion if needed
-                if needs_post_convert or output_format == 'ogg':
-                    if output_format == 'ogg':
-                        if convert_to_ogg(stem_file, final_path, ogg_quality):
-                            stem_file.unlink()  # Remove WAV
-                            stem_paths[stem_name] = final_path
-                            logger.info(f"  Created: {stem_name}.ogg")
-                        else:
-                            logger.error(f"  Failed to convert {stem_name} to OGG")
-                    elif output_format == 'flac' and demucs_ext == '.wav':
-                        # Fallback FLAC conversion
+                # Post-conversion for FLAC/OGG (using soundfile)
+                if needs_post_convert:
+                    if output_format == 'flac':
                         if convert_wav_to_flac_soundfile(stem_file, final_path):
                             stem_file.unlink()  # Remove WAV
                             stem_paths[stem_name] = final_path
-                            logger.info(f"  Created: {stem_name}.flac (via soundfile)")
+                            logger.info(f"  Created: {stem_name}.flac")
                         else:
                             # Keep WAV as fallback
                             wav_final = output_dir / f"{stem_name}.wav"
                             shutil.move(str(stem_file), str(wav_final))
                             stem_paths[stem_name] = wav_final
                             logger.warning(f"  FLAC conversion failed, kept as: {stem_name}.wav")
+                    elif output_format == 'ogg':
+                        if convert_to_ogg(stem_file, final_path, ogg_quality):
+                            stem_file.unlink()  # Remove WAV
+                            stem_paths[stem_name] = final_path
+                            logger.info(f"  Created: {stem_name}.ogg")
+                        else:
+                            # Keep WAV as fallback
+                            wav_final = output_dir / f"{stem_name}.wav"
+                            shutil.move(str(stem_file), str(wav_final))
+                            stem_paths[stem_name] = wav_final
+                            logger.warning(f"  OGG conversion failed, kept as: {stem_name}.wav")
                 else:
-                    # Direct move
+                    # Direct move (MP3, WAV variants)
                     shutil.move(str(stem_file), str(final_path))
                     stem_paths[stem_name] = final_path
                     logger.info(f"  Created: {stem_name}{final_ext}")
