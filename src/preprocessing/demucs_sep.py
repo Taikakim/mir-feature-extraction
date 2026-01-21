@@ -190,19 +190,21 @@ def separate_stems(audio_file: str | Path,
     ]
 
     # Determine demucs output format
-    # Strategy: Always use WAV for FLAC/OGG to bypass torchcodec issues entirely
-    # MP3 uses lameenc (reliable), WAV variants are native
+    # Strategy: Try native format first, fallback to WAV+soundfile if torchcodec fails
+    # OGG always needs post-conversion (no native demucs support)
     if output_format == 'mp3':
-        # MP3 uses lameenc encoder (reliable, no torchcodec)
         demucs_ext = '.mp3'
         cmd.extend(['--mp3', '--mp3-bitrate', str(mp3_bitrate)])
-        if mp3_preset != 2:  # Only add if not default
+        if mp3_preset != 2:
             cmd.extend(['--mp3-preset', str(mp3_preset)])
         cmd.extend(['--filename', '{stem}.mp3'])
-    elif output_format in ('flac', 'ogg'):
-        # Output WAV, convert to FLAC/OGG with soundfile (bypasses torchcodec)
+    elif output_format == 'flac':
+        demucs_ext = '.flac'
+        cmd.extend(['--flac', '--filename', '{stem}.flac'])
+    elif output_format == 'ogg':
+        # No native OGG support, use WAV + convert
         demucs_ext = '.wav'
-        cmd.extend(['--float32', '--filename', '{stem}.wav'])  # 32-bit for quality
+        cmd.extend(['--float32', '--filename', '{stem}.wav'])
         needs_post_convert = True
     elif output_format == 'wav24':
         demucs_ext = '.wav'
@@ -218,17 +220,39 @@ def separate_stems(audio_file: str | Path,
 
     logger.debug(f"Running: {' '.join(cmd)}")
 
-    # Run demucs
-    result = subprocess.run(
-        cmd,
-        check=True,
-        capture_output=True,
-        text=True
-    )
+    # Run demucs - try native format first
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.debug(f"Demucs stdout: {result.stdout}")
+        if result.stderr:
+            logger.debug(f"Demucs stderr: {result.stderr}")
 
-    logger.debug(f"Demucs stdout: {result.stdout}")
-    if result.stderr:
-        logger.debug(f"Demucs stderr: {result.stderr}")
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else str(e)
+
+        # FLAC failed (likely torchcodec issue) - fallback to WAV + soundfile
+        if output_format == 'flac' and ('torchcodec' in error_msg.lower() or
+                                         'ffmpeg' in error_msg.lower() or
+                                         'encoder' in error_msg.lower() or
+                                         'save' in error_msg.lower()):
+            logger.warning("Native FLAC failed (torchcodec issue), using WAV + soundfile")
+
+            # Rebuild command for WAV output
+            cmd_wav = [c for c in cmd if c != '--flac']
+            cmd_wav = [c.replace('{stem}.flac', '{stem}.wav') for c in cmd_wav]
+            cmd_wav.insert(-1, '--float32')  # High quality intermediate
+
+            result = subprocess.run(cmd_wav, check=True, capture_output=True, text=True)
+            demucs_ext = '.wav'
+            needs_post_convert = True
+        else:
+            logger.error(f"Demucs failed: {error_msg}")
+            raise
 
     # Find and move output files
     demucs_output = output_dir / model
