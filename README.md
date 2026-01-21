@@ -341,7 +341,7 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 
 **Issue:** Demucs fails to save FLAC output files with TorchCodec errors
 
-**Solution:** FLAC/OGG outputs use WAV as intermediate format, then convert via soundfile. This bypasses torchcodec entirely. MP3 uses lameenc (reliable). All formats now work without torchcodec dependency.
+**Solution:** Native FLAC output is attempted first (fast). If torchcodec fails, automatically falls back to WAV + soundfile conversion. OGG uses WAV intermediate (no native support). MP3 uses lameenc (reliable).
 
 ### ✅ AudioBox Aesthetics (FIXED)
 
