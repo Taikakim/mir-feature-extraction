@@ -8,16 +8,17 @@ Uses GGUF for Music Flamingo by default (7x faster than transformers).
 Usage:
     python src/test_all_features.py "/path/to/audio.flac"
     python src/test_all_features.py "/path/to/organized_folder/"
+    python src/test_all_features.py "/path/to/audio.flac" --output-dir /path/to/output
     python src/test_all_features.py "/path/to/audio.flac" --model IQ3_M  # Or Q6_K for faster
-    python src/test_all_features.py "/path/to/audio.flac" --transformers  # Use full 16GB model for A/B testing
-    python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo
-    python src/test_all_features.py "/path/to/audio.flac" --skip-demucs
+    python src/test_all_features.py "/path/to/audio.flac" --transformers  # Use full 16GB model
+    python src/test_all_features.py "/path/to/audio.flac" --parallel  # Run CPU tasks in parallel
+    python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo --skip-midi
 
 Music Flamingo backends:
     --model Q8_0       GGUF Q8_0 quantization (default, best GGUF quality, ~8GB VRAM)
     --model Q6_K       GGUF Q6_K quantization (balanced, ~6GB VRAM)
     --model IQ3_M      GGUF IQ3_M quantization (fastest, ~4GB VRAM)
-    --transformers     Full 16GB model via HuggingFace (slower, highest quality, for A/B testing)
+    --transformers     Full 16GB model via HuggingFace (slower, highest quality)
 """
 
 # CRITICAL: Set PyTorch/ROCm config BEFORE any imports
@@ -25,14 +26,15 @@ Music Flamingo backends:
 import os
 from pathlib import Path
 
-# Memory management
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
+# Memory management for ROCm (expandable_segments not supported on HIP)
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
 
 # AMD ROCm optimizations
 os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
 os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
 os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
 os.environ.setdefault('OMP_NUM_THREADS', '8')
+os.environ.setdefault('MIOPEN_FIND_MODE', '2')  # Fast MIOpen kernel selection (avoid long delays)
 
 # Set tunableop results file if it exists
 _tunableop_file = Path(__file__).parent.parent / 'tunableop_results00.csv'
@@ -44,8 +46,9 @@ import json
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -61,12 +64,16 @@ class FeatureTester:
     """Comprehensive feature extraction tester."""
 
     def __init__(self, audio_path: Path, skip_demucs: bool = False, skip_flamingo: bool = False,
-                 flamingo_model: str = 'Q8_0', use_transformers: bool = False):
+                 skip_midi: bool = False, flamingo_model: str = 'Q8_0', use_transformers: bool = False,
+                 output_dir: Optional[Path] = None, parallel: bool = False):
         self.audio_path = audio_path
         self.skip_demucs = skip_demucs
         self.skip_flamingo = skip_flamingo
+        self.skip_midi = skip_midi
         self.flamingo_model = flamingo_model
         self.use_transformers = use_transformers
+        self.output_dir = output_dir
+        self.parallel = parallel
 
         self.timings: Dict[str, float] = {}
         self.feature_counts: Dict[str, int] = {}
@@ -122,10 +129,13 @@ class FeatureTester:
 
         logger.info("Organizing file...")
         from preprocessing.file_organizer import organize_file
-        success, message = organize_file(self.audio_path, output_dir=None, move=False)
+        success, message = organize_file(self.audio_path, output_dir=self.output_dir, move=False)
 
         if success:
-            self.folder = self.audio_path.parent / self.audio_path.stem
+            if self.output_dir:
+                self.folder = self.output_dir / self.audio_path.stem
+            else:
+                self.folder = self.audio_path.parent / self.audio_path.stem
             stems = get_stem_files(self.folder, include_full_mix=True)
             self.full_mix = stems['full_mix']
             logger.info(f"  Organized to: {self.folder.name}")
@@ -472,6 +482,55 @@ class FeatureTester:
 
         return results
 
+    def run_midi_transcription(self) -> Dict:
+        """Run ADTOF MIDI drum transcription."""
+        if self.skip_midi:
+            logger.info("  Skipping MIDI transcription (--skip-midi)")
+            return {}
+            
+        # Check if drums stem exists (ADTOF works on full mix or drums stem)
+        stems = get_stem_files(self.folder, include_full_mix=True)
+        audio_for_midi = stems.get('drums', stems.get('full_mix', self.full_mix))
+        
+        try:
+            from transcription.drums.adtof import transcribe_file
+            
+            def do_midi():
+                midi_path = self.folder / "drums_adtof.mid"
+                transcribe_file(audio_for_midi, midi_path, device="cuda")
+                return {"midi_drums_path": str(midi_path)}
+            
+            elapsed, result = self.time_feature("ADTOF Drum Transcription", do_midi)
+            return result or {}
+        except ImportError as e:
+            logger.warning(f"  ADTOF not available: {e}")
+            logger.info("  Install with: pip install -e repos/ADTOF-pytorch")
+            return {}
+        except Exception as e:
+            logger.error(f"  MIDI transcription failed: {e}")
+            return {}
+
+    def _run_parallel_tasks(self, tasks: List[Tuple[str, Callable]]) -> Dict[str, Any]:
+        """Run multiple CPU-bound tasks in parallel."""
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {}
+            for name, func in tasks:
+                futures[executor.submit(func)] = name
+                
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.update(result)
+                except Exception as e:
+                    logger.error(f"  {name} failed: {e}")
+                    self.errors.append(f"{name}: {str(e)}")
+                    
+        return results
+
     def run_all(self) -> Dict[str, Any]:
         """Run all feature extraction modules."""
         logger.info("=" * 80)
@@ -480,69 +539,94 @@ class FeatureTester:
         logger.info(f"Audio: {self.full_mix.name}")
         logger.info(f"Duration: {self.duration:.2f}s ({self.duration/60:.2f} min)")
         logger.info(f"Sample Rate: {self.sample_rate} Hz")
+        if self.output_dir:
+            logger.info(f"Output Dir: {self.output_dir}")
+        if self.parallel:
+            logger.info(f"Mode: PARALLEL (CPU tasks run concurrently)")
         logger.info("=" * 80)
 
         all_results = {}
 
         # 1. Organize file if needed
-        logger.info("\n[1/14] File Organization")
+        logger.info("\n[1/15] File Organization")
         if not self.organize_file():
             return all_results
 
-        # 2. Demucs stem separation
-        logger.info("\n[2/14] Stem Separation")
+        # 2. Demucs stem separation (GPU - must run first, sequentially)
+        logger.info("\n[2/15] Stem Separation")
         self.run_demucs()
 
-        # 3. Loudness analysis
-        logger.info("\n[3/14] Loudness Analysis")
-        all_results.update(self.run_loudness())
+        # CPU-bound tasks that can run in parallel
+        if self.parallel:
+            logger.info("\n[3-10/15] Running CPU tasks in parallel...")
+            
+            # These tasks are CPU-bound and independent
+            parallel_tasks = [
+                ("Loudness", self.run_loudness),
+                ("Beat Grid", self.run_beat_grid),
+                ("BPM", self.run_bpm),
+                ("Onsets", self.run_onsets),
+                ("Spectral", self.run_spectral_features),
+                ("Multiband RMS", self.run_multiband_rms),
+                ("Chroma", self.run_chroma),
+            ]
+            
+            start = time.time()
+            parallel_results = self._run_parallel_tasks(parallel_tasks)
+            all_results.update(parallel_results)
+            logger.info(f"  Parallel batch completed in {time.time() - start:.1f}s")
+            
+            # Syncopation depends on beat grid + onsets
+            logger.info("\n[11/15] Syncopation Analysis")
+            all_results.update(self.run_syncopation())
+        else:
+            # Sequential execution
+            logger.info("\n[3/15] Loudness Analysis")
+            all_results.update(self.run_loudness())
 
-        # 4. Beat grid detection
-        logger.info("\n[4/14] Beat Grid Detection")
-        all_results.update(self.run_beat_grid())
+            logger.info("\n[4/15] Beat Grid Detection")
+            all_results.update(self.run_beat_grid())
 
-        # 5. BPM analysis
-        logger.info("\n[5/14] BPM Analysis")
-        all_results.update(self.run_bpm())
+            logger.info("\n[5/15] BPM Analysis")
+            all_results.update(self.run_bpm())
 
-        # 6. Onset detection
-        logger.info("\n[6/14] Onset Detection")
-        all_results.update(self.run_onsets())
+            logger.info("\n[6/15] Onset Detection")
+            all_results.update(self.run_onsets())
 
-        # 7. Syncopation
-        logger.info("\n[7/14] Syncopation Analysis")
-        all_results.update(self.run_syncopation())
+            logger.info("\n[7/15] Syncopation Analysis")
+            all_results.update(self.run_syncopation())
 
-        # 8. Spectral features
-        logger.info("\n[8/14] Spectral Features")
-        all_results.update(self.run_spectral_features())
+            logger.info("\n[8/15] Spectral Features")
+            all_results.update(self.run_spectral_features())
 
-        # 9. Multiband RMS
-        logger.info("\n[9/14] Multiband RMS")
-        all_results.update(self.run_multiband_rms())
+            logger.info("\n[9/15] Multiband RMS")
+            all_results.update(self.run_multiband_rms())
 
-        # 10. Chroma
-        logger.info("\n[10/14] Chroma Features")
-        all_results.update(self.run_chroma())
+            logger.info("\n[10/15] Chroma Features")
+            all_results.update(self.run_chroma())
 
-        # 11. Timbral features
-        logger.info("\n[11/14] Timbral Features")
+        # 11. Timbral features (CPU, can be slow)
+        logger.info("\n[11/15] Timbral Features")
         all_results.update(self.run_timbral())
 
-        # 12. AudioBox Aesthetics
-        logger.info("\n[12/14] AudioBox Aesthetics")
+        # 12. AudioBox Aesthetics (GPU)
+        logger.info("\n[12/15] AudioBox Aesthetics")
         all_results.update(self.run_audiobox_aesthetics())
 
-        # 13. Essentia
-        logger.info("\n[13/14] Essentia Features")
+        # 13. Essentia (GPU TensorFlow)
+        logger.info("\n[13/15] Essentia Features")
         all_results.update(self.run_essentia())
 
-        # 14. Per-stem features (rhythm + harmonic)
-        logger.info("\n[14/14] Per-Stem Analysis")
+        # 14. Per-stem features (depends on stems)
+        logger.info("\n[14/15] Per-Stem Analysis")
         all_results.update(self.run_per_stem_rhythm())
         all_results.update(self.run_per_stem_harmonic())
 
-        # BONUS: Music Flamingo
+        # 15. MIDI Transcription
+        logger.info("\n[15/15] MIDI Drum Transcription")
+        all_results.update(self.run_midi_transcription())
+
+        # BONUS: Music Flamingo (GPU, heavy)
         logger.info("\n[BONUS] Music Flamingo")
         all_results.update(self.run_music_flamingo())
 
@@ -599,17 +683,29 @@ class FeatureTester:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test all 70+ MIR features on a single audio file"
+        description="Test all 70+ MIR features on a single audio file",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python src/test_all_features.py "/path/to/audio.flac"
+  python src/test_all_features.py "/path/to/folder/" --output-dir /output
+  python src/test_all_features.py "/path/to/audio.flac" --parallel --skip-flamingo
+        """
     )
     parser.add_argument('audio_path', help='Path to audio file or organized folder')
+    parser.add_argument('--output-dir', '-o', help='Output directory (copies files here first)')
     parser.add_argument('--model', default='Q8_0', choices=['IQ3_M', 'Q6_K', 'Q8_0'],
                         help='GGUF quantization level for Music Flamingo (Q8_0=best/default)')
     parser.add_argument('--transformers', action='store_true',
-                        help='Use Transformers backend (full 16GB model) instead of GGUF for A/B testing')
+                        help='Use Transformers backend (full 16GB model) instead of GGUF')
+    parser.add_argument('--parallel', '-p', action='store_true',
+                        help='Run CPU-bound tasks in parallel (faster but more memory)')
     parser.add_argument('--skip-demucs', action='store_true',
                         help='Skip Demucs stem separation')
     parser.add_argument('--skip-flamingo', action='store_true',
                         help='Skip Music Flamingo analysis')
+    parser.add_argument('--skip-midi', action='store_true',
+                        help='Skip MIDI drum transcription')
     parser.add_argument('--verbose', '-v', action='store_true')
 
     args = parser.parse_args()
@@ -619,14 +715,21 @@ def main():
     if not audio_path.exists():
         logger.error(f"Path not found: {audio_path}")
         sys.exit(1)
+        
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         tester = FeatureTester(
             audio_path,
             skip_demucs=args.skip_demucs,
             skip_flamingo=args.skip_flamingo,
+            skip_midi=args.skip_midi,
             flamingo_model=args.model,
             use_transformers=args.transformers,
+            output_dir=output_dir,
+            parallel=args.parallel,
         )
         tester.run_all()
         tester.print_summary()

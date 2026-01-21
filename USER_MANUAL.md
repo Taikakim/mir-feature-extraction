@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.1
-**Last Updated:** 2026-01-19
+**Version:** 1.3
+**Last Updated:** 2026-01-22
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -28,9 +28,10 @@ This framework extracts 78 numeric MIR features + 5 natural language AI descript
 ### What It Does
 
 - **Organizes** audio files into structured folders
-- **Separates** audio into stems (drums, bass, other, vocals) using Demucs
+- **Separates** audio into stems (drums, bass, other, vocals) using Demucs htdemucs_ft
 - **Extracts** 78 numeric conditioning features per track
 - **Generates** 5 AI text descriptions via Music Flamingo (GGUF or Transformers)
+- **Transcribes** drums to MIDI using ADTOF-PyTorch (GPU-accelerated)
 - **Saves** results in JSON `.INFO` files and auxiliary grid files
 
 ### What You Get
@@ -38,9 +39,10 @@ This framework extracts 78 numeric MIR features + 5 natural language AI descript
 For each audio track:
 - 78 numeric features in `{trackname}.INFO` JSON file
 - 5 AI text descriptions (genre, mood, instruments, structure, technical)
-- 4 separated stems (drums, bass, other, vocals) as FLAC files
+- 4 separated stems (drums, bass, other, vocals) as MP3 files (~96kbps VBR, for feature extraction)
 - Beat grid in `{trackname}.BEATS_GRID` file
 - Onset timestamps in `{trackname}.ONSETS` file
+- MIDI drum transcription in `drums_adtof.mid`
 - Ready for Stable Audio Tools training pipeline
 
 ---
@@ -565,6 +567,58 @@ Options:
 
 ---
 
+## MIDI Drum Transcription
+
+The framework includes drum transcription to MIDI via two methods:
+
+### Method 1: ADTOF-PyTorch (Recommended)
+
+Neural network drum transcription using the ADTOF Frame_RNN model ported to PyTorch.
+
+**Output:** 5 drum classes (Bass Drum, Snare, Tom, Hi-Hat, Cymbal) as General MIDI notes.
+
+```bash
+# Single file
+python src/transcription/drums/adtof.py "/path/to/audio.flac" -v
+
+# With custom output
+python src/transcription/drums/adtof.py "/path/to/audio.flac" --output drums.mid
+
+# Batch processing
+python src/transcription/drums/adtof.py /path/to/data --batch --device cuda
+
+# Use CPU instead of GPU
+python src/transcription/drums/adtof.py /path/to/audio.flac --device cpu
+```
+
+**Requirements:** ADTOF-PyTorch installed (`pip install -e repos/ADTOF-pytorch`)
+
+**Performance:**
+- First run: ~5 min (Triton kernel compilation)
+- Subsequent runs: GPU at 100%, ~1-2 min per 3-minute track
+- Bottleneck: CPU-bound mel spectrogram computation (librosa)
+
+### Method 2: Drumsep + Onset Detection
+
+Separates drum stems then detects onsets per component.
+
+```bash
+# Full pipeline
+python src/transcription/runner.py /path/to/data --force --verbose
+```
+
+**Output:** `drums.mid` file with kick, snare, cymbals, toms tracks.
+
+**Stem Mapping:**
+| Stem | MIDI Note | Instrument |
+|------|-----------|------------|
+| bombo (kick) | 36 | Bass Drum 1 |
+| redoblante (snare) | 38 | Acoustic Snare |
+| platillos (cymbals) | 42 | Closed Hi-Hat |
+| toms | 45 | Low Tom |
+
+---
+
 ## Music Flamingo AI Descriptions
 
 Music Flamingo generates natural language descriptions of music using NVIDIA's Music Flamingo model (8B parameters: Qwen2.5-7B language + Audio Flamingo 3 encoder).
@@ -995,6 +1049,6 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Framework Version:** 1.1
+**Framework Version:** 1.2
 **Compatible with:** Stable Audio Tools (Stability AI)
-**Last Updated:** 2026-01-19
+**Last Updated:** 2026-01-21

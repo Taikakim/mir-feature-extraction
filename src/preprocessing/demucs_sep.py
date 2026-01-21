@@ -11,8 +11,8 @@ Dependencies:
 - src.core.common
 
 Output formats supported:
-- FLAC (lossless, default)
-- MP3 (lossy, CBR or VBR)
+- MP3 (default, VBR ~96kbps for stems - only for feature extraction)
+- FLAC (lossless, for full_mix preservation)
 - OGG (lossy, via post-conversion)
 - WAV (16-bit, 24-bit, or 32-bit float)
 
@@ -122,9 +122,9 @@ def separate_stems(audio_file: str | Path,
                    shifts: int = None,
                    jobs: int = None,
                    device: str = 'cuda',
-                   output_format: str = 'flac',
-                   mp3_bitrate: int = 320,
-                   mp3_preset: int = 2,
+                   output_format: str = 'mp3',
+                   mp3_bitrate: int = 96,
+                   mp3_preset: int = 5,
                    ogg_quality: float = 0.5,
                    clip_mode: str = 'rescale') -> Dict[str, Path]:
     """
@@ -137,9 +137,9 @@ def separate_stems(audio_file: str | Path,
         shifts: Number of random shifts for prediction (default: from config)
         jobs: Number of parallel jobs (default: from config)
         device: Device to use ('cuda', 'cpu', 'mps')
-        output_format: Output format - 'flac', 'mp3', 'ogg', 'wav', 'wav24', 'wav32'
-        mp3_bitrate: Bitrate for MP3 output (64-320, default 320)
-        mp3_preset: VBR preset for MP3 (2-7, 2=best quality, 7=fastest)
+        output_format: Output format - 'mp3' (default, VBR ~96kbps), 'flac', 'ogg', 'wav'
+        mp3_bitrate: Bitrate for MP3 output (64-320, default 96 for stems)
+        mp3_preset: VBR preset for MP3 (2-7, 5=balanced for stems)
         ogg_quality: Quality for OGG output (0.0-1.0, default 0.5)
         clip_mode: Clipping strategy - 'rescale' or 'clamp'
 
@@ -255,12 +255,27 @@ def separate_stems(audio_file: str | Path,
             raise
 
     # Find and move output files
+    # Demucs outputs to: output_dir/model/track_name/stem.ext
     demucs_output = output_dir / model
     stem_paths = {}
-
+    
+    # Find the actual track subfolder (Demucs creates a folder named after the track)
+    track_folder = None
     if demucs_output.exists():
+        for item in demucs_output.iterdir():
+            if item.is_dir():
+                track_folder = item
+                break
+    
+    if track_folder is None:
+        # Fallback: check if stems are directly in demucs_output (for --filename usage)
+        track_folder = demucs_output
+    
+    logger.debug(f"Looking for stems in: {track_folder}")
+    
+    if track_folder.exists():
         for stem_name in DEMUCS_STEMS:
-            stem_file = demucs_output / f"{stem_name}{demucs_ext}"
+            stem_file = track_folder / f"{stem_name}{demucs_ext}"
             if stem_file.exists():
                 final_path = output_dir / f"{stem_name}{final_ext}"
 
@@ -486,24 +501,24 @@ Output format examples:
     parser.add_argument(
         '--format', '-f',
         type=str,
-        default='flac',
+        default='mp3',
         choices=['flac', 'mp3', 'ogg', 'wav', 'wav24', 'wav32'],
-        help='Output format (default: flac)'
+        help='Output format for stems (default: mp3 ~96kbps VBR)'
     )
 
     parser.add_argument(
         '--bitrate',
         type=int,
-        default=320,
-        help='MP3 bitrate in kbps for CBR mode (64-320, default: 320)'
+        default=96,
+        help='MP3 bitrate in kbps (64-320, default: 96 for stems)'
     )
 
     parser.add_argument(
         '--preset',
         type=int,
-        default=2,
+        default=5,
         choices=[2, 3, 4, 5, 6, 7],
-        help='MP3 VBR preset (2=best quality, 7=fastest, default: 2)'
+        help='MP3 VBR preset (2=best, 5=default for stems, 7=fastest)'
     )
 
     parser.add_argument(

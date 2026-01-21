@@ -63,6 +63,35 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 
 **Total: 77+ numeric features + 496 classification labels + 5 AI descriptions + MIDI drums**
 
+### Feature Units Reference
+
+| Feature | Unit | Range | Description |
+|---------|------|-------|-------------|
+| **bpm** | BPM | 40-300 | Beats per minute |
+| **beat_regularity** | seconds | 0-1 | Std dev of beat intervals (lower = more regular) |
+| **onset_density** | onsets/sec | 0-50 | Note/percussion events per second |
+| **onset_count** | count | 0-∞ | Total detected onset events |
+| **lufs** | LUFS | -70 to 0 | Integrated loudness (ITU-R BS.1770) |
+| **lra** | LU | 0-25 | Loudness range (dynamic variation) |
+| **spectral_flatness** | ratio | 0-1 | Noise-like (1) vs tonal (0) |
+| **spectral_flux** | - | 0-∞ | Rate of spectral change |
+| **spectral_skewness** | - | -∞ to ∞ | Asymmetry of spectral distribution |
+| **spectral_kurtosis** | - | 0-∞ | Spectral peakedness |
+| **rms_bass/body/mid/air** | dB | -60 to 0 | Energy in frequency bands |
+| **chroma_C/C#/.../B** | weight | 0-1 | Pitch class presence (12 features) |
+| **brightness** | score | 0-100 | High-frequency content perception |
+| **roughness** | score | 0-100 | Harshness/beating perception |
+| **hardness** | score | 0-100 | Soft vs metallic perception |
+| **depth** | score | 0-100 | Low-frequency spaciousness |
+| **booming** | score | 0-100 | Low-frequency resonance (100-200 Hz) |
+| **reverberation** | score | 0-100 | Wet/dry balance |
+| **sharpness** | score | 0-100 | High-frequency harshness |
+| **warmth** | score | 0-100 | Mid-low frequency richness |
+| **danceability** | probability | 0-1 | Dance suitability |
+| **atonality** | probability | 0-1 | Absence of tonal center |
+| **audiobox_ce/cu/pc/pq** | score | 1-10 | Enjoyment/usefulness/complexity/quality |
+| **syncopation_index** | score | 0-1 | Rhythmic complexity relative to beat |
+
 ---
 
 ## Quick Start

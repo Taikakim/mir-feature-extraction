@@ -31,3 +31,11 @@ Global Drum Clustering
 If it’s possible from the data that exists to cluster drums so that different instruments/timbres can be mapped to their own MIDI notes, that is an interesting option. ADTOF only creates a limited amount of tracks, but in the case that in the same song there are four different hihat sounds, it would be beneficial to map the to four different MIDI notes.
 
 It is also an interesting idea that the timbre of each drum hit in the training set is recorded, and later when everything has been processed, cluster them so that in every drums MIDI file the same note would proxy the same type of sounds.
+
+[ADDED] Refined Global Drum Clustering:
+The user specifically requested "clustering similar-sounding drum hits to the same MIDI notes" to facilitate interchanging MIDI patterns in a DAW. This means:
+1. Analyze all isolated drum hits across the dataset (e.g. from DrumSep stems).
+2. Compute timbral features for each hit.
+3. Cluster these features into N classes (where N is the number of available MIDI notes/drum pad slots).
+4. Re-transcribe the MIDI files using these cluster IDs as the MIDI pitch.
+This would ensure that "Snare Type A" is always Note 38, "Snare Type B" is Note 39, etc., across all tracks.

@@ -2,8 +2,8 @@
 
 Comparison of planned features (from `/plans/*.txt`) versus currently implemented features.
 
-**Last Updated:** 2026-01-19
-**Current Implementation:** 78 numeric features + 5 text descriptions per track
+**Last Updated:** 2026-01-21
+**Current Implementation:** 78 numeric features + 5 text descriptions + MIDI transcription per track
 
 ---
 
@@ -164,13 +164,13 @@ Natural language music descriptions via GGUF/llama.cpp:
 
 ### Missing Analysis Modules
 
-#### 3. MIDI Transcription (0/3) ❌
+#### 3. MIDI Transcription (2/3) 🔧
 **Plan:** `04-midi_transcription.txt`
 
 **Drums:**
-- ❌ ADTOF transcription
+- ✅ ADTOF transcription (via ADTOF-PyTorch, GPU accelerated)
 - ❌ OaF Drums transcription
-- ❌ MDX23C DrumSep transcription
+- ✅ MDX23C DrumSep transcription (Drumsep wrapper implemented)
 
 **Bass:**
 - ❌ Basic Pitch transcription
@@ -182,21 +182,22 @@ Natural language music descriptions via GGUF/llama.cpp:
 - ❌ MT3 transcription
 - ❌ MR-MT3 transcription
 
-**Why Missing:** MIDI transcription is separate pipeline from feature extraction.
+**Status:** Drum transcription pipeline operational with two methods.
 
-**Priority:** MEDIUM - Useful for conditioning but not critical for initial training
+**Priority:** Bass transcription next
 
-#### 4. Smart Cropping System ❌
+#### 4. Smart Cropping System ✅ COMPLETE
 **Plan:** `05-smart_cropping.txt`
 
-- ❌ Automated audio cropping system
-- ❌ `/crops` subfolder structure
-- ❌ `section_N` filename suffix
-- ❌ Position calculation based on crops
+- ✅ Automated audio cropping system (`src/tools/create_training_crops.py`)
+- ✅ `/crops` subfolder structure
+- ✅ Beat-aligned cropping with zero-crossing snap
+- ✅ Sequential and overlap modes
+- ✅ Div4 downbeat alignment option
+- ✅ 10ms fade in/out on all crops
+- ✅ Metadata JSON sidecars with position info
 
-**Why Missing:** Current workflow uses full tracks. Cropping needed for training on long songs.
-
-**Priority:** HIGH - Critical for training on full-length albums
+**Implementation:** Complete with multiple modes for different use cases.
 
 #### 5. Statistical Analysis Tool ❌
 **Plan:** `13-statistical_analysis.txt`
@@ -275,8 +276,9 @@ Natural language music descriptions via GGUF/llama.cpp:
 | Stem Separation | ✅ Complete | - |
 | Music Flamingo GGUF | ✅ Complete | - |
 | Music Flamingo Transformers | ✅ Complete | - |
-| Smart Cropping | ❌ Not Started | HIGH |
-| MIDI Transcription | ❌ Not Started | MEDIUM |
+| Smart Cropping | ✅ Complete | - |
+| MIDI Transcription (Drums) | ✅ Complete | - |
+| MIDI Transcription (Bass) | ❌ Not Started | MEDIUM |
 | Statistical Analysis | ❌ Not Started | MEDIUM |
 | AudioBox Inference | 🔧 Partial | MEDIUM |
 
@@ -307,6 +309,17 @@ Natural language music descriptions via GGUF/llama.cpp:
 ---
 
 ## 📝 RECENT UPDATES
+
+### 2026-01-21 Session
+- ✅ **ADTOF-PyTorch**: Drum transcription with ROCm GPU acceleration (replaces TensorFlow version)
+- ✅ **Drumsep Integration**: Alternative drum transcription via separated stems
+- ✅ **adtof.py Wrapper**: New `src/transcription/drums/adtof.py` using ADTOF-PyTorch
+- ❌ **TensorFlow ADTOF**: Incompatible with Keras 3 (weight format not supported)
+
+### 2026-01-20 Session
+- ✅ **Smart Cropping**: Complete implementation with beat alignment, overlap, div4 modes
+- ✅ **Drumsep MIDI**: Drum stem to MIDI conversion pipeline
+- ✅ **Training Crops**: `src/tools/create_training_crops.py` with full features
 
 ### 2026-01-19 Session
 - ✅ **Music Flamingo GGUF**: Now working via llama-mtmd-cli (7x faster than transformers)
@@ -349,4 +362,4 @@ Natural language music descriptions via GGUF/llama.cpp:
 
 ---
 
-**Status:** Core feature extraction pipeline is **99% complete** for numeric features. 78 features + 5 text descriptions successfully extracted. Music Flamingo GGUF now operational (7x faster). Next priority is smart cropping system for production dataset preparation.
+**Status:** Core feature extraction pipeline is **100% complete** for numeric features. 78 features + 5 text descriptions + MIDI drum transcription operational. Smart cropping system complete. ADTOF-PyTorch integrated for GPU-accelerated drum transcription. Next priority is bass MIDI transcription.

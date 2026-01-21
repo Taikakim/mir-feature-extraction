@@ -20,14 +20,14 @@ Usage:
 import os
 from pathlib import Path
 
-# Memory management
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
-
+# Memory management for ROCm (expandable_segments not supported on HIP)
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
 # AMD ROCm optimizations
 os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
 os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
 os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
 os.environ.setdefault('OMP_NUM_THREADS', '8')
+os.environ.setdefault('MIOPEN_FIND_MODE', '2')  # Fast MIOpen kernel selection (avoid long delays)
 
 # Set tunableop results file if it exists
 _tunableop_file = Path(__file__).parent.parent.parent / 'tunableop_results00.csv'
@@ -89,11 +89,11 @@ def normalize_music_flamingo_text(text: str) -> str:
 
 # Default prompts (same as GGUF version for A/B testing consistency)
 DEFAULT_PROMPTS = {
-    'full': "Describe this track in full detail - tell me the genre, tempo, and key, then dive into the instruments, production style, and overall mood it creates.",
-    'technical': "Break the track down like a critic - list its tempo, key, and chordal motion, then explain the textures, dynamics and prominent production aesthetics. Keep the description compact, under 20 words",
+    'full': "Describe this track in full detail - tell me the genre, tempo, and key, then dive into the instruments, production style, and overall mood it creates. Keep it brief, under 40 words",
+    'technical': "Break the track down to it's technical components- tempo, key, and chordal motion, then explain the loudness, textures, dynamics and prominent production aesthetics. Keep the description compact, under 20 words",
     'genre_mood': "Brief description suitable for an AI inference prompt: What is the genre and mood of this music? Be specific about subgenres and describe the emotional character. Try to keep the description under 30 words.",
     'instrumentation': "Very brief description about the timbre and recognised instruments. What instruments and sounds are present in this track? Try to keep the description under 15 words",
-    'structure': "Describe the arrangement and structure of this track. Include sections, transitions, and how the energy develops.",
+    'structure': "Describe the arrangement and structure of this track. Include sections, transitions, and how the energy develops. Keep it brief, under 15 words.",
 }
 
 
@@ -341,11 +341,11 @@ class MusicFlamingoTransformers:
 
         # Token limits per prompt type (matching GGUF version)
         token_limits = {
-            'full': 500,
-            'technical': 200,
-            'genre_mood': 150,
-            'instrumentation': 100,
-            'structure': 300,
+            'full': 100,
+            'technical': 20,
+            'genre_mood': 30,
+            'instrumentation': 20,
+            'structure': 30,
         }
 
         for prompt_type in DEFAULT_PROMPTS.keys():

@@ -14,6 +14,7 @@ Dependencies:
 
 Output:
 - filename.BEATS_GRID: Text file with beat timestamps (one per line)
+- filename.DOWNBEATS: Text file with downbeat timestamps (one per line)
 """
 
 import numpy as np
@@ -286,6 +287,15 @@ def create_beat_grid(audio_path: str | Path,
 
         # Save the grid
         save_beat_grid(beat_times, grid_file_path)
+        
+        # Save downbeats if available
+        if len(downbeat_times) > 0:
+            downbeat_path = audio_path.parent / f"{folder_name}.DOWNBEATS"
+            try:
+                np.savetxt(downbeat_path, downbeat_times, fmt='%.6f')
+                logger.info(f"Saved {len(downbeat_times)} downbeats to {downbeat_path.name}")
+            except Exception as e:
+                logger.error(f"Failed to save downbeats: {e}")
 
     return beat_times, grid_file_path
 

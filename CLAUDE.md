@@ -8,7 +8,7 @@ MIR Feature Extraction Framework for conditioning Stable Audio Tools and similar
 
 **Hardware Target**: AMD RDNA4 (RX 9070 XT) with ROCm 7.1.1.1+ / PyTorch 2.11.0a0+rocm7.11
 
-**Key Achievement**: Production-ready with GPU acceleration, achieving 4-9x realtime for standard features, 1-2x realtime for comprehensive AI descriptions.
+**Key Achievement**: Production-ready with GPU acceleration, achieving 4-9x realtime for standard features, 1-2x realtime for comprehensive AI descriptions, plus MIDI drum transcription via ADTOF-PyTorch.
 
 ---
 
@@ -37,20 +37,22 @@ ln -sf libbitsandbytes_rocm71.so libbitsandbytes_rocm72.so
 
 ### Essential Environment Variables
 
-**For Music Flamingo + GPU optimization:**
+**For GPU optimization (ROCm):**
 
 ```bash
-export PYTORCH_ALLOC_CONF=expandable_segments:True
+# Memory management (expandable_segments not supported on ROCm/HIP)
+export PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.8
+
+# AMD ROCm optimizations
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_TUNING=0  # Use existing optimized kernels
 export PYTORCH_TUNABLEOP_FILENAME=/home/kim/Projects/mir/tunableop_results00.csv
-export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
-export HIP_FORCE_DEV_KERNARG=1
+export MIOPEN_FIND_MODE=2  # Fast MIOpen kernel selection (avoid long delays)
 export OMP_NUM_THREADS=8
 ```
 
-**Critical**: Always set `PYTORCH_ALLOC_CONF=expandable_segments:True` before Music Flamingo to avoid OOM errors.
+**Note**: `expandable_segments:True` is NOT supported on ROCm/HIP. Use `garbage_collection_threshold:0.8` instead.
 
 ### Testing Commands
 
@@ -166,6 +168,13 @@ src/
 │   ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
 │   ├── music_flamingo_gguf.py    # ✅ RECOMMENDED: GGUF/llama.cpp (7x faster, 40-60% less VRAM)
 │   └── music_flamingo_transformers.py  # Native Python via HuggingFace transformers
+│
+├── transcription/                    # MIDI transcription pipeline
+│   ├── drums/
+│   │   ├── adtof.py              # ✅ ADTOF-PyTorch drum transcription (GPU accelerated)
+│   │   └── drumsep.py            # Drumsep + onset detection
+│   ├── midi_utils.py             # MIDI file utilities
+│   └── runner.py                 # Batch transcription orchestrator
 │
 └── test_all_features.py          # Comprehensive test script for all 70+ features
 ```
@@ -475,6 +484,14 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 - INT8/INT4 quantization non-functional on ROCm - use bfloat16 + Flash Attention 2
 - **GGUF/llama.cpp NOW WORKS** - Use `llama-mtmd-cli` for fastest inference (3.7s vs 28s)
 - **AudioBox Aesthetics NOW WORKS** - `pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git`
+- **ADTOF-PyTorch NOW WORKS** - Drum transcription with ROCm GPU acceleration
+
+### 2026-01-21 Session (ADTOF Integration)
+
+1. ✅ **ADTOF-PyTorch**: GPU-accelerated drum transcription (replaces TensorFlow version)
+2. ✅ **Drumsep Integration**: Alternative drum transcription via stem separation
+3. ❌ **TensorFlow ADTOF**: Incompatible with Keras 3 (weight format not supported)
+4. ✅ **adtof.py Wrapper**: New wrapper using ADTOF-PyTorch in `src/transcription/drums/adtof.py`
 
 ---
 
@@ -515,6 +532,6 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 ---
 
-**Last Updated**: 2026-01-19 (Session: AudioBox Aesthetics + Essentia GMI)
+**Last Updated**: 2026-01-21 (Session: ADTOF-PyTorch Drum Transcription)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
-**Status**: Production Ready - 82 features including AudioBox Aesthetics and 496 AI classification labels
+**Status**: Production Ready - 82 features + MIDI transcription + 496 AI classification labels
