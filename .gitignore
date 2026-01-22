@@ -79,8 +79,13 @@ GITHUB_AUTH_FIX.md
 # Generated/cached data
 tunableop_results*.csv
 .cache/
+.cache
 *.txt
 !requirements.txt
+*.json
+!package.json
+*.odt
+*.py3
 
 # Logs and temporary files
 *.log
