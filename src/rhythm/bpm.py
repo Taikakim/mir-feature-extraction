@@ -84,20 +84,67 @@ def calculate_bpm_from_beats(beat_times: np.ndarray,
     return float(bpm), stats
 
 
+def find_stable_segments(intervals: np.ndarray, 
+                         local_threshold: float = 0.05) -> list:
+    """
+    Find segments of consecutive beats with stable intervals.
+    
+    A segment is stable if consecutive intervals differ by less than local_threshold.
+    
+    Args:
+        intervals: Array of inter-beat intervals
+        local_threshold: Maximum difference between consecutive intervals (seconds)
+        
+    Returns:
+        List of (start_idx, end_idx, segment_std) tuples for stable segments
+    """
+    if len(intervals) < 2:
+        return []
+    
+    segments = []
+    segment_start = 0
+    
+    for i in range(1, len(intervals)):
+        # Check if this interval differs significantly from the previous
+        diff = abs(intervals[i] - intervals[i-1])
+        
+        if diff > local_threshold:
+            # End current segment if it's long enough
+            if i - segment_start >= 4:  # Minimum 4 beats for a segment
+                segment_intervals = intervals[segment_start:i]
+                segment_std = np.std(segment_intervals)
+                segments.append((segment_start, i, segment_std))
+            segment_start = i
+    
+    # Don't forget the last segment
+    if len(intervals) - segment_start >= 4:
+        segment_intervals = intervals[segment_start:]
+        segment_std = np.std(segment_intervals)
+        segments.append((segment_start, len(intervals), segment_std))
+    
+    return segments
+
+
 def validate_bpm(beat_count: int,
                  regularity: float,
-                 bpm: float) -> bool:
+                 bpm: float,
+                 beat_times: np.ndarray = None,
+                 audio_duration: float = None) -> bool:
     """
     Determine if detected BPM is valid (rhythmic content).
 
-    Uses thresholds from BEAT_TRACKING_CONFIG:
-    - beat_count_threshold: Minimum number of beats
-    - regularity_threshold: Maximum std dev of beat intervals
+    Uses both global regularity AND segment-based analysis to handle tracks
+    with breakdowns, buildups, and tempo changes. A track is considered
+    rhythmic if:
+    1. Global regularity is good enough, OR
+    2. There exists a stable segment covering at least 10% of the track
 
     Args:
         beat_count: Number of beats detected
-        regularity: Regularity score (std dev of intervals)
+        regularity: Global regularity score (std dev of intervals)
         bpm: Detected BPM value
+        beat_times: Optional array of beat timestamps for segment analysis
+        audio_duration: Optional track duration for percentage calculation
 
     Returns:
         True if BPM is valid, False for non-rhythmic content
@@ -110,18 +157,55 @@ def validate_bpm(beat_count: int,
         logger.info(f"Insufficient beats: {beat_count} < {beat_count_threshold}")
         return False
 
-    # Check if beats are regular enough
-    if regularity > regularity_threshold:
-        logger.info(f"Beats too irregular: {regularity:.3f} > {regularity_threshold}")
-        return False
-
     # Check if BPM is in reasonable range
     if bpm < 40 or bpm > 300:
         logger.info(f"BPM out of range: {bpm:.1f}")
         return False
 
-    logger.info(f"Valid BPM detected: {bpm:.1f} (beats: {beat_count}, regularity: {regularity:.3f})")
-    return True
+    # First, check global regularity (fast path)
+    if regularity <= regularity_threshold:
+        logger.info(f"Valid BPM detected (global): {bpm:.1f} (beats: {beat_count}, regularity: {regularity:.3f})")
+        return True
+
+    # Global regularity failed - try segment-based analysis
+    if beat_times is not None and len(beat_times) > 4:
+        intervals = np.diff(beat_times)
+        
+        # Find stable segments
+        segments = find_stable_segments(intervals, local_threshold=0.05)
+        
+        if segments:
+            # Calculate total duration covered by stable segments
+            total_stable_duration = 0.0
+            best_segment = None
+            best_length = 0
+            
+            for start_idx, end_idx, seg_std in segments:
+                # Only count segments with good local regularity
+                if seg_std <= regularity_threshold:
+                    segment_duration = beat_times[end_idx] - beat_times[start_idx] if end_idx < len(beat_times) else beat_times[-1] - beat_times[start_idx]
+                    total_stable_duration += segment_duration
+                    
+                    if end_idx - start_idx > best_length:
+                        best_length = end_idx - start_idx
+                        best_segment = (start_idx, end_idx, seg_std)
+            
+            # Check if stable segments cover at least 10% of track
+            if audio_duration and audio_duration > 0:
+                coverage = total_stable_duration / audio_duration
+                if coverage >= 0.10:  # 10% threshold
+                    logger.info(f"Valid BPM detected (segment-based): {bpm:.1f} "
+                               f"(stable coverage: {coverage*100:.1f}%, "
+                               f"best segment: {best_length} beats)")
+                    return True
+            elif best_segment and best_length >= 30:
+                # Fallback: if we have at least 30 consecutive stable beats
+                logger.info(f"Valid BPM detected (segment-based): {bpm:.1f} "
+                           f"(best segment: {best_length} beats)")
+                return True
+
+    logger.info(f"Beats too irregular: {regularity:.3f} > {regularity_threshold} (no stable segments found)")
+    return False
 
 
 def analyze_bpm(beat_times: np.ndarray,
@@ -173,8 +257,14 @@ def analyze_bpm(beat_times: np.ndarray,
             'beat_regularity': 1.0
         }
 
-    # Validate BPM
-    is_valid = validate_bpm(stats['beat_count'], stats['regularity'], bpm)
+    # Validate BPM (now with segment-based analysis for tracks with breakdowns)
+    is_valid = validate_bpm(
+        stats['beat_count'], 
+        stats['regularity'], 
+        bpm,
+        beat_times=beat_times,
+        audio_duration=audio_duration
+    )
 
     # Prepare results
     results = {

@@ -166,7 +166,7 @@ src/
 │
 ├── classification/
 │   ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
-│   ├── music_flamingo_gguf.py    # ✅ RECOMMENDED: GGUF/llama.cpp (7x faster, 40-60% less VRAM)
+│   ├── music_flamingo.py         # ✅ RECOMMENDED: GGUF/llama.cpp (7x faster, 40-60% less VRAM)
 │   └── music_flamingo_transformers.py  # Native Python via HuggingFace transformers
 │
 ├── transcription/                    # MIDI transcription pipeline
@@ -505,7 +505,7 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 - `README.md` - Project overview (updated 2026-01-13)
 - `plans/01-developement.txt` - Core development principles
 - `plans/02-stem_separation.txt` - Folder structure specification
-- `src/classification/music_flamingo_gguf.py` - ✅ GGUF wrapper (RECOMMENDED - 7x faster)
+- `src/classification/music_flamingo.py` - ✅ GGUF wrapper (RECOMMENDED - 7x faster)
 - `GGUF_INVESTIGATION.md` - Full GGUF setup and usage documentation
 
 **Ignore older files** with issues that have been fixed in recent sessions.
@@ -532,6 +532,6 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 ---
 
-**Last Updated**: 2026-01-21 (Session: ADTOF-PyTorch Drum Transcription)
+**Last Updated**: 2026-01-23 (Session: Statistics, BPM improvements, metadata tools)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
-**Status**: Production Ready - 82 features + MIDI transcription + 496 AI classification labels
+**Status**: Production Ready - 79 features + MIDI transcription + AI descriptions + metadata tools

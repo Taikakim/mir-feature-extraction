@@ -200,3 +200,157 @@ python src/preprocessing/demucs_sep.py /path/to/data --batch --format flac
 **Session Date**: 2026-01-22
 **Status**: **COMPLETED** ✅
 **Key Changes**: GPU ADTOF, Demucs fixes, ROCm env vars, Feature units, FLAC fallback, Melodic-tuned HPCP chroma with stem support
+
+---
+
+## Part 3: Pipeline Fixes & Training Crops Enhancement
+
+### 8. Pipeline Music Flamingo Path Fix ✅
+- **Fixed**: `pipeline.py` referenced non-existent `music_flamingo_gguf.py`
+- **Corrected to**: `music_flamingo.py` (the actual filename)
+- **Location**: Line 248 in `src/pipeline.py`
+
+### 9. Training Crops Output Directory Option ✅
+- **Added**: `--output-dir` / `-o` option for custom destination
+- **Behavior**: Creates per-track folders in output directory
+- **Naming**: Changed from `section_000_TrackName.flac` → `TrackName_0.flac`
+- **INFO files**: Each crop now gets `.INFO` file with `position` key (0.0 to 1.0)
+
+#### Output Structure with --output-dir
+```
+/output/
+├── TrackName1/
+│   ├── TrackName1_0.flac
+│   ├── TrackName1_0.INFO    # {"position": 0.0}
+│   ├── TrackName1_0.json
+│   ├── TrackName1_1.flac
+│   └── ...
+├── TrackName2/
+│   └── ...
+```
+
+#### Usage
+```bash
+# Save crops to custom output directory
+python src/tools/create_training_crops.py /path/to/source -o /path/to/output --sequential
+
+# With beat-aligned overlap
+python src/tools/create_training_crops.py /path/to/source -o /path/to/output --overlap
+```
+
+---
+
+## Files Modified (Part 3)
+
+1. **src/pipeline.py**
+   - Fixed: Line 248 `music_flamingo_gguf.py` → `music_flamingo.py`
+
+2. **src/tools/create_training_crops.py**
+   - Added `--output-dir` / `-o` CLI argument
+   - Added per-track folder creation in destination
+   - Changed naming: `section_000_TrackName.flac` → `TrackName_N.flac`
+   - Added `.INFO` file creation with `position` key for each crop
+   - Updated docstring with new features
+
+3. **README.md**
+   - Updated training crops section with `--output-dir` option
+   - Updated version to 1.3
+
+4. **CLAUDE.md**
+   - Fixed `music_flamingo_gguf.py` → `music_flamingo.py` references
+   - Updated last updated date
+
+---
+
+**Final Session Date**: 2026-01-22
+**Status**: **COMPLETED** ✅
+
+---
+
+## Part 4: Statistics, BPM Improvements, and Metadata Tools
+
+### 10. Statistical Analysis Enhancements ✅
+- **Added**: `--correlation` / `-c` flag for feature correlation analysis
+- **Added**: Outlier filename tracking with verbose output
+- **Added**: `--legend` / `-l` flag to print explanation of all statistics
+- **Added**: `_legend` section in JSON output with interpretation guide
+
+#### Usage
+```bash
+# Run with correlation analysis and outlier filenames
+python src/tools/statistical_analysis.py /path/to/data -v -c -o stats.json
+
+# Print statistics legend
+python src/tools/statistical_analysis.py --legend
+```
+
+### 11. BPM Validation Improvements ✅
+- **Increased**: `regularity_threshold` from 0.10 → 0.15 seconds
+- **Added**: Segment-based regularity check for tracks with breakdowns
+- **Logic**: If global regularity fails, find stable beat segments covering ≥10% of track
+
+#### Before/After
+| Track | Before | After |
+|-------|--------|-------|
+| Itako - Eerie Glow (0.139 regularity) | `bpm_is_defined: 0` | `bpm_is_defined: 1` ✅ |
+| Olsvanger - Jammonia (0.101 regularity) | `bpm_is_defined: 0` | `bpm_is_defined: 1` ✅ |
+
+### 12. Filename Cleanup Tool ✅
+- **Created**: `src/preprocessing/filename_cleanup.py`
+- **Purpose**: Clean filenames for T5 tokenizer compatibility
+- **Features**:
+  - Transliterates accented characters → ASCII (è→e, é→e)
+  - Decodes escaped Unicode (\\u00e8 → e)
+  - Normalizes spaces and dashes
+  - Batch mode by default (use `--dry-run` to preview)
+
+### 13. Track Metadata Lookup Tool ✅
+- **Created**: `src/tools/track_metadata_lookup.py`
+- **Purpose**: Correct "Various Artists" to actual artist names
+- **APIs**: Spotify (primary) + MusicBrainz (fallback for original release year)
+- **Features**:
+  - Batch processing with `--dry-run` mode
+  - Renames folders and files inside
+  - Writes `release_year` to .INFO (original release year when available)
+  - Also looks up year for tracks with correct artist but missing release_year
+
+#### Usage
+```bash
+# Setup Spotify (optional but recommended)
+export SPOTIFY_CLIENT_ID="your_id"
+export SPOTIFY_CLIENT_SECRET="your_secret"
+
+# Preview changes
+python src/tools/track_metadata_lookup.py /path/to/data --dry-run
+
+# Apply changes
+python src/tools/track_metadata_lookup.py /path/to/data
+```
+
+---
+
+## Files Created/Modified (Part 4)
+
+### New Files
+1. **src/preprocessing/filename_cleanup.py** - T5-compatible filename cleanup
+2. **src/tools/track_metadata_lookup.py** - Spotify/MusicBrainz metadata lookup
+
+### Modified Files
+1. **src/core/common.py**
+   - `regularity_threshold`: 0.10 → 0.15
+
+2. **src/rhythm/bpm.py**
+   - Added `find_stable_segments()` function
+   - Updated `validate_bpm()` with segment-based analysis fallback
+
+3. **src/tools/statistical_analysis.py**
+   - Added `--correlation` flag with `calculate_correlation_matrix()`
+   - Added `--legend` flag with `print_legend()`
+   - Added outlier filename tracking
+   - Added `_legend` section to JSON output
+
+---
+
+**Final Session Date**: 2026-01-23 (continued past midnight)
+**Status**: **COMPLETED** ✅
+**Key Changes**: Correlation analysis, BPM segment validation, filename cleanup, track metadata lookup

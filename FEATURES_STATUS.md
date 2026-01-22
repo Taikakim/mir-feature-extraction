@@ -124,25 +124,31 @@ Natural language music descriptions via GGUF/llama.cpp:
 
 ---
 
-## ❌ NOT YET IMPLEMENTED
+## ✅ PREVIOUSLY MISSING - NOW COMPLETE
 
-### Missing Features
-
-#### 1. Position Metadata (0/1) ❌
+### 1. Position Metadata ✅ COMPLETE
 **Plan:** `14-position.txt`
 
-- ❌ `position` - Relative position in original file (0-1)
+- ✅ `position` - Relative position in original file (0-1)
 
-**Why Missing:** Smart cropping system not yet implemented. Current test data uses full tracks, not crops.
-
-**Implementation Required:**
-- Smart cropping script (plan: `05-smart_cropping.txt`)
-- Calculate position from crop metadata
-- Range: 0.0 (beginning) to 1.0 (end)
-
-**Priority:** LOW - Only relevant for cropped training data
+**Implementation:** `src/tools/create_training_crops.py` now includes position in `.INFO` files for each crop.
 
 ---
+
+### 2. Smart Cropping System ✅ COMPLETE
+**Plan:** `05-smart_cropping.txt`
+
+- ✅ Beat-aligned cropping with zero-crossing snap
+- ✅ Sequential and overlap modes
+- ✅ Div4 downbeat alignment option
+- ✅ Position metadata per crop
+- ✅ 10ms fade in/out on all crops
+
+**Implementation:** `src/tools/create_training_crops.py` with full features.
+
+---
+
+## ❌ NOT YET IMPLEMENTED
 
 ### Missing Auxiliary Files
 
@@ -199,33 +205,24 @@ Natural language music descriptions via GGUF/llama.cpp:
 
 **Implementation:** Complete with multiple modes for different use cases.
 
-#### 5. Statistical Analysis Tool ❌
+#### 5. Statistical Analysis Tool ✅ COMPLETE
 **Plan:** `13-statistical_analysis.txt`
 
-- ❌ Corpus-wide feature statistics
-- ❌ Range calculation per feature
-- ❌ Distribution analysis
-- ❌ Outlier detection
-- ❌ Class frequency counting
+- ✅ Corpus-wide feature statistics (`src/tools/statistical_analysis.py`)
+- ✅ Range calculation per feature (min/max/mean/std/quartiles)
+- ✅ Distribution analysis
+- ✅ Outlier detection with filename tracking
+- ✅ Correlation analysis between features (`--correlation`)
+- ✅ Feature units display
+- ✅ Legend/help for statistics interpretation (`--legend`)
 
-**Why Missing:** Post-processing tool to be run after full dataset extraction.
-
-**Priority:** MEDIUM - Needed before training to verify feature distributions
+**Implementation:** Complete with JSON output, outlier tracking, correlation matrix.
 
 ---
 
 ## 🔧 PARTIALLY IMPLEMENTED / NEEDS IMPROVEMENT
 
-### 1. AudioBox Aesthetics - Using Defaults
-**Current Status:** 4/4 features exist but all set to default value (5.5)
-
-**What's Missing:**
-- Actual AudioBox model inference
-- Per-track aesthetic scoring
-
-**Priority:** MEDIUM - Default values work but limit conditioning power
-
-### 2. Drums Per-Stem Rhythm (Kick/Snare/Cymbal)
+### 1. Drums Per-Stem Rhythm (Kick/Snare/Cymbal)
 **Plan:** `03-rhythm.txt` mentions "Do the above also for the kick, snare and cymbal tracks from DrumSep"
 
 **Current Status:** Only full drums stem analyzed
@@ -251,14 +248,12 @@ Natural language music descriptions via GGUF/llama.cpp:
 | **Chroma** | 12 | 12 | ✅ 100% |
 | **Harmonic** | 4 | 4 | ✅ 100% |
 | **Timbral** | 8 | 8 | ✅ 100% |
-| **Aesthetics** | 4 | 4 | ✅ 100%* |
+| **Aesthetics** | 4 | 4 | ✅ 100% |
 | **Classification** | 2 | 2 | ✅ 100% |
-| **AI Descriptions** | 5 | 5 | ✅ 100% NEW |
-| **Position** | 0 | 1 | ❌ 0% |
-| **NUMERIC TOTAL** | **78** | **79** | **99%** |
+| **AI Descriptions** | 5 | 5 | ✅ 100% |
+| **Position** | 1 | 1 | ✅ 100% |
+| **NUMERIC TOTAL** | **79** | **79** | **100%** |
 | **TEXT TOTAL** | **5** | **5** | **100%** |
-
-*Using defaults
 
 ### Auxiliary Files Progress
 | File Type | Implemented | Planned | Status |
@@ -278,37 +273,40 @@ Natural language music descriptions via GGUF/llama.cpp:
 | Music Flamingo Transformers | ✅ Complete | - |
 | Smart Cropping | ✅ Complete | - |
 | MIDI Transcription (Drums) | ✅ Complete | - |
+| Statistical Analysis | ✅ Complete | - |
+| AudioBox Inference | ✅ Complete | - |
+| Filename Cleanup | ✅ Complete | - |
+| Track Metadata Lookup | ✅ Complete | - |
 | MIDI Transcription (Bass) | ❌ Not Started | MEDIUM |
-| Statistical Analysis | ❌ Not Started | MEDIUM |
-| AudioBox Inference | 🔧 Partial | MEDIUM |
 
 ---
 
 ## 🎯 RECOMMENDED NEXT STEPS
 
-### Phase 1: Dataset Preparation (HIGH PRIORITY)
-1. **Implement Smart Cropping System**
-   - Critical for training on full albums
-   - Calculate `position` feature
-   - Create train/val splits
+### Phase 1: Dataset Preparation (COMPLETE)
+- ✅ Smart Cropping System - Complete with position metadata
+- ✅ Statistical Analysis - Complete with correlation, outlier tracking
+- ✅ Filename Cleanup - T5 tokenizer compatible
 
-2. **Run Statistical Analysis**
-   - Verify feature distributions
-   - Identify outliers
-   - Document corpus statistics
+### Phase 2: Metadata Enhancement (COMPLETE)
+- ✅ Track Metadata Lookup - Spotify/MusicBrainz with release_year
 
-### Phase 2: Model Improvements (MEDIUM PRIORITY)
-1. Implement AudioBox Aesthetics model inference (replace defaults)
-2. Save `.CHROMA` time series for analysis
-
-### Phase 3: Enhanced Features (LOW PRIORITY)
-1. Implement MIDI transcription pipeline
-2. Kick/Snare/Cymbal per-drum analysis
-3. Vocal gender classification
+### Phase 3: Model Improvements (MEDIUM PRIORITY)
+1. Implement MIDI bass transcription
+2. Add kick/snare/cymbal per-drum analysis
+3. Save `.CHROMA` time series for analysis
+4. Vocal gender classification
 
 ---
 
 ## 📝 RECENT UPDATES
+
+### 2026-01-22/23 Session
+- ✅ **Statistical Analysis Tool**: Complete with correlation, outlier tracking, legend (`src/tools/statistical_analysis.py`)
+- ✅ **BPM Validation Improved**: Segment-based validation for tracks with breakdowns
+- ✅ **Filename Cleanup Tool**: T5 tokenizer compatibility (`src/preprocessing/filename_cleanup.py`)
+- ✅ **Track Metadata Lookup**: Spotify + MusicBrainz API (`src/tools/track_metadata_lookup.py`)
+- ✅ **ADTOF GPU Optimization**: Added `audio_gpu.py` for GPU-accelerated spectrogram computation
 
 ### 2026-01-21 Session
 - ✅ **ADTOF-PyTorch**: Drum transcription with ROCm GPU acceleration (replaces TensorFlow version)

@@ -2,6 +2,8 @@
 
 !==! Very much a hot work-in-progress mess, but it alread kind of works for me and my RX 9070 XT, so I thought, it could be a good starting point for other people too. !==!
 
+!==! Things are going fast, the bits and pieces that connect everything are probably not all up to date all the time, but I try to check that the individual core analysis scripts keep working !==!
+
 **Comprehensive music feature extraction pipeline for conditioning Stable Audio Tools and similar audio generation models.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -200,14 +202,19 @@ python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --ove
 
 # Beat-aligned with div4 downbeats (measures divisible by 4)
 python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap --div4
+
+# Save to custom output directory (per-track folders)
+python src/tools/create_training_crops.py /path/to/audio/ -o /path/to/output --sequential
 ```
 
 **Crop Features:**
+- `--output-dir` / `-o`: Save crops to destination with per-track folders
 - Length in samples (default 2097152 = ~47.5s at 44.1kHz)
 - Beat-aligned start/end with zero-crossing snap for click-free cuts
 - Optional `--div4` ensures each crop contains downbeats divisible by 4
 - 10ms fade-in/fade-out on all crops
-- Metadata saved as `.json` sidecars with position, sample counts, downbeats
+- Creates `.INFO` file per crop with position metadata (0.0 to 1.0)
+- Output: `TrackName/TrackName_0.flac`, `TrackName/TrackName_1.flac`, etc.
 
 ### 6. Access Results
 
@@ -486,7 +493,7 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Version:** 1.2
-**Last Updated:** 2026-01-21
+**Version:** 1.3
+**Last Updated:** 2026-01-22
 **Status:** Production Ready (Core + AI Features + Training Crops + MIDI Drums)
 **Features:** 77+ numeric + 496 AI labels + 5 AI descriptions + smart cropping + MIDI drum transcription

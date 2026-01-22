@@ -168,7 +168,7 @@ FREQUENCY_BANDS = {
 # Beat tracking configuration
 BEAT_TRACKING_CONFIG = {
     'beat_count_threshold': 15,      # Minimum beats for BPM to be considered valid
-    'regularity_threshold': 0.1,     # Maximum std dev of beat intervals (seconds)
+    'regularity_threshold': 0.15,    # Maximum std dev of beat intervals (seconds)
     'default_bpm': 120,              # Default BPM when undefined (TODO: decide on 120 vs 0)
 }
 

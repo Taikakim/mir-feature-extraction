@@ -10,7 +10,12 @@ Usage:
     python src/tools/create_training_crops.py /path/to/data --length 2097152 --overlap
     python src/tools/create_training_crops.py /path/to/data --length 2097152 --overlap --div4
 
+    # With output directory (creates per-track folders)
+    python src/tools/create_training_crops.py /path/to/data --output-dir /path/to/crops --sequential
+    python src/tools/create_training_crops.py /path/to/data -o /path/to/crops --overlap
+
 Features:
+- --output-dir / -o: Save crops to destination with per-track folders (e.g., /output/TrackName/)
 - --sequential: Simple sequential crops at exact sample length (no beat logic)
 - Beat-aligned mode: Start times snap to closest downbeat
 - End times snap BACKWARDS to last downbeat before target end (never exceeds length)
@@ -19,6 +24,7 @@ Features:
 - 10ms fade-in and fade-out for clean transitions
 - First crop starts without zero-crossing snap (preserves exact position)
 - Silence detection at -72dB threshold
+- Creates .INFO file for each crop with position metadata
 """
 
 import argparse
@@ -36,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.file_utils import find_organized_folders, get_stem_files
 from core.common import setup_logging
 from rhythm.beat_grid import load_beat_grid
-from core.json_handler import get_info_path, read_info
+from core.json_handler import get_info_path, read_info, safe_update
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +169,8 @@ def apply_fades(crop_audio: np.ndarray, fade_len: int) -> np.ndarray:
 
 
 def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
-                            audio: np.ndarray, full_mix_path: Path) -> int:
+                            audio: np.ndarray, full_mix_path: Path,
+                            output_dir: Optional[Path] = None) -> int:
     """
     Create simple sequential crops at fixed sample length.
     No beat alignment, just exact sample boundaries with fades.
@@ -177,8 +184,14 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     if start_sample > 0:
         logger.info(f"Skipping initial silence: {start_sample / sr:.2f}s ({start_sample} samples)")
 
-    crops_dir = folder_path / "crops"
-    crops_dir.mkdir(exist_ok=True)
+    # Determine output directory
+    if output_dir:
+        # Create per-track folder in output directory
+        track_name = folder_path.name
+        crops_dir = output_dir / track_name
+    else:
+        crops_dir = folder_path / "crops"
+    crops_dir.mkdir(parents=True, exist_ok=True)
 
     crop_count = 0
     current_sample = start_sample
@@ -193,16 +206,17 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         crop_audio = apply_fades(crop_audio, fade_len)
 
         # Save
-        crop_name = f"section_{crop_count:03d}_{full_mix_path.stem}.flac"
+        crop_name = f"{full_mix_path.stem}_{crop_count}.flac"
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
         # Metadata
         start_sec = current_sample / sr
         end_sec = end_sample / sr
+        position = start_sec / duration_sec
 
         meta = {
-            "position": start_sec / duration_sec,
+            "position": position,
             "start_time": start_sec,
             "end_time": end_sec,
             "start_sample": current_sample,
@@ -212,8 +226,13 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
             "source": str(full_mix_path.name)
         }
 
+        # Save JSON metadata
         with open(crop_path.with_suffix('.json'), 'w') as f:
             json.dump(meta, f, indent=2)
+
+        # Create .INFO file with position key
+        info_path = get_info_path(crop_path)
+        safe_update(info_path, {"position": position})
 
         crop_count += 1
         current_sample = end_sample  # Sequential: next starts where this ended
@@ -225,7 +244,8 @@ def create_crops_for_file(folder_path: Path,
                           length_samples: int,
                           overlap: bool = True,
                           div4: bool = False,
-                          sequential: bool = False) -> int:
+                          sequential: bool = False,
+                          output_dir: Optional[Path] = None) -> int:
     """
     Generate crops for a single folder.
 
@@ -264,7 +284,7 @@ def create_crops_for_file(folder_path: Path,
 
     # Sequential mode: simple fixed-length crops
     if sequential:
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path)
+        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
 
     # Beat-aligned mode
     # Load BPM Info
@@ -276,7 +296,7 @@ def create_crops_for_file(folder_path: Path,
     if bpm is None or float(bpm) <= 0:
         use_beat_logic = False
         logger.info(f"{folder_path.name}: BPM not defined, using sequential fallback.")
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path)
+        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
 
     # Load beat grid
     beat_times = None
@@ -304,7 +324,7 @@ def create_crops_for_file(folder_path: Path,
                 downbeat_times = beat_times
     else:
         logger.warning(f"No beat grid for {folder_path.name}, using sequential fallback.")
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path)
+        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
 
     # Find start after silence (-72dB threshold)
     start_offset_samples = get_start_offset_above_threshold(audio, threshold_db=-72.0)
@@ -312,8 +332,14 @@ def create_crops_for_file(folder_path: Path,
     if start_offset_samples > 0:
         logger.info(f"Skipping initial silence: {start_offset_sec:.2f}s")
 
-    crops_dir = folder_path / "crops"
-    crops_dir.mkdir(exist_ok=True)
+    # Determine output directory
+    if output_dir:
+        # Create per-track folder in output directory
+        track_name = folder_path.name
+        crops_dir = output_dir / track_name
+    else:
+        crops_dir = folder_path / "crops"
+    crops_dir.mkdir(parents=True, exist_ok=True)
 
     crop_count = 0
     align_grid = downbeat_times if (downbeat_times is not None and len(downbeat_times) > 0) else beat_times
@@ -407,7 +433,7 @@ def create_crops_for_file(folder_path: Path,
         crop_audio = apply_fades(crop_audio, fade_len)
 
         # Save
-        crop_name = f"section_{crop_count:03d}_{full_mix_path.stem}.flac"
+        crop_name = f"{full_mix_path.stem}_{crop_count}.flac"
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
@@ -417,8 +443,10 @@ def create_crops_for_file(folder_path: Path,
 
         num_downbeats = count_downbeats_in_range(align_grid, current_start_sec, final_end_sec)
 
+        position = float(actual_start_sec / duration_sec)
+
         meta = {
-            "position": float(actual_start_sec / duration_sec),
+            "position": position,
             "start_time": actual_start_sec,
             "end_time": actual_end_sec,
             "start_sample": int(actual_start_sample),
@@ -429,8 +457,13 @@ def create_crops_for_file(folder_path: Path,
             "source": str(full_mix_path.name)
         }
 
+        # Save JSON metadata
         with open(crop_path.with_suffix('.json'), 'w') as f:
             json.dump(meta, f, indent=2)
+
+        # Create .INFO file with position key
+        info_path = get_info_path(crop_path)
+        safe_update(info_path, {"position": position})
 
         crop_count += 1
 
@@ -460,6 +493,8 @@ def main():
                         help="Ensure each crop contains a number of downbeats divisible by 4")
     parser.add_argument("--sequential", action="store_true",
                         help="Sequential mode: fixed sample length, no beat alignment")
+    parser.add_argument("--output-dir", "-o", type=str, default=None,
+                        help="Output directory for crops (creates per-track folders)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
@@ -492,11 +527,17 @@ def main():
     else:
         logger.info(f"Mode: Beat-aligned (overlap={args.overlap}, div4={args.div4})")
 
+    # Resolve output directory
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory: {output_dir}")
+
     total_crops = 0
     for folder in folders:
         try:
             count = create_crops_for_file(
-                folder, args.length, args.overlap, args.div4, args.sequential
+                folder, args.length, args.overlap, args.div4, args.sequential, output_dir
             )
             logger.info(f"{folder.name}: Generated {count} crops.")
             total_crops += count
