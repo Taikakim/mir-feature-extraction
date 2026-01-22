@@ -4,6 +4,10 @@
 
 !==! Things are going fast, the bits and pieces that connect everything are probably not all up to date all the time, but I try to check that the individual core analysis scripts keep working !==!
 
+!=! There's lots of auxilirary notes etc that will come and go, but the readme and manual should have everything that matters. The scripts also have their own help systems !==!
+
+Main thing missing still is what to do with all of this raw data: pre-encode latents and create training prompts and new conditionings.
+
 **Comprehensive music feature extraction pipeline for conditioning Stable Audio Tools and similar audio generation models.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
