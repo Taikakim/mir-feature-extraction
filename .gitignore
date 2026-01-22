@@ -52,8 +52,35 @@ test_data/
 .idea/
 *.swp
 *.swo
+*.kate-swp
 *~
 .DS_Store
+
+# Reference/third-party notebooks
+essentia/
+
+# Model files (download separately)
+models/
+
+# Backup and old files
+backup/
+old_benchmarks/
+*.backup-*
+
+# Session notes (personal)
+SESSION_*.md
+THREADING_*.md
+BATCH_PROCESSING.md
+QUANTIZATION_*.md
+FINAL_BENCHMARK_*.md
+PYTORCH_AMD_SETUP.md
+GITHUB_AUTH_FIX.md
+
+# Generated/cached data
+tunableop_results*.csv
+.cache/
+*.txt
+!requirements.txt
 
 # Logs and temporary files
 *.log
