@@ -70,6 +70,14 @@ FEATURE_MODULES = {
         'description': 'Demucs stem separation (OPTIMIZED - model caching)'
     },
 
+    # Metadata (New)
+    'metadata': {
+        'module': 'tools.track_metadata_lookup', 
+        'function': 'batch_process_metadata',
+        'features': ['release_year', 'spotify_id', 'artists', 'genres'],
+        'description': 'Metadata lookup (Spotify/MusicBrainz)'
+    },
+
     # Loudness Analysis
     'loudness': {
         'module': 'preprocessing.loudness',

@@ -218,10 +218,15 @@ def analyze_reverb(audio_path: str | Path) -> float:
     logger.info(f"Analyzing reverberation: {Path(audio_path).name}")
 
     try:
-        reverb = timbral_models.timbral_reverb(audio_path)
-        reverb = clamp_feature_value('reverberation', float(reverb))
+        # timbral_reverb returns binary 0/1 by default.
+        # Use dev_output=True to get (RT60, probability)
+        # We use probability * 100 as the score.
+        rt60, probability = timbral_models.timbral_reverb(audio_path, dev_output=True)
+        
+        reverb = float(probability) * 100.0
+        reverb = clamp_feature_value('reverberation', reverb)
 
-        logger.debug(f"Reverberation: {reverb:.1f}")
+        logger.debug(f"Reverberation: {reverb:.1f} (RT60: {rt60:.2f}s)")
         return reverb
 
     except Exception as e:
@@ -454,7 +459,19 @@ if __name__ == "__main__":
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Extract Audio Commons timbral features"
+        description="Extract Audio Commons timbral features",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Standard usage (put filename first to avoid confusion):
+  python src/timbral/audio_commons.py /path/to/file.flac --features brightness roughness
+
+  # Or use '--' to separate flags from positional arguments:
+  python src/timbral/audio_commons.py --features reverberation -- /path/to/file.flac
+
+  # Batch processing:
+  python src/timbral/audio_commons.py /path/to/dataset --batch
+        """
     )
 
     parser.add_argument(

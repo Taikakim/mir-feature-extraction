@@ -43,8 +43,93 @@ from core.file_utils import find_organized_folders, get_stem_files
 from core.common import setup_logging
 from rhythm.beat_grid import load_beat_grid
 from core.json_handler import get_info_path, read_info, safe_update
+from core.file_locks import FileLock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
+
+# Features to check for in source .INFO and transfer to crop .INFO
+TRANSFERRABLE_FEATURES = [
+    # Core Metadata (from track_metadata_lookup.py)
+    'release_year',
+    'release_date',
+    'artists',
+    'label',
+    'genres',
+    'popularity',
+    'spotify_id',
+    'musicbrainz_id',
+    
+    # Music Flamingo descriptions
+    'music_flamingo_full',
+    'music_flamingo_genre_mood',
+    'music_flamingo_instrumentation',
+    'music_flamingo_technical',
+    'music_flamingo_structure',
+    
+    # Optional Spotify audio features
+    'spotify_acousticness',
+    'spotify_energy',
+    'spotify_instrumentalness',
+    'spotify_time_signature',
+    'spotify_valence',
+    'spotify_danceability',
+    'spotify_speechiness',
+    'spotify_liveness',
+    'spotify_key',
+    'spotify_mode',
+    'spotify_tempo',
+]
+
+# Features that are good to have but don't warn if missing
+OPTIONAL_TRANSFERRABLE = [
+    'bpm',
+    'beat_count',
+]
+
+
+def slice_rhythm_file(source_path: Path, dest_path: Path, 
+                      start_time: float, end_time: float):
+    """
+    Read timestamps from source_path, filter those within [start_time, end_time],
+    shift them by -start_time, and write to dest_path.
+    """
+    if not source_path.exists():
+        return
+        
+    try:
+        # Read timestamps (handle both single-column and multi-column if needed)
+        with open(source_path, 'r') as f:
+            lines = f.readlines()
+            
+        valid_lines = []
+        for line in lines:
+            if not line.strip(): continue
+            try:
+                # Assume first token is timestamp
+                parts = line.strip().split()
+                if not parts: continue
+                t = float(parts[0])
+                
+                if start_time <= t <= end_time:
+                    # Shift timestamp
+                    new_t = t - start_time
+                    # Reconstruct line with new timestamp
+                    if len(parts) > 1:
+                        new_line = f"{new_t:.6f} {' '.join(parts[1:])}"
+                    else:
+                        new_line = f"{new_t:.6f}"
+                    valid_lines.append(new_line)
+            except ValueError:
+                continue
+                
+        # Write only if we have data (or write empty file? Empty is fine)
+        with open(dest_path, 'w') as f:
+            f.write('\n'.join(valid_lines))
+            if valid_lines: f.write('\n')
+            
+    except Exception as e:
+        logger.warning(f"Failed to slice rhythm file {source_path.name}: {e}")
 
 
 def get_start_offset_above_threshold(audio: np.ndarray,
@@ -206,7 +291,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         crop_audio = apply_fades(crop_audio, fade_len)
 
         # Save
-        crop_name = f"{full_mix_path.stem}_{crop_count}.flac"
+        # Use parent folder name (Track Name) for consistent naming
+        track_name = full_mix_path.parent.name
+        crop_name = f"{track_name}_{crop_count}.flac"
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
@@ -343,6 +430,7 @@ def create_crops_for_file(folder_path: Path,
 
     crop_count = 0
     align_grid = downbeat_times if (downbeat_times is not None and len(downbeat_times) > 0) else beat_times
+    global_bpm = float(bpm) if bpm else 0.0
 
     # Initial start: snap to closest downbeat after silence
     aligned_start = find_closest_downbeat(align_grid, start_offset_sec)
@@ -433,7 +521,9 @@ def create_crops_for_file(folder_path: Path,
         crop_audio = apply_fades(crop_audio, fade_len)
 
         # Save
-        crop_name = f"{full_mix_path.stem}_{crop_count}.flac"
+        # Use parent folder name (Track Name) for consistent naming
+        track_name = full_mix_path.parent.name
+        crop_name = f"{track_name}_{crop_count}.flac"
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
@@ -441,7 +531,32 @@ def create_crops_for_file(folder_path: Path,
         actual_start_sec = float(actual_start_sample / sr)
         actual_end_sec = float(actual_end_sample / sr)
 
+        # Slice Rhythm Files
+        rhythm_suffixes = ['.BEATS_GRID', '.ONSETS', '.DOWNBEATS']
+        folder = full_mix_path.parent
+        
+        for suffix in rhythm_suffixes:
+            # Try to find source file
+            candidates = list(folder.glob(f"*{suffix}"))
+            if candidates:
+                source_file = candidates[0]
+                dest_file = crop_path.with_suffix(suffix)
+                slice_rhythm_file(source_file, dest_file, actual_start_sec, actual_end_sec)
+
         num_downbeats = count_downbeats_in_range(align_grid, current_start_sec, final_end_sec)
+        
+        # Calculate local rhythmic features
+        # Filter beats within this crop
+        crop_beats = [b for b in beat_times if actual_start_sec <= b <= actual_end_sec]
+        beat_count = len(crop_beats)
+        
+        # Estimate local BPM
+        local_bpm = global_bpm
+        if len(crop_beats) > 1:
+            ibis = np.diff(crop_beats)
+            mean_ibi = np.mean(ibis)
+            if mean_ibi > 0:
+                local_bpm = 60.0 / mean_ibi
 
         position = float(actual_start_sec / duration_sec)
 
@@ -461,9 +576,47 @@ def create_crops_for_file(folder_path: Path,
         with open(crop_path.with_suffix('.json'), 'w') as f:
             json.dump(meta, f, indent=2)
 
-        # Create .INFO file with position key
-        info_path = get_info_path(crop_path)
-        safe_update(info_path, {"position": position})
+        # Create .INFO file with position key and transferred features
+        # Use crop_path.with_suffix('.INFO') for per-crop INFO file
+        info_path = crop_path.with_suffix('.INFO')
+        info_data = {
+            "position": position,
+            "bpm": round(local_bpm, 1),
+            "beat_count": beat_count,
+            "downbeats": num_downbeats
+        }
+        
+        # Load source .INFO if available
+        source_info_path = get_info_path(full_mix_path)
+        if source_info_path.exists():
+            try:
+                # Read source .INFO
+                with open(source_info_path, 'r') as f:
+                    source_info = json.load(f)
+                
+                # Transfer features
+                transferred_count = 0
+                for feature in TRANSFERRABLE_FEATURES:
+                    if feature in source_info:
+                        info_data[feature] = source_info[feature]
+                        transferred_count += 1
+                    else:
+                        # Warn about missing transferrable features (except optional ones)
+                        if feature not in OPTIONAL_TRANSFERRABLE:
+                            # Don't spam warnings for every crop, just log debug
+                            # logger.debug(f"Missing transferrable feature '{feature}' in source")
+                            pass
+                
+                # Also check optional features
+                for feature in OPTIONAL_TRANSFERRABLE:
+                    if feature in source_info:
+                        info_data[feature] = source_info[feature]
+                        transferred_count += 1
+                        
+            except Exception as e:
+                logger.warning(f"Failed to read source info: {e}")
+        
+        safe_update(info_path, info_data)
 
         crop_count += 1
 
@@ -495,6 +648,8 @@ def main():
                         help="Sequential mode: fixed sample length, no beat alignment")
     parser.add_argument("--output-dir", "-o", type=str, default=None,
                         help="Output directory for crops (creates per-track folders)")
+    parser.add_argument("--threads", "-j", type=int, default=1,
+                        help="Number of parallel threads (default: 1)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
@@ -533,20 +688,51 @@ def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Output directory: {output_dir}")
 
-    total_crops = 0
-    for folder in folders:
-        try:
-            count = create_crops_for_file(
+    def process_folder_with_lock(folder):
+        """Process a single folder with file locking."""
+        with FileLock(folder) as lock:
+            if not lock.acquired:
+                logger.warning(f"Skipping {folder.name} - locked by another process")
+                return 0
+            return create_crops_for_file(
                 folder, args.length, args.overlap, args.div4, args.sequential, output_dir
             )
-            logger.info(f"{folder.name}: Generated {count} crops.")
-            total_crops += count
-        except Exception as e:
-            logger.error(f"Failed to process {folder.name}: {e}")
-            import traceback
-            traceback.print_exc()
 
-    logger.info(f"Finished. Total crops generated: {total_crops}")
+    total_crops = 0
+    failed = 0
+    
+    if args.threads > 1:
+        logger.info(f"Using {args.threads} parallel threads")
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            futures = {
+                executor.submit(process_folder_with_lock, folder): folder 
+                for folder in folders
+            }
+            for future in as_completed(futures):
+                folder = futures[future]
+                try:
+                    count = future.result()
+                    if count > 0:
+                        logger.info(f"{folder.name}: Generated {count} crops.")
+                    total_crops += count
+                except Exception as e:
+                    logger.error(f"Failed to process {folder.name}: {e}")
+                    failed += 1
+    else:
+        # Sequential processing
+        for folder in folders:
+            try:
+                count = process_folder_with_lock(folder)
+                if count > 0:
+                    logger.info(f"{folder.name}: Generated {count} crops.")
+                total_crops += count
+            except Exception as e:
+                logger.error(f"Failed to process {folder.name}: {e}")
+                import traceback
+                traceback.print_exc()
+                failed += 1
+
+    logger.info(f"Finished. Total crops generated: {total_crops}, Failed: {failed}")
 
 
 if __name__ == "__main__":

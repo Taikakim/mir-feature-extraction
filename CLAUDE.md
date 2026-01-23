@@ -8,8 +8,6 @@ MIR Feature Extraction Framework for conditioning Stable Audio Tools and similar
 
 **Hardware Target**: AMD RDNA4 (RX 9070 XT) with ROCm 7.1.1.1+ / PyTorch 2.11.0a0+rocm7.11
 
-**Key Achievement**: Production-ready with GPU acceleration, achieving 4-9x realtime for standard features, 1-2x realtime for comprehensive AI descriptions, plus MIDI drum transcription via ADTOF-PyTorch.
-
 ---
 
 ## Critical Build & Environment Commands
@@ -50,9 +48,10 @@ export PYTORCH_TUNABLEOP_TUNING=0  # Use existing optimized kernels
 export PYTORCH_TUNABLEOP_FILENAME=/home/kim/Projects/mir/tunableop_results00.csv
 export MIOPEN_FIND_MODE=2  # Fast MIOpen kernel selection (avoid long delays)
 export OMP_NUM_THREADS=8
-```
 
-**Note**: `expandable_segments:True` is NOT supported on ROCm/HIP. Use `garbage_collection_threshold:0.8` instead.
+# Spotify API (Required for Metadata Lookup)
+export SPOTIFY_CLIENT_ID="your_client_id"
+export SPOTIFY_CLIENT_SECRET="your_client_secret"
 
 ### Testing Commands
 
@@ -61,7 +60,7 @@ export OMP_NUM_THREADS=8
 python src/test_all_features.py "/path/to/audio.flac"
 python src/test_all_features.py "/path/to/Track Name/"  # organized folder
 
-# Test with specific GGUF model quantization
+# Test with specific GGUF model quantization (for Music Flamingo)
 python src/test_all_features.py "/path/to/audio.flac" --model Q8_0   # Best quality
 python src/test_all_features.py "/path/to/audio.flac" --model Q6_K   # Balanced (default)
 python src/test_all_features.py "/path/to/audio.flac" --model IQ3_M  # Fastest
@@ -103,6 +102,13 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 ```
 
 ---
+## When Implementing New Features
+
+1. Add feature to `FEATURE_RANGES` in `src/core/common.py`
+2. Use `safe_update()` to save results (never overwrite)
+3. Update relevant module's `claude.md` if it exists
+4. Test with `test_single_file.py` before batch processing
+5. Document in `project.log` and session notes
 
 ## Architecture Overview
 
@@ -117,16 +123,17 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 ├── vocals.flac
 ├── Track Name.INFO            # All extracted features (JSON)
 ├── Track Name.BEATS_GRID      # Beat timestamps (text, newline-separated)
+├── Track Name.DOWNBEATS       # Downbeat timestamps (text, newline-separated)
 └── separated/                 # Demucs working directory
     └── htdemucs/...
 ```
 
 **Key Rules**:
-- Original files stay in `/test_data` or their source location
-- Organized files go to `/output` (created by file_organizer.py)
+- Original files stay in their source location
+- Organized files go to an outpute folder set in the calling script
 - Full mix must be named `full_mix.{ext}` in its own folder
 - Stems are saved as `drums.flac`, `bass.flac`, etc. (same folder)
-- `.INFO` files accumulate features - NEVER overwrite, only merge
+- `.INFO` files accumulate features - NEVER overwrite unless specific parameter set by call, only merge
 
 ### Module Architecture
 
@@ -140,16 +147,34 @@ src/
 │   ├── batch_utils.py            # print_batch_summary()
 │   └── common.py                 # setup_logging(), constants
 │
+src/
+├── core/                          # Foundation utilities (ALWAYS use these)
+│   ├── json_handler.py           # safe_update() - atomic JSON merging
+│   ├── file_utils.py             # find_organized_folders(), get_stem_files()
+│   ├── text_utils.py             # normalize_music_flamingo_text() for T5 compatibility
+│   ├── file_locks.py             # FileLock for concurrent processing
+│   ├── batch_utils.py            # print_batch_summary()
+│   └── common.py                 # setup_logging(), constants
+│
 ├── preprocessing/
-│   ├── file_organizer.py         # Converts flat files to folder structure
+│   ├── file_organizer.py         # Main file organizer (convert flat -> folders)
+│   ├── organize_files.py         # Alternative file organizer implementation
+│   ├── filename_cleanup.py       # Normalizes filenames for T5 compatibility
 │   ├── demucs_sep.py             # Stem separation (GPU accelerated)
+│   ├── demucs_sep_optimized.py   # Batch-optimized separation (loads model once)
 │   └── loudness.py               # LUFS/LRA measurement (ITU-R BS.1770)
+│
+├── tools/                        # Interactive & Batch Tools (High-level)
+│   ├── track_metadata_lookup.py  # Fixes artist names, fetches Spotify metadata
+│   ├── create_training_crops.py  # Creates beat-aligned crops for training
+│   └── statistical_analysis.py   # Analyzes dataset statistics and outliers
 │
 ├── rhythm/
 │   ├── beat_grid.py              # Beat detection + grid file generation
 │   ├── bpm.py                    # BPM analysis (librosa tempo)
 │   ├── onsets.py                 # Onset detection
 │   ├── syncopation.py            # Syncopation analysis
+│   ├── complexity.py             # Rhythmic complexity and evenness (IOI entropy)
 │   └── per_stem_rhythm.py        # Per-stem rhythm features
 │
 ├── spectral/
@@ -157,16 +182,19 @@ src/
 │   └── multiband_rms.py          # 4-band RMS energy (bass, body, mid, air)
 │
 ├── harmonic/
-│   ├── chroma.py                 # 12-dimensional chroma features
+│   ├── chroma.py                 # 12-dimensional chroma features/HPCP
 │   └── per_stem_harmonic.py      # Harmonic movement/variance per stem
 │
 ├── timbral/
 │   ├── audio_commons.py          # 8 perceptual features (brightness, hardness, etc.)
-│   └── audiobox_aesthetics.py    # 4 aesthetics features (Meta AudioBox model)
+│   ├── audiobox_aesthetics.py    # 4 aesthetics features (Meta AudioBox model)
+│   └── loudness.py               # Module-based loudness analysis
 │
 ├── classification/
 │   ├── essentia_features.py      # Danceability, atonality (Essentia/TensorFlow)
-│   ├── music_flamingo.py         # ✅ RECOMMENDED: GGUF/llama.cpp (7x faster, 40-60% less VRAM)
+│   ├── essentia_features_optimized.py # Optimized Essentia (caching for batch)
+│   ├── music_flamingo.py         # ✅ RECOMMENDED: GGUF/llama.cpp entry point
+│   ├── music_flamingo_llama_cpp.py # Direct GGUF/llama-cpp-python implementation
 │   └── music_flamingo_transformers.py  # Native Python via HuggingFace transformers
 │
 ├── transcription/                    # MIDI transcription pipeline
@@ -176,7 +204,33 @@ src/
 │   ├── midi_utils.py             # MIDI file utilities
 │   └── runner.py                 # Batch transcription orchestrator
 │
+├── benchmarks/                   # Performance testing scripts
+│   ├── benchmark_fp8_full.py     # FP8 + TunableOps benchmark
+│   ├── benchmark_music_flamingo.py # Speed test for Music Flamingo
+│   └── benchmark_quantization.py # INT8/INT4 vs BFloat16 comparison
+│
+├── tests/                        # Individual feature testing
+│   ├── test_single_file.py       # Quick test on one file
+│   ├── test_features_timing.py   # Detailed timing breakdown per feature
+│   └── test_threading.py         # CPU usage/threading analysis
+│
+├── scripts/
+│   ├── apply_patches.py          # Apply librosa 0.11 fixes to external repos
+│   ├── download_essentia_models.py # Fetch required TensorFlow models
+│   └── setup_external_repos.sh   # Clone and setup all dependencies
+│
+├── batch_process.py              # All-in-one batch processing entry point
+├── pipeline.py                   # Orchestrator for all features
 └── test_all_features.py          # Comprehensive test script for all 70+ features
+
+### External Repositories (in `repos/`)
+Note: `repos/repos/` contains cloned external projects (untouched or patched):
+- **timbral_models**: Audio Commons features (patched)
+- **ADTOF-pytorch**: GPU-accelerated drum transcription
+- **llama.cpp**: Efficient inference backend
+- **drumsep**, **madmom**: Rhythm and separation tools
+- **basic-pitch**, **crepe**, **pesto**: Pitch tracking (experimental)
+- **mt3**, **MR-MT3**, **magenta**: Polyphonic transcription (experimental)
 ```
 
 ### Music Flamingo Integration (CRITICAL)
@@ -236,35 +290,6 @@ description = analyzer.analyze('audio.flac', prompt_type='full')
 
 **Quantization** (transformers only): INT8/INT4 NOT FUNCTIONAL on ROCm - use bfloat16 + Flash Attention 2
 
-### AudioBox Aesthetics Integration
-
-**Location**: `src/timbral/audiobox_aesthetics.py`
-
-Meta's AudioBox Aesthetics model provides subjective quality assessment on a 1-10 scale:
-
-| Metric | Key | Description |
-|--------|-----|-------------|
-| Content Enjoyment (CE) | `content_enjoyment` | Emotional impact, artistic expression |
-| Content Usefulness (CU) | `content_usefulness` | Usability as source material |
-| Production Complexity (PC) | `production_complexity` | Scene density, concurrent audio components |
-| Production Quality (PQ) | `production_quality` | Technical fidelity, clarity, dynamics |
-
-**Installation**:
-```bash
-pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
-```
-
-**Usage**:
-```python
-from timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
-
-results = analyze_audiobox_aesthetics('audio.flac')
-# {'content_enjoyment': 6.67, 'content_usefulness': 7.60,
-#  'production_complexity': 5.93, 'production_quality': 7.90}
-```
-
-**Performance**: ~100s for 7.5min track (4.5x realtime), uses GPU via WavLM encoder
-
 ### TunableOps Optimization
 
 **File**: `/home/kim/Projects/mir/tunableop_results00.csv`
@@ -289,9 +314,9 @@ info_path = get_info_path(full_mix_path)
 safe_update(info_path, {'new_feature': value})  # Atomic merge
 ```
 
-### Text Normalization (Music Flamingo)
+### Text Normalization (Music Flamingo etc)
 
-All Music Flamingo output MUST be normalized before saving to ensure T5 tokenizer compatibility:
+All text output, especially from Music Flamingo MUST be normalized before saving to ensure T5 tokenizer compatibility:
 
 ```python
 from core.text_utils import normalize_music_flamingo_text
@@ -302,7 +327,7 @@ description = analyzer.analyze(audio_path)
 normalized = normalize_music_flamingo_text(raw_text)
 ```
 
-**Characters that break T5**:
+**Examples of characters that break T5**:
 - U+2011 (non-breaking hyphen `‑`)
 - U+2014 (em-dash `—`)
 - U+2013 (en-dash `–`)
@@ -336,8 +361,8 @@ for folder in folders:
 
 1. Set `PYTORCH_ALLOC_CONF=expandable_segments:True` (prevents fragmentation)
 2. Clear cache after heavy operations (Music Flamingo already does this)
-3. Use Flash Attention 2 for Music Flamingo (`use_flash_attention=True`)
-4. Consider quantization for memory-constrained scenarios
+3. Use Flash Attention 2 for Music Flamingo and other supported projects (`use_flash_attention=True`)
+4. Consider GGUF quantization for memory-constrained scenarios
 
 ---
 
@@ -388,82 +413,6 @@ RDNA4 hardware supports FP8, but transformers library doesn't support FP8 `torch
 
 **Solution**: Use bfloat16 + Flash Attention 2 (~13GB VRAM, 1.06x realtime).
 
-### GGUF/llama.cpp NOW SUPPORTED for Music Flamingo ✅
-
-**Updated 2026-01-18**: Music Flamingo **WORKS** via GGUF/llama.cpp using `llama-mtmd-cli`.
-
-Audio multimodal support was added to llama.cpp in late 2025 (PR #18470 merged Dec 31, 2025).
-
-**Available GGUF files** in `models/music_flamingo/`:
-- `music-flamingo-hf.i1-IQ3_M.gguf` (3.4GB) - Fast, good quality
-- `music-flamingo-hf.Q8_0.gguf` (7.6GB) - Best quality
-- `music-flamingo-hf.mmproj-f16.gguf` (1.3GB) - Required audio projector
-
-**Performance Comparison**:
-| Method | VRAM | Time (2.5min track) |
-|--------|------|---------------------|
-| GGUF IQ3_M | ~5.4GB | **3.7s** |
-| GGUF Q8_0 | ~9.3GB | **4.0s** |
-| Transformers | ~13GB | ~28s |
-
-**GGUF is ~7x faster with ~40-60% less VRAM!**
-
-**Usage**:
-```bash
-# Build llama.cpp with HIP (one-time)
-cd repos && git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp && mkdir build && cd build
-cmake .. -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build . --target llama-mtmd-cli -j$(nproc)
-
-# Run inference
-repos/llama.cpp/build/bin/llama-mtmd-cli \
-  -m models/music_flamingo/music-flamingo-hf.i1-IQ3_M.gguf \
-  --mmproj models/music_flamingo/music-flamingo-hf.mmproj-f16.gguf \
-  --audio "path/to/audio.flac" \
-  -p "Describe this music track." \
-  -n 200 --gpu-layers 99
-```
-
-**Note**: `llama-cpp-python` doesn't have audio bindings yet - use CLI tools.
-
-See `GGUF_INVESTIGATION.md` for full documentation.
-
----
-
-## Performance Expectations
-
-### Standard Features (Per 2.5min Track)
-
-| Feature | Time | Speed | Notes |
-|---------|------|-------|-------|
-| Demucs separation | 15.4s | 9.8x | GPU required |
-| Beat Grid | 16.3s | 9.3x | CPU (librosa) |
-| BPM Analysis | <0.1s | instant | Cached |
-| Essentia features | 2.7s | 55x | GPU TensorFlow |
-| AudioBox Aesthetics | ~35s | 4.5x | GPU (WavLM) |
-| **Total** | **~70s** | **2.2x** | |
-
-### Music Flamingo (Per 2.5min Track)
-
-| Configuration | Time | Speed | Memory | Notes |
-|--------------|------|-------|--------|-------|
-| **GGUF IQ3_M** | **3.7s** | **40x** | **5.4GB** | ✅ **Recommended** |
-| **GGUF Q8_0** | **4.0s** | **38x** | **9.3GB** | ✅ Best quality |
-| Transformers (1 prompt) | ~28s | 5x | 13GB | Native Python |
-| Transformers (5 prompts) | 143s | 1.06x | 13GB | All descriptions |
-| ~~INT8/INT4~~ | ~~N/A~~ | ~~N/A~~ | ~~N/A~~ | ❌ Not functional on ROCm |
-
-### Scaling to 10,000 Files
-
-| Configuration | Total Time | Parallel (4x) |
-|--------------|-----------|---------------|
-| Minimal (no Demucs/Flamingo) | 53 hours | 13 hours |
-| Fast (2 Flamingo prompts) | 119 hours | 30 hours |
-| Comprehensive (5 prompts) | 492 hours | 123 hours |
-
----
-
 ## Recent Session Achievements (2026-01-19)
 
 **DO NOT rely on older documentation** - these are the latest fixes:
@@ -497,28 +446,18 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 ## References to Check (By Date - Newest First)
 
-- `QUANTIZATION_TEST_RESULTS.md` - INT8/INT4 test results (NOT functional on ROCm) ⚠️
-- `SESSION_COMPLETE_2026-01-18.md` - Latest session results (MOST CURRENT)
-- `TEXT_NORMALIZATION.md` - T5 tokenizer compatibility guide
-- `QUICKREF_PRODUCTION_CONFIG.md` - Copy-paste production setup
-- `FINAL_BENCHMARK_RESULTS_2026-01-18.md` - Complete performance analysis
-- `README.md` - Project overview (updated 2026-01-13)
-- `plans/01-developement.txt` - Core development principles
-- `plans/02-stem_separation.txt` - Folder structure specification
-- `src/classification/music_flamingo.py` - ✅ GGUF wrapper (RECOMMENDED - 7x faster)
-- `GGUF_INVESTIGATION.md` - Full GGUF setup and usage documentation
+- `SESSION_SUMMARY.md` - **LATEST** Project Status & Achievements
+- `USER_MANUAL.md` - Comprehensive usage & troubleshooting
+- `README.md` - Project overview & feature table
+- `QUICKREF_PRODUCTION_CONFIG.md` - Production env vars & setup
+- `GGUF_INVESTIGATION.md` - Music Flamingo GGUF details
+- `TEXT_NORMALIZATION.md` - Stable Audio Tools compatibility guide
+- `FEATURES_STATUS.md` - detailed feature implementation tracker
 
-**Ignore older files** with issues that have been fixed in recent sessions.
-
----
-
-## When Implementing New Features
-
-1. Add feature to `FEATURE_RANGES` in `src/core/common.py`
-2. Use `safe_update()` to save results (never overwrite)
-3. Update relevant module's `claude.md` if it exists
-4. Test with `test_single_file.py` before batch processing
-5. Document in `project.log` and session notes
+**Historical/Specific References:**
+- `QUANTIZATION_TEST_RESULTS.md` - ROCm quantization constraints
+- `FINAL_BENCHMARK_RESULTS_2026-01-18.md` - Performance baselines
+- `plans/` directory - Original architectural plans
 
 ---
 
@@ -534,4 +473,4 @@ See `GGUF_INVESTIGATION.md` for full documentation.
 
 **Last Updated**: 2026-01-23 (Session: Statistics, BPM improvements, metadata tools)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
-**Status**: Production Ready - 79 features + MIDI transcription + AI descriptions + metadata tools
+

@@ -1,4 +1,31 @@
 """
+### Music Flamingo Integration (CRITICAL)
+
+**Two Methods Available**:
+
+**GGUF (Recommended)** `src/classification/music_flamingo_gguf.py` ~4s/track 5-9GB VRAM Production, batch processing |
+Transformers `src/classification/music_flamingo_transformers.py` ~28s/prompt 13GB VRAM Native Python, fine-tuning |
+
+**Architecture**: NVIDIA Music Flamingo (8B params: Qwen2.5-7B language + Audio Flamingo 3 encoder)
+
+#### GGUF Method (Recommended) ✅
+
+Uses llama.cpp `llama-mtmd-cli` tool. **7x faster than transformers with 40-60% less VRAM.**
+
+**Note**: RDNA 4 (gfx1201) has a POOL_1D operator warning - this is cosmetic, model works correctly.
+
+#### Transformers Method
+
+Native Python via HuggingFace. Slower but more flexible.
+
+**Memory Management** (transformers only): Uses `clear_cache()` after each prompt to prevent OOM.
+
+#### Common Details (Both Methods)
+
+**Text Normalization (MANDATORY)**: All output is automatically normalized for T5 tokenizer compatibility via `normalize_music_flamingo_text()`.
+
+**Quantization** (transformers only): INT8/INT4 NOT FUNCTIONAL on ROCm - use bfloat16 + Flash Attention 2
+
 Music Flamingo Integration using Transformers (Official Approach)
 
 This module uses the official NVIDIA Music Flamingo implementation via transformers.

@@ -201,24 +201,23 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 # Sequential mode: exact sample length, no beat alignment
 python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --sequential
 
-# Beat-aligned with 50% overlap
-python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap
-
-# Beat-aligned with div4 downbeats (measures divisible by 4)
+# Beat-aligned with 50% overlap (Recommended for training)
 python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap --div4
 
-# Save to custom output directory (per-track folders)
-python src/tools/create_training_crops.py /path/to/audio/ -o /path/to/output --sequential
+# Parallel processing (Fastest) - Process 8 folders concurrently
+python src/tools/create_training_crops.py /path/to/audio/ --output-dir /path/to/crops --threads 8
+
+# Save to custom output directory
+python src/tools/create_training_crops.py /path/to/audio/ -o /path/to/output --div4
 ```
 
 **Crop Features:**
-- `--output-dir` / `-o`: Save crops to destination with per-track folders
-- Length in samples (default 2097152 = ~47.5s at 44.1kHz)
-- Beat-aligned start/end with zero-crossing snap for click-free cuts
-- Optional `--div4` ensures each crop contains downbeats divisible by 4
-- 10ms fade-in/fade-out on all crops
-- Creates `.INFO` file per crop with position metadata (0.0 to 1.0)
-- Output: `TrackName/TrackName_0.flac`, `TrackName/TrackName_1.flac`, etc.
+- **Smart Beat Alignment:** Snap to zero-crossings, align to beats, optional `--div4` for loop-friendly lengths
+- **Parallel Processing:** Multi-threaded folder processing with `--threads` / `-j`
+- **Rhythm Slicing:** Automatically slices `.BEATS_GRID`, `.ONSETS`, and `.DOWNBEATS` for each crop
+- **Enhanced Metadata:** Transfers all source metadata + calculates per-crop BPM and beat count
+- **Position Tracking:** Adds `position` (0.0-1.0) to crop `.INFO` files
+- **Output:** `TrackName/TrackName_N.flac` + matching `.INFO` and rhythm files
 
 ### 6. Access Results
 

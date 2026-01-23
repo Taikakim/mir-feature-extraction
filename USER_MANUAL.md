@@ -149,6 +149,34 @@ python src/classification/music_flamingo_transformers.py my_music/ --batch --fla
 
 **Result:** Each `.INFO` file gains 5 AI text description fields.
 
+### 5. Create Training Crops (Optional)
+
+Once folders are organized and populated with features, you can generate beat-aligned audio crops for training Stable Audio Tools:
+
+```bash
+# Process all folders in parallel (Recommended)
+python src/tools/create_training_crops.py my_music/ \
+    --output-dir my_crops/ \
+    --overlap --div4 \
+    --threads 8
+```
+
+**Resulting Structure:**
+```
+my_crops/
+└── Artist - Album - Track/
+    ├── Artist - Album - Track_0.flac        # Beat-aligned crop
+    ├── Artist - Album - Track_0.json        # Technical metadata (start/end/samples)
+    ├── Artist - Album - Track_0.INFO        # Per-crop features (BPM, beat_count)
+    ├── Artist - Album - Track_0.BEATS_GRID  # Sliced rhythm file
+    └── ...
+```
+
+**Features generated:**
+- Beat-aligned cuts (snapped to zero-crossings)
+- Per-crop metadata (inherited from source + local rhythm features)
+- Sliced rhythm files for exact alignment
+
 ### Alternative: Step-by-Step Extraction
 
 If you prefer manual control:
@@ -193,9 +221,9 @@ python src/classification/music_flamingo.py my_music/ --batch --model Q6_K
 **Before organization:**
 ```
 my_music/
-├── track1.mp3
-├── track2.flac
-└── track3.wav
+├── Artist1 - Album1 - Track1.mp3
+├── Artist2 - Album2 - Track2.flac
+└── Artist3 - Album3 - Track3.wav
 ```
 
 **After file_organizer.py:**
@@ -209,6 +237,8 @@ my_music/
     └── full_mix.wav
 ```
 
+**Note:** The folder name is derived directly from the filename (minus extension). To get "Artist - Track" folders, your input files must be named "Artist - Track.mp3".
+
 ### Output Structure
 
 **After complete processing:**
@@ -216,16 +246,14 @@ my_music/
 my_music/
 └── Artist - Album - Track/
     ├── full_mix.flac             # Original audio (organized)
-    ├── drums.flac                # Separated stems
+    ├── drums.flac                # Separated stems (moved to root)
     ├── bass.flac
     ├── other.flac
     ├── vocals.flac
     ├── Artist - Album - Track.INFO         # 78 features + 5 AI descriptions (JSON)
     ├── Artist - Album - Track.BEATS_GRID   # Beat timestamps
     ├── Artist - Album - Track.ONSETS       # Onset timestamps
-    └── separated/                 # Demucs working directory
-        └── htdemucs/
-            └── ...
+    └── separated/                 # Temporary Demucs working directory (often removed)
 ```
 
 ### .INFO File Format
@@ -378,8 +406,6 @@ GPU Performance:
 **Output:** 4 stems (drums.mp3, bass.mp3, other.mp3, vocals.mp3) @ 320kbps
 
 **Notes:**
-- MP3 output used due to TorchCodec/FFmpeg compatibility issues
-- 320kbps MP3 is sufficient quality for MIR analysis
 - For AMD GPUs with ROCm, use `--device cuda` (not `--device amd`)
 
 ---
@@ -567,6 +593,63 @@ Options:
 
 ---
 
+### Metadata Enhancement
+
+#### track_metadata_lookup.py
+**Purpose:** Correct artist names, normalize filenames, and fetch enhanced metadata
+
+```bash
+python src/tools/track_metadata_lookup.py <path> [options]
+
+Options:
+  --dry-run, -n        Preview changes without applying
+  --skip-rename        Only update .INFO files, don't rename folders
+  --audio-features     Fetch Spotify audio features (acousticness, energy, etc.)
+  --force-metadata     Re-fetch metadata even if artist/year exists
+  --verbose, -v        Verbose output
+```
+
+**Features Fetched:**
+- **Core:** `artists` (array), `label`, `genres`, `popularity`, `release_year`, `release_date`, `spotify_id`
+- **Optional (`--audio-features`):** `spotify_acousticness`, `spotify_energy`, `spotify_valence`, `spotify_tempo`, `spotify_key`, `spotify_mode`, `spotify_time_signature`, `spotify_danceability`
+
+**Setup:**
+Requires `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` environment variables.
+
+---
+
+### Training Data Preparation
+
+#### create_training_crops.py
+**Purpose:** Create datasets of beat-aligned audio crops with rich metadata
+
+```bash
+python src/tools/create_training_crops.py <path> [options]
+
+Options:
+  --length N           Crop length in samples (default: 2097152 for ~47s @ 44.1k)
+  --output-dir, -o DIR Destination for crops (creates per-track folders)
+  --sequential         Simple sequential cuts (no beat alignment)
+  --overlap            Overlapping crops (stride = length/2)
+  --div4               Ensure crop length beats is divisible by 4 (for loops)
+  --threads N, -j N    Number of parallel threads (default: 1)
+```
+
+**Smart Features:**
+- **Parallel Processing:** Uses `ThreadPoolExecutor` and `FileLock` for safe concurrent processing.
+- **Rhythm Slicing:** Automatically slices and retimes `.BEATS_GRID`, `.ONSETS`, and `.DOWNBEATS` files for each crop.
+- **Metadata Transfer:** Specific features are transferred from source to crop `.INFO` files.
+- **Per-Crop Rhythm:** Calculates accurate `bpm` and `beat_count` for the specific crop segment.
+
+**Metadata Transfer:**
+The following features are automatically transferred/calculated:
+- **Core:** `artists`, `label`, `genres`, `release_year`, `popularity`
+- **AI Docs:** `music_flamingo_full`, `music_flamingo_genre_mood`, etc.
+- **Audio Features:** `spotify_acousticness`, `spotify_energy`, etc.
+- **New:** `position` (0.0–1.0), `bpm` (local), `beat_count`, `downbeats`
+
+---
+
 ## MIDI Drum Transcription
 
 The framework includes drum transcription to MIDI via two methods:
@@ -678,6 +761,28 @@ All Music Flamingo output is automatically normalized for T5 tokenizer compatibi
 - Em-dashes (—) → hyphens (-)
 - Curly quotes ('') → straight quotes ('')
 - Non-breaking hyphens (‑) → regular hyphens (-)
+
+- Non-breaking hyphens (‑) → regular hyphens (-)
+
+### Audio Commons Timbral Features
+
+The `src/timbral/audio_commons.py` script extracts 8 perceptual features (brightness, roughness, etc.).
+
+**Correct Usage:**
+Because `--features` takes multiple arguments, you must either:
+1. Place the filename **before** the flags (Recommended)
+2. Use `--` to separate flags from the filename
+
+```bash
+# Option 1: Filename first (Best)
+python src/timbral/audio_commons.py /path/to/file.flac --features brightness roughness
+
+# Option 2: Using separator
+python src/timbral/audio_commons.py --features reverberation -- /path/to/file.flac
+
+# INCORRECT (argparse will think filename is a feature):
+# python src/timbral/audio_commons.py --features brightness /path/to/file.flac
+```
 
 ---
 
@@ -920,35 +1025,6 @@ done
 
 Create `scripts/verify_features.py`:
 
-```python
-#!/usr/bin/env python3
-import json
-from pathlib import Path
-from core.file_utils import get_organized_folders
-
-def verify_features(root_dir):
-    folders = get_organized_folders(root_dir)
-
-    for folder in folders:
-        info_file = get_info_path(folder)
-        if not info_file.exists():
-            print(f"❌ Missing .INFO: {folder.name}")
-            continue
-
-        with open(info_file) as f:
-            features = json.load(f)
-
-        feature_count = len(features)
-        if feature_count < 78:
-            print(f"⚠️  {folder.name}: {feature_count}/78+ features")
-        else:
-            print(f"✅ {folder.name}: {feature_count} features")
-
-if __name__ == "__main__":
-    import sys
-    verify_features(Path(sys.argv[1]))
-```
-
 ### Parallel Processing
 
 For large datasets, process in parallel:
@@ -1019,6 +1095,9 @@ danceability, atonality
 
 **Position (1):**
 position (0-1, only for cropped training data - not yet implemented)
+
+**Metadata (20 Mixed):**
+release_year, release_date, artists, label, genres, popularity, spotify_id, musicbrainz_id, spotify_acousticness, spotify_energy, spotify_instrumentalness, spotify_time_signature, spotify_valence, spotify_danceability, spotify_speechiness, spotify_liveness, spotify_key, spotify_mode, spotify_tempo
 
 **Music Flamingo AI Descriptions (5 Text):**
 music_flamingo_full, music_flamingo_technical, music_flamingo_genre_mood, music_flamingo_instrumentation, music_flamingo_structure

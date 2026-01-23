@@ -1,7 +1,7 @@
 """
-Audiobox Aesthetics Features for MIR Project
+This module extracts subjective quality assessment features using Meta's Audiobox Aesthetics model on a 1-10 scale:
 
-This module extracts subjective quality assessment features using Meta's Audiobox Aesthetics model.
+**Performance**: ~100s for 7.5min track (4.5x realtime), uses GPU via WavLM encoder
 
 Audiobox Aesthetics provides four key metrics on a 1-10 scale:
 - Content Enjoyment (CE): How enjoyable the audio content is
@@ -20,11 +20,10 @@ Dependencies:
 - src.core.common
 
 Output:
-- content_enjoyment: Enjoyment rating 1-10 (NumberConditioner)
-- content_usefulness: Usefulness rating 1-10 (NumberConditioner)
-- production_complexity: Complexity rating 1-10 (NumberConditioner)
-- production_quality: Quality rating 1-10 (NumberConditioner)
-
+- content_enjoyment: Enjoyment rating 1-10
+- content_usefulness: Usefulness rating 1-10
+- production_complexity: Complexity rating 1-10
+- production_quality: Quality rating 1-10
 Installation:
     pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
 """
