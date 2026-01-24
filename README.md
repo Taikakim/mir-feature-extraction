@@ -24,7 +24,7 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 ✅ **77+ Numeric Features** extracted per track
 ✅ **AI-Powered Descriptions** using Music Flamingo (8B params)
 ✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
-✅ **4-Stem Separation** using Demucs HT v4 (drums, bass, other, vocals)
+✅ **Per-Stem Analysis** - Features from Demucs separated stems (drums, bass, other, vocals)
 ✅ **GPU Accelerated** processing (AMD ROCm / NVIDIA CUDA)
 ✅ **MIDI Drum Transcription** using ADTOF-PyTorch or Drumsep
 ✅ **Batch Processing** with automatic organization
@@ -39,15 +39,16 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 
 | Category | Features | Description |
 |----------|----------|-------------|
-| **Rhythm** | 29 | BPM, beats, syncopation, onset density, complexity (full + per-stem) |
-| **Loudness** | 10 | LUFS/LRA for full mix + 4 stems (ITU-R BS.1770) |
-| **Spectral** | 4 | Flatness, flux, skewness, kurtosis |
-| **RMS Energy** | 4 | Bass, body, mid, air frequency bands (dB) |
-| **Chroma** | 12 | 12-dimensional pitch class weights |
-| **Harmonic** | 4 | Movement and variance for bass/other stems |
-| **Timbral** | 8 | Audio Commons perceptual features |
+| **Rhythm** | 29 | BPM, syncopation, onset density (Full Mix + **Per-Stem**) |
+| **Loudness** | 10 | LUFS/LRA (Full Mix + **Per-Stem**) |
+| **Spectral** | 4 | Flatness, flux, skewness, kurtosis (Full Mix) |
+| **RMS Energy** | 4 | Bass, body, mid, air frequency bands (Full Mix) |
+| **Chroma** | 12 | 12-dimensional pitch class weights (Full Mix) |
+| **Harmonic** | 4 | Movement and variance (**Bass & Other Stems**) |
+| **Timbral** | 8 | Audio Commons perceptual features (Full Mix) |
 | **Aesthetics** | 4 | Content enjoyment/usefulness, production complexity/quality |
 | **Classification** | 2 | Danceability, atonality |
+| **Metadata** | 20 | Release year, Spotify IDs, Spotify audio features (energy, valence, etc.) |
 
 ### AI Classification Features
 
@@ -97,6 +98,10 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 | **atonality** | probability | 0-1 | Absence of tonal center |
 | **audiobox_ce/cu/pc/pq** | score | 1-10 | Enjoyment/usefulness/complexity/quality |
 | **syncopation_index** | score | 0-1 | Rhythmic complexity relative to beat |
+| **release_year** | year | int | Original release year (MusicBrainz/Spotify) |
+| **spotify_danceability** | score | 0-1 | Dance suitability (Spotify API) |
+| **spotify_energy** | score | 0-1 | Perceptual measure of intensity/activity |
+| **spotify_valence** | score | 0-1 | Musical positiveness (high=happy, low=sad) |
 
 ---
 
