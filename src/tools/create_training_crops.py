@@ -87,8 +87,103 @@ OPTIONAL_TRANSFERRABLE = [
     'beat_count',
 ]
 
+# Demucs stem names to crop along with full_mix
+STEM_NAMES = ['drums', 'bass', 'other', 'vocals']
 
-def slice_rhythm_file(source_path: Path, dest_path: Path, 
+
+def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
+                   start_sample: int, end_sample: int, sr: int,
+                   fade_len: int) -> Optional[Path]:
+    """
+    Crop a stem file at the same sample positions as the full mix crop.
+
+    Args:
+        stem_path: Path to source stem (e.g., drums.flac)
+        crop_base_path: Base path for output (e.g., TrackName_0.flac)
+        stem_name: Name of stem (drums, bass, other, vocals)
+        start_sample: Start sample index
+        end_sample: End sample index
+        sr: Sample rate
+        fade_len: Fade length in samples
+
+    Returns:
+        Path to cropped stem, or None if failed
+    """
+    if not stem_path.exists():
+        return None
+
+    try:
+        # Load stem audio
+        stem_audio, stem_sr = sf.read(str(stem_path))
+
+        # Ensure same sample rate
+        if stem_sr != sr:
+            logger.warning(f"Sample rate mismatch for {stem_name}: {stem_sr} vs {sr}")
+            return None
+
+        # Ensure shape is (samples, channels)
+        if stem_audio.ndim == 1:
+            stem_audio = stem_audio[:, np.newaxis]
+        elif stem_audio.shape[0] < stem_audio.shape[1]:
+            stem_audio = stem_audio.T
+
+        # Check bounds
+        if end_sample > stem_audio.shape[0]:
+            logger.warning(f"Stem {stem_name} too short: {stem_audio.shape[0]} < {end_sample}")
+            return None
+
+        # Extract crop
+        stem_crop = stem_audio[start_sample:end_sample].copy()
+
+        # Apply fades
+        stem_crop = apply_fades(stem_crop, fade_len)
+
+        # Save with prefixed name: TrackName_0_drums.flac
+        crop_stem_name = f"{crop_base_path.stem}_{stem_name}{crop_base_path.suffix}"
+        crop_stem_path = crop_base_path.parent / crop_stem_name
+        sf.write(str(crop_stem_path), stem_crop, sr)
+
+        return crop_stem_path
+
+    except Exception as e:
+        logger.warning(f"Failed to crop stem {stem_name}: {e}")
+        return None
+
+
+def crop_all_stems(folder_path: Path, crop_base_path: Path,
+                   start_sample: int, end_sample: int, sr: int,
+                   fade_len: int) -> Dict[str, Path]:
+    """
+    Crop all available stems at the same positions as the full mix.
+
+    Returns:
+        Dict mapping stem names to cropped paths
+    """
+    cropped_stems = {}
+
+    for stem_name in STEM_NAMES:
+        # Find stem file (check multiple extensions)
+        stem_path = None
+        for ext in ['.flac', '.wav', '.mp3']:
+            potential = folder_path / f"{stem_name}{ext}"
+            if potential.exists():
+                stem_path = potential
+                break
+
+        if stem_path is None:
+            continue
+
+        cropped = crop_stem_file(
+            stem_path, crop_base_path, stem_name,
+            start_sample, end_sample, sr, fade_len
+        )
+        if cropped:
+            cropped_stems[stem_name] = cropped
+
+    return cropped_stems
+
+
+def slice_rhythm_file(source_path: Path, dest_path: Path,
                       start_time: float, end_time: float):
     """
     Read timestamps from source_path, filter those within [start_time, end_time],
@@ -297,6 +392,14 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
+        # Crop stems at the same positions
+        cropped_stems = crop_all_stems(
+            folder_path, crop_path,
+            current_sample, end_sample, sr, fade_len
+        )
+        if cropped_stems:
+            logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")
+
         # Metadata
         start_sec = current_sample / sr
         end_sec = end_sample / sr
@@ -310,7 +413,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
             "end_sample": end_sample,
             "duration": end_sec - start_sec,
             "samples": length_samples,
-            "source": str(full_mix_path.name)
+            "source": str(full_mix_path.name),
+            "has_stems": len(cropped_stems) > 0,
+            "stem_names": list(cropped_stems.keys())
         }
 
         # Save JSON metadata
@@ -527,6 +632,14 @@ def create_crops_for_file(folder_path: Path,
         crop_path = crops_dir / crop_name
         sf.write(str(crop_path), crop_audio, sr)
 
+        # Crop stems at the same positions
+        cropped_stems = crop_all_stems(
+            folder_path, crop_path,
+            actual_start_sample, actual_end_sample, sr, fade_len
+        )
+        if cropped_stems:
+            logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")
+
         # Metadata
         actual_start_sec = float(actual_start_sample / sr)
         actual_end_sec = float(actual_end_sample / sr)
@@ -569,7 +682,9 @@ def create_crops_for_file(folder_path: Path,
             "duration": float(actual_end_sec - actual_start_sec),
             "samples": int(actual_end_sample - actual_start_sample),
             "downbeats": int(num_downbeats),
-            "source": str(full_mix_path.name)
+            "source": str(full_mix_path.name),
+            "has_stems": len(cropped_stems) > 0,
+            "stem_names": list(cropped_stems.keys())
         }
 
         # Save JSON metadata

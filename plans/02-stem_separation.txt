@@ -15,7 +15,7 @@ Demucs
         ◦ /folder1/folder2/filename-something/full_mix.flac
         ◦ /folder1/folder2/filename-something/drums.flac
         ◦ /folder1/folder2/filename-something/bass.flac
-        ◦ /folder1/folder2/filename-something/othe.flac
+        ◦ /folder1/folder2/filename-something/other.flac
         ◦ /folder1/folder2/filename-something/vocals.flac
 DrumSep
 

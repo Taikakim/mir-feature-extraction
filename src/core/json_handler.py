@@ -241,6 +241,23 @@ def get_mir_path(audio_file: str | Path) -> Path:
     return audio_file.parent / f"{folder_name}.MIR"
 
 
+def get_crop_info_path(crop_file: str | Path) -> Path:
+    """
+    Get the corresponding .INFO file path for a crop file.
+
+    Unlike full tracks (which use folder name), crops use the crop filename
+    for the .INFO file name.
+
+    Args:
+        crop_file: Path to crop file (e.g., /path/to/TrackName/TrackName_0.flac)
+
+    Returns:
+        Path to the .INFO file (e.g., /path/to/TrackName/TrackName_0.INFO)
+    """
+    crop_file = Path(crop_file)
+    return crop_file.with_suffix('.INFO')
+
+
 # Example usage
 if __name__ == "__main__":
     # Test basic functionality

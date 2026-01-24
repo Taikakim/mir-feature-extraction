@@ -344,6 +344,169 @@ def get_midi_files(audio_folder: str | Path,
     return sorted(midi_files)
 
 
+# ============================================================================
+# Crop File Utilities
+# ============================================================================
+
+def parse_crop_number(filename: str) -> Optional[int]:
+    """
+    Parse the crop number from a crop filename.
+
+    Crop files follow pattern: TrackName_N.ext where N is a number.
+
+    Args:
+        filename: The filename to parse (e.g., "TrackName_0.flac")
+
+    Returns:
+        Crop number if found, None otherwise
+
+    Examples:
+        "TrackName_0.flac" -> 0
+        "My Song_15.flac" -> 15
+        "full_mix.flac" -> None
+    """
+    stem = Path(filename).stem
+    parts = stem.rsplit('_', 1)
+    if len(parts) == 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return None
+
+
+def find_crop_files(directory: str | Path,
+                    extensions: Optional[set] = None) -> List[Path]:
+    """
+    Find all crop audio files in a directory.
+
+    A crop file matches pattern: *_N.{ext} where N is a number.
+
+    Args:
+        directory: Directory to search
+        extensions: Set of file extensions (default: AUDIO_EXTENSIONS)
+
+    Returns:
+        List of crop audio file paths, sorted by name
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        logger.warning(f"Directory does not exist: {directory}")
+        return []
+
+    if extensions is None:
+        extensions = AUDIO_EXTENSIONS
+
+    crop_files = []
+
+    for ext in extensions:
+        for audio_file in directory.glob(f'*{ext}'):
+            # Check if it's a crop file (ends with _N)
+            if parse_crop_number(audio_file.name) is not None:
+                # Exclude stem files (TrackName_0_drums.flac)
+                stem = audio_file.stem
+                parts = stem.rsplit('_', 1)
+                if len(parts) == 2:
+                    # Check if second-to-last part is a number (crop file)
+                    # or a stem name (stem file)
+                    if parts[1] not in DEMUCS_STEMS:
+                        crop_files.append(audio_file)
+
+    logger.debug(f"Found {len(crop_files)} crop files in {directory}")
+    return sorted(crop_files)
+
+
+def get_crop_stem_files(crop_path: str | Path) -> Dict[str, Path]:
+    """
+    Get stem files for a crop.
+
+    For crop TrackName_0.flac, looks for:
+        TrackName_0_drums.flac
+        TrackName_0_bass.flac
+        TrackName_0_other.flac
+        TrackName_0_vocals.flac
+
+    Args:
+        crop_path: Path to the crop audio file
+
+    Returns:
+        Dict mapping stem name to path (includes 'source' for the crop itself)
+    """
+    crop_path = Path(crop_path)
+    if not crop_path.exists():
+        logger.warning(f"Crop file does not exist: {crop_path}")
+        return {}
+
+    stems = {'source': crop_path}
+    crop_stem = crop_path.stem  # e.g., "TrackName_0"
+    crop_dir = crop_path.parent
+
+    # Find stems with prefixed naming
+    for stem_name in DEMUCS_STEMS:
+        for ext in AUDIO_EXTENSIONS:
+            stem_path = crop_dir / f"{crop_stem}_{stem_name}{ext}"
+            if stem_path.exists():
+                stems[stem_name] = stem_path
+                break
+
+    logger.debug(f"Found {len(stems) - 1} stems for crop {crop_path.name}")
+    return stems
+
+
+def find_crop_folders(root_directory: str | Path) -> List[Path]:
+    """
+    Find all folders that contain crop files.
+
+    A crop folder contains files matching *_N.{ext} pattern.
+
+    Args:
+        root_directory: Root directory to search
+
+    Returns:
+        List of folder paths containing crops
+    """
+    root_directory = Path(root_directory)
+    crop_folders = set()
+
+    for ext in AUDIO_EXTENSIONS:
+        # Find all audio files and check if they're crops
+        for audio_file in root_directory.glob(f'**/*{ext}'):
+            if parse_crop_number(audio_file.name) is not None:
+                # Exclude stem files
+                stem = audio_file.stem
+                parts = stem.rsplit('_', 1)
+                if len(parts) == 2 and parts[1] not in DEMUCS_STEMS:
+                    crop_folders.add(audio_file.parent)
+
+    logger.info(f"Found {len(crop_folders)} crop folders in {root_directory}")
+    return sorted(crop_folders)
+
+
+def is_crop_file(audio_file: str | Path) -> bool:
+    """
+    Check if an audio file is a crop file.
+
+    Args:
+        audio_file: Path to check
+
+    Returns:
+        True if file is a crop (matches *_N.ext pattern and not a stem)
+    """
+    audio_file = Path(audio_file)
+    stem = audio_file.stem
+
+    # Check for _N pattern
+    if parse_crop_number(audio_file.name) is None:
+        return False
+
+    # Exclude stem files
+    parts = stem.rsplit('_', 1)
+    if len(parts) == 2 and parts[1] in DEMUCS_STEMS:
+        return False
+
+    return True
+
+
 # Example usage and testing
 if __name__ == "__main__":
     # Test path operations
