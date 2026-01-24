@@ -17,11 +17,11 @@ Main thing missing still is what to do with all of this raw data: pre-encode lat
 
 ## Overview
 
-This framework extracts **77 music information retrieval (MIR) features** from audio files, specifically designed as conditioning data for Stable Audio Tools training. It analyzes both full mixes and separated stems to capture comprehensive musical characteristics.
+This framework extracts **97 music information retrieval (MIR) features** from audio files, specifically designed as conditioning data for Stable Audio Tools training. It analyzes both full mixes and separated stems to capture comprehensive musical characteristics.
 
 ### Key Features
 
-✅ **77+ Numeric Features** extracted per track
+✅ **97+ Numeric Features** extracted per track
 ✅ **AI-Powered Descriptions** using Music Flamingo (8B params)
 ✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
 ✅ **Per-Stem Analysis** - Features from Demucs separated stems (drums, bass, other, vocals)
@@ -35,7 +35,7 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 
 ## Feature Categories
 
-### Numeric Features (77+)
+### Numeric Features (97+)
 
 | Category | Features | Description |
 |----------|----------|-------------|
@@ -68,7 +68,7 @@ This framework extracts **77 music information retrieval (MIR) features** from a
 | **instrumentation** | Instruments and sounds present |
 | **structure** | Arrangement and structure analysis |
 
-**Total: 77+ numeric features + 496 classification labels + 5 AI descriptions + MIDI drums**
+**Total: 97+ numeric features + 496 classification labels + 5 AI descriptions + MIDI drums**
 
 ### Feature Units Reference
 
