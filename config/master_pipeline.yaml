@@ -1,0 +1,168 @@
+# Master Pipeline Configuration
+# Copy this file and customize for your project
+#
+# Usage:
+#   python src/master_pipeline.py --config config/my_project.yaml
+#   python src/master_pipeline.py --config config/my_project.yaml --overwrite  # CLI overrides config
+
+# =============================================================================
+# PATHS
+# =============================================================================
+paths:
+  input: null                    # Required: Input directory (raw audio or organized)
+  output: null                   # Output directory for organized files (null = in-place)
+  stems_source: null             # Pre-existing stems directory (skips Demucs if set)
+
+# =============================================================================
+# STAGE CONTROL
+# =============================================================================
+stages:
+  organize: true                 # Stage 1: Organize raw files into project structure
+  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: true                 # Stage 3: Create training crops
+  crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
+
+# =============================================================================
+# DEMUCS STEM SEPARATION
+# =============================================================================
+demucs:
+  # Available models:
+  #   htdemucs      - Hybrid Transformer Demucs (default, fast)
+  #   htdemucs_ft   - Fine-tuned htdemucs (4x slower, slightly better quality)
+  #   htdemucs_6s   - 6-source model (adds piano + guitar stems)
+  #   mdx_extra     - MDX-Net based model
+  #   mdx_extra_q   - Quantized MDX-Net (smaller, faster)
+  model: htdemucs                # Default: htdemucs (good balance of speed/quality)
+
+  shifts: 0                      # Random shifts (0=fast for MIR, 1+=hifi quality)
+  device: cuda                   # cuda, cpu, mps
+
+  # Segment length in seconds - controls GPU memory usage
+  # NOTE: Maximum segment depends on model! htdemucs max is ~7.8s
+  #   htdemucs:    max 7.8s (trained segment length)
+  #   htdemucs_ft: max 7.8s
+  #   mdx_extra:   longer segments supported
+  # Set to null to use model's default (recommended)
+  segment: null                  # Segment length in seconds (null = model default, recommended)
+
+  output_format: mp3             # mp3 (default, VBR), flac, wav, wav24, wav32, ogg
+  mp3_bitrate: 96                # MP3 bitrate (64-320) if format=mp3
+  clip_mode: rescale             # rescale or clamp
+  jobs: 4                        # Parallel jobs for batch processing
+
+  # Implementation options
+  optimized: true                # Use optimized implementation (model persistence, SDPA)
+                                 # - Keeps model loaded in memory for batch processing
+                                 # - Uses Flash Attention via PyTorch SDPA
+                                 # - Set to false to use subprocess implementation (fallback)
+
+  # torch.compile options (optimized implementation only)
+  # WARNING: torch.compile is experimental with Demucs and may cause shape errors
+  # The SDPA optimization (Flash Attention) already provides good speedups
+  compile: false                 # Enable torch.compile (EXPERIMENTAL - may not work)
+  compile_mode: reduce-overhead  # torch.compile mode:
+                                 #   default         - Balanced compilation
+                                 #   reduce-overhead - Uses CUDA graphs, recommended for ROCm
+                                 #   max-autotune    - Maximum optimization, longer compile time
+
+# =============================================================================
+# RHYTHM ANALYSIS
+# =============================================================================
+rhythm:
+  # Beat detection uses madmom by default
+  # These features are extracted for full tracks and migrated to crops
+  enabled: true
+
+# =============================================================================
+# CROPPING
+# =============================================================================
+cropping:
+  length_samples: 2097152        # Crop length in SAMPLES (2097152 = ~47.5s at 44.1kHz)
+                                 # Common values:
+                                 #   1323000  = ~30.0s at 44.1kHz
+                                 #   2097152  = ~47.5s at 44.1kHz (default)
+                                 #   2646000  = ~60.0s at 44.1kHz
+
+  mode: sequential               # sequential or beat-aligned
+  overlap: false                 # 50% overlap between crops
+  div4: false                    # Ensure downbeats divisible by 4 (beat-aligned mode)
+  include_stems: true            # Also crop stems alongside full mix
+  threads: 1                     # Parallel threads for cropping
+
+# =============================================================================
+# FEATURE EXTRACTION
+# =============================================================================
+features:
+  # Loudness (LUFS/LRA)
+  loudness: true
+
+  # Spectral features (flatness, flux, skewness, kurtosis)
+  spectral: true
+
+  # Multiband RMS (bass, body, mid, air)
+  multiband_rms: true
+
+  # Harmonic/Chroma (12-bin pitch class)
+  chroma: true
+
+  # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
+  timbral: true
+
+  # Essentia classification (danceability, genre, mood, instruments)
+  essentia: true
+
+  # AudioBox aesthetics (content enjoyment, production quality, etc.)
+  audiobox: true
+
+  # Per-stem features (requires stems)
+  per_stem: true
+
+# =============================================================================
+# MUSIC FLAMINGO (AI Descriptions)
+# =============================================================================
+music_flamingo:
+  enabled: true
+  model: Q8_0                    # IQ3_M (fast), Q6_K (balanced), Q8_0 (best quality)
+
+  # Prompt types to generate (all enabled by default)
+  prompts:
+    full: true                   # Comprehensive description
+    technical: true              # Tempo, key, chords, dynamics
+    genre_mood: true             # Genre and emotional character
+    instrumentation: true        # Instruments and sounds
+    structure: true              # Arrangement and structure
+
+# =============================================================================
+# METADATA LOOKUP
+# =============================================================================
+metadata:
+  enabled: true
+  use_fingerprinting: true       # Try AcoustID fingerprinting for unknown artists
+  fix_various_artists: true      # Fix "Various Artists" names during file organization
+                                 # (uses Spotify/MusicBrainz to find correct artist)
+
+  # Artists that trigger metadata lookup (case-insensitive)
+  various_artists_aliases:
+    - various artists
+    - various
+    - va
+    - v/a
+    - v.a.
+    - compilation
+    - unknown artist
+    - unknown
+
+# =============================================================================
+# FILENAME CLEANUP
+# =============================================================================
+filename_cleanup:
+  enabled: true                  # Clean filenames for T5 tokenizer compatibility
+                                 # Converts accented chars to ASCII, normalizes spaces/dashes
+
+# =============================================================================
+# PROCESSING OPTIONS
+# =============================================================================
+processing:
+  device: cuda                   # cuda or cpu
+  overwrite: false               # Overwrite existing features
+  verbose: false                 # Verbose logging

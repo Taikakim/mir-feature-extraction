@@ -7,7 +7,7 @@ Optimized to load heavy models once and process multiple crops efficiently.
 Usage:
     from crops.feature_extractor import CropFeatureExtractor
 
-    extractor = CropFeatureExtractor(skip_flamingo=False, flamingo_model='Q6_K')
+    extractor = CropFeatureExtractor(skip_flamingo=False, flamingo_model='Q8_0')
     extractor.extract_features(crop_path, stems={'drums': drums_path, ...})
 """
 
@@ -440,9 +440,9 @@ if __name__ == "__main__":
 
     parser.add_argument(
         '--flamingo-model',
-        default='Q6_K',
+        default='Q8_0',
         choices=['IQ3_M', 'Q6_K', 'Q8_0'],
-        help='GGUF model for Music Flamingo (default: Q6_K)'
+        help='GGUF model for Music Flamingo (default: Q8_0)'
     )
 
     parser.add_argument(

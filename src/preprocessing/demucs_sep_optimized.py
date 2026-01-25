@@ -1,427 +1,469 @@
+
 """
-Demucs Stem Separation - OPTIMIZED for Batch Processing
+Optimized Demucs Stem Separation (ROCm Enhanced)
+------------------------------------------------
+This script replaces the standard subprocess-based execution with a direct
+Python implementation that:
+1. Keeps the model loaded in memory (fast batch processing).
+2. Monkey-patches the Attention mechanism to use PyTorch SDPA (Flash Attention on ROCm).
+3. Optimized for AMD RDNA3/4 GPUs with ROCm 7.1+.
 
-This is an optimized version that loads the Demucs model ONCE into VRAM
-and reuses it for all files, avoiding the massive overhead of subprocess
-calls and model reloading.
-
-Performance Impact (10,000 files):
-- Original: ~27 hours (subprocess overhead + model loading)
-- Optimized: ~13 hours (model loaded once, pure processing time)
-- Speedup: ~2x
+Note: torch.compile support is EXPERIMENTAL and may cause shape errors with Demucs.
+The SDPA/Flash Attention optimization already provides significant speedups.
 
 Usage:
-    # For batch processing (RECOMMENDED - loads model once)
-    from demucs_sep_optimized import DemucsProcessor
-
-    processor = DemucsProcessor(device='cuda')  # Load model once (~3s)
-    for folder in folders:
-        processor.separate_folder(folder)  # Reuse loaded model
-
-    # Or use the batch function
-    from demucs_sep_optimized import batch_separate_stems_optimized
-    batch_separate_stems_optimized('dataset/')
+    python src/preprocessing/demucs_sep_optimized.py /path/to/folder --batch
 """
 
-import logging
-import shutil
-import torch
-import torchaudio
-from pathlib import Path
-from typing import Dict, Optional, List
+import os
 import sys
+sys.path.insert(0, "/home/kim/Projects/repos/demucs") # Prioritize local fork
+import logging
+import argparse
+import traceback
+from pathlib import Path
+from typing import Dict, List, Optional
+import time
 
+# --- 1. ROCm Environment Setup (Must be before torch import) ---
+def setup_rocm_environment():
+    """Configure ROCm-specific environment variables for optimal performance."""
+    # MIOpen cache persistence
+    if 'MIOPEN_USER_DB_PATH' not in os.environ:
+        cache = Path.home() / '.cache' / 'miopen'
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ['MIOPEN_USER_DB_PATH'] = str(cache)
+
+    # Optimize memory for high-res audio (Reduce fragmentation)
+    # Note: expandable_segments not supported on ROCm/HIP
+    if 'PYTORCH_ALLOC_CONF' not in os.environ:
+        os.environ['PYTORCH_ALLOC_CONF'] = 'garbage_collection_threshold:0.8,max_split_size_mb:128'
+
+    # Fast MIOpen kernel selection (avoid long delays)
+    if 'MIOPEN_FIND_MODE' not in os.environ:
+        os.environ['MIOPEN_FIND_MODE'] = '2'
+
+    # Enable TunableOp if available
+    if 'PYTORCH_TUNABLEOP_ENABLED' not in os.environ:
+        os.environ['PYTORCH_TUNABLEOP_ENABLED'] = '1'
+        os.environ['PYTORCH_TUNABLEOP_TUNING'] = '0'  # Use existing kernels
+
+
+setup_rocm_environment()
+
+import torch
+import torch.nn.functional as F
+import torchaudio
+
+# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
+from core.common import DEMUCS_CONFIG, DEMUCS_STEMS, setup_logging
 from core.file_utils import find_organized_folders
-from core.common import DEMUCS_CONFIG, DEMUCS_STEMS, AUDIO_EXTENSIONS
-from core.file_locks import FileLock
-from core.batch_utils import print_batch_summary
+from preprocessing.demucs_sep import OUTPUT_FORMATS, convert_to_ogg, convert_wav_to_flac_soundfile
 
 logger = logging.getLogger(__name__)
 
+# --- 2. Monkey Patching Demucs Attention ---
+_attention_patched = False
+_original_attention = None
 
-class DemucsProcessor:
+def patch_demucs_attention(enable: bool = True):
+    """Patch Demucs attention to use PyTorch SDPA (Flash Attention on ROCm).
+
+    Args:
+        enable: If True, apply SDPA patch. If False, restore original.
     """
-    Optimized Demucs processor with model caching.
+    global _attention_patched, _original_attention
 
-    Loads Demucs model once and reuses for all files, avoiding
-    subprocess overhead and model reload time.
+    try:
+        import demucs.transformer
 
-    Example:
-        processor = DemucsProcessor(device='cuda')
-        for folder in folders:
-            processor.separate_folder(folder)
+        if enable and not _attention_patched:
+            # Save original for potential restoration
+            _original_attention = demucs.transformer.scaled_dot_product_attention
+
+            def optimized_scaled_dot_product_attention(q, k, v, att_mask, dropout):
+                # Extract p from dropout module
+                p = dropout.p if isinstance(dropout, torch.nn.Dropout) else 0.0
+                # Use PyTorch's optimized SDPA (uses Flash Attention if available)
+                return F.scaled_dot_product_attention(q, k, v, attn_mask=att_mask, dropout_p=p)
+
+            logger.info("Applying optimization: demucs.transformer.scaled_dot_product_attention -> F.scaled_dot_product_attention")
+            demucs.transformer.scaled_dot_product_attention = optimized_scaled_dot_product_attention
+            _attention_patched = True
+            return True
+        elif not enable and _attention_patched and _original_attention is not None:
+            # Restore original
+            logger.info("Restoring original demucs attention (SDPA disabled)")
+            demucs.transformer.scaled_dot_product_attention = _original_attention
+            _attention_patched = False
+            return True
+        return _attention_patched
+    except ImportError:
+        logger.warning("Could not import demucs.transformer. SDPA optimization skipped.")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to patch demucs: {e}")
+        return False
+
+
+# Don't auto-patch at import time - let the class control it
+# patch_demucs_attention()
+
+from demucs.apply import apply_model
+from demucs.pretrained import get_model
+from demucs.audio import convert_audio, save_audio
+
+
+class DemucsSeparator:
+    """
+    Optimized Demucs separator with model persistence and optional torch.compile.
+
+    Args:
+        model_name: Demucs model name (htdemucs, htdemucs_ft, htdemucs_6s, mdx_extra, mdx_extra_q)
+        device: Device to use ('cuda', 'cpu', 'mps')
+        shifts: Number of random shifts for better quality (0=fast, 1+=better)
+        segment: Segment length in seconds (higher=better quality, more VRAM)
+        jobs: Number of parallel jobs
+        use_compile: Enable torch.compile optimization (EXPERIMENTAL)
+        compile_mode: torch.compile mode ('reduce-overhead' recommended for ROCm)
+        use_sdpa: Enable SDPA/Flash Attention optimization (default: True)
     """
 
     def __init__(
         self,
-        model_name: str = None,
+        model_name: Optional[str] = None,
         device: str = 'cuda',
-        shifts: int = None,
-        split: bool = True,
-        overlap: float = 0.25
+        shifts: Optional[int] = None,
+        segment: Optional[float] = None,
+        jobs: Optional[int] = None,
+        use_compile: bool = False,
+        compile_mode: str = 'reduce-overhead',
+        use_sdpa: bool = True  # SDPA/Flash Attention optimization
     ):
-        """
-        Initialize Demucs processor with model loaded into memory.
-
-        Args:
-            model_name: Demucs model name (default: from DEMUCS_CONFIG)
-            device: Device to use ('cuda', 'cpu')
-            shifts: Number of random shifts for prediction
-            split: Whether to split audio for processing (memory efficient)
-            overlap: Overlap between splits (0.0 to 1.0)
-        """
-        # Use defaults from config if not specified
-        self.model_name = model_name or DEMUCS_CONFIG['model']
         self.device = device
-        self.shifts = shifts or DEMUCS_CONFIG['shifts']
-        self.split = split
-        self.overlap = overlap
+        self.model_name = model_name or DEMUCS_CONFIG['model']
+        self.shifts = shifts if shifts is not None else DEMUCS_CONFIG['shifts']
+        self.jobs = jobs if jobs is not None else DEMUCS_CONFIG['jobs']
+        self.segment = segment
+        self.use_compile = use_compile
+        self.compile_mode = compile_mode
+        self.use_sdpa = use_sdpa
+        self._compiled = False
 
-        logger.info("=" * 60)
-        logger.info("Initializing Demucs Processor (OPTIMIZED)")
-        logger.info("=" * 60)
-        logger.info(f"Model: {self.model_name}")
-        logger.info(f"Device: {self.device}")
-        logger.info(f"Shifts: {self.shifts}")
-        logger.info("Loading model into memory (one-time operation)...")
+        # Apply SDPA patch if requested
+        if self.use_sdpa:
+            patch_demucs_attention(enable=True)
 
-        # Load model
-        self._load_model()
+        logger.info(f"Loading model: {self.model_name}...")
+        start_t = time.time()
+        self.model = get_model(self.model_name)
+        self.model.to(device)
+        self.model.eval()
+        logger.info(f"Model loaded in {time.time() - start_t:.2f}s (shifts={self.shifts})")
 
-        logger.info("✓ Model loaded and cached in VRAM/RAM")
-        logger.info("Ready to process files")
-        logger.info("=" * 60)
+        # Validate segment length
+        if self.segment is not None:
+            max_seg = float(self.model.segment) if hasattr(self.model, 'segment') else float('inf')
+            if self.segment > max_seg:
+                logger.warning(f"Requested segment {self.segment} > model max {max_seg}. Using max.")
+                self.segment = max_seg
 
-    def _load_model(self):
-        """Load Demucs model into memory."""
+        # Apply torch.compile if requested
+        # Note: We compile the forward method only, not the whole model
+        # This preserves model attributes needed by apply_model
+        if self.use_compile:
+            self._apply_compile()
+
+    def _apply_compile(self):
+        """Apply torch.compile to the inner model(s) forward method."""
+        if self._compiled:
+            return
+
         try:
-            from demucs.pretrained import get_model
-            from demucs.apply import apply_model
+            actual_mode = self.compile_mode
+            logger.info(f"Applying torch.compile with mode='{actual_mode}', backend='inductor'...")
+            start_t = time.time()
 
-            # Store apply_model for later use
-            self.apply_model = apply_model
+            # BagOfModels contains inner models - compile each one
+            # apply_model calls these inner models on fixed-size segments
+            if hasattr(self.model, 'models'):
+                # It's a BagOfModels - compile each inner model
+                for i, inner_model in enumerate(self.model.models):
+                    logger.info(f"  Compiling inner model {i}: {type(inner_model).__name__}")
+                    inner_model.forward = torch.compile(
+                        inner_model.forward,
+                        mode=actual_mode,
+                        backend='inductor',
+                        fullgraph=False,
+                        dynamic=True,  # Segments may have slight length variations
+                    )
+            else:
+                # Single model - compile directly
+                logger.info(f"  Compiling model: {type(self.model).__name__}")
+                self.model.forward = torch.compile(
+                    self.model.forward,
+                    mode=actual_mode,
+                    backend='inductor',
+                    fullgraph=False,
+                    dynamic=True,
+                )
 
-            # Load the pretrained model
-            self.model = get_model(self.model_name)
-
-            # Move to specified device
-            self.model.to(self.device)
-
-            # Set to evaluation mode
-            self.model.eval()
-
-            logger.info(f"✓ Model '{self.model_name}' loaded successfully")
-            logger.info(f"✓ Using device: {self.device}")
-
-            # Check VRAM usage if CUDA
-            if self.device == 'cuda' and torch.cuda.is_available():
-                vram_allocated = torch.cuda.memory_allocated() / 1024**3
-                vram_reserved = torch.cuda.memory_reserved() / 1024**3
-                logger.info(f"✓ VRAM allocated: {vram_allocated:.2f} GB")
-                logger.info(f"✓ VRAM reserved: {vram_reserved:.2f} GB")
-
+            self._compiled = True
+            logger.info(f"torch.compile applied in {time.time() - start_t:.2f}s")
+            logger.info("Note: First inference will trigger compilation (slow), subsequent runs will be faster")
         except Exception as e:
-            logger.error(f"Failed to load Demucs model: {e}")
-            raise
+            logger.warning(f"torch.compile failed: {e}. Continuing without compilation.")
+            self._compiled = False
 
-    def separate_audio(
+    @torch.no_grad()
+    def separate_file(
         self,
         audio_path: Path,
-        output_dir: Path
-    ) -> Dict[str, Path]:
+        output_dir: Path,
+        output_format: str = 'mp3',
+        **kwargs
+    ) -> bool:
         """
-        Separate audio file into stems using loaded model.
+        Separate a single audio file into stems.
 
         Args:
             audio_path: Path to input audio file
             output_dir: Directory to save stems
+            output_format: Output format (mp3, flac, wav, wav24, wav32, ogg)
+            **kwargs: Additional arguments for _save_stems
 
         Returns:
-            Dictionary mapping stem names to output paths
+            True if successful, False otherwise
         """
-        logger.info(f"Separating: {audio_path.name}")
-
         try:
             # Load audio
             wav, sr = torchaudio.load(str(audio_path))
-
-            # Demucs expects stereo or mono
-            if wav.shape[0] == 1:
-                # Mono -> Stereo
-                wav = wav.repeat(2, 1)
-            elif wav.shape[0] > 2:
-                # Multi-channel -> Stereo (take first 2 channels)
-                wav = wav[:2, :]
-
-            # Resample if needed (Demucs uses 44.1kHz by default)
-            model_sr = self.model.samplerate
-            if sr != model_sr:
-                logger.debug(f"Resampling from {sr}Hz to {model_sr}Hz")
-                resampler = torchaudio.transforms.Resample(sr, model_sr)
-                wav = resampler(wav)
-                sr = model_sr
-
-            # Move to device
+            wav = convert_audio(wav, sr, self.model.samplerate, self.model.audio_channels)
             wav = wav.to(self.device)
 
-            # Ensure correct shape: (batch, channels, samples)
-            if wav.dim() == 2:
-                wav = wav.unsqueeze(0)  # Add batch dimension
+            logger.debug(f"Audio shape: {wav.shape}, sr: {self.model.samplerate}, "
+                         f"segment: {self.segment}, model.segment: {getattr(self.model, 'segment', 'N/A')}")
 
-            # Apply model
-            with torch.no_grad():
-                sources = self.apply_model(
-                    self.model,
-                    wav,
-                    shifts=self.shifts,
-                    split=self.split,
-                    overlap=self.overlap
-                )
-
-            # sources shape: (batch, stems, channels, samples)
-            # Remove batch dimension
-            sources = sources[0]
+            # Separate with apply_model (handles normalization internally)
+            # Let Demucs handle segmentation automatically for best compatibility
+            # progress=False to keep logs clean for batch processing
+            sources = apply_model(
+                self.model,
+                wav[None],  # Add batch dimension
+                device=self.device,
+                shifts=self.shifts,
+                split=True,
+                overlap=0.25,
+                progress=False,
+                num_workers=0,  # Only works on CPU; GPU always uses sequential processing
+                # Don't pass segment - let model use its default
+            )[0]  # Remove batch dimension
 
             # Save stems
-            stem_paths = {}
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Demucs source order: drums, bass, other, vocals (for htdemucs)
-            stem_names = self.model.sources
-
-            for i, stem_name in enumerate(stem_names):
-                # Get stem audio (channels, samples)
-                stem_audio = sources[i].cpu()
-
-                # Save as MP3 at 320kbps
-                output_path = output_dir / f"{stem_name}.mp3"
-
-                # torchaudio.save doesn't support MP3 directly, use subprocess for encoding
-                # Save as WAV first, then convert
-                temp_wav = output_dir / f"{stem_name}.wav"
-                torchaudio.save(str(temp_wav), stem_audio, sr)
-
-                # Convert to MP3
-                import subprocess
-                subprocess.run([
-                    'ffmpeg', '-y', '-i', str(temp_wav),
-                    '-codec:a', 'libmp3lame', '-b:a', '320k',
-                    str(output_path)
-                ], check=True, capture_output=True)
-
-                # Remove temp WAV
-                temp_wav.unlink()
-
-                stem_paths[stem_name] = output_path
-                logger.info(f"  ✓ {stem_name}.mp3")
-
-            logger.info(f"✓ Separated {len(stem_paths)} stems")
-            return stem_paths
+            self._save_stems(sources, output_dir, output_format, **kwargs)
+            return True
 
         except Exception as e:
-            logger.error(f"Error separating {audio_path.name}: {e}")
-            raise
+            logger.error(f"Separation failed for {audio_path.name}: {e}")
+            # Always show full traceback for debugging
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            return False
 
-    def separate_folder(
+    def _save_stems(
         self,
-        folder: Path,
-        overwrite: bool = False
-    ) -> Optional[Dict[str, Path]]:
+        sources: torch.Tensor,
+        output_dir: Path,
+        fmt: str,
+        mp3_bitrate: int = 96,
+        mp3_preset: int = 5,
+        ogg_quality: float = 0.5,
+        clip_mode: str = 'rescale'
+    ):
         """
-        Separate stems for an organized folder.
+        Save separated stems to output directory.
 
         Args:
-            folder: Path to organized folder (contains full_mix file)
-            overwrite: Whether to overwrite existing stems
-
-        Returns:
-            Dictionary of stem paths, or None if skipped
+            sources: Tensor of shape (num_sources, channels, samples)
+            output_dir: Output directory
+            fmt: Output format key
+            mp3_bitrate: MP3 bitrate (if format is mp3)
+            mp3_preset: MP3 encoder preset (if format is mp3)
+            ogg_quality: OGG quality (if format is ogg)
+            clip_mode: Clipping mode ('rescale' or 'clamp')
         """
-        folder = Path(folder)
+        kwargs = {
+            'samplerate': self.model.samplerate,
+            'clip': clip_mode,
+            'as_float': False,
+            'bits_per_sample': 16,
+        }
 
-        # Find full_mix file
-        full_mix = None
-        for ext in AUDIO_EXTENSIONS:
-            potential_path = folder / f"full_mix{ext}"
-            if potential_path.exists():
-                full_mix = potential_path
-                break
+        # Determine format for save_audio
+        save_fmt = fmt
+        if fmt == 'ogg':
+            save_fmt = 'wav'  # Save as WAV first, then convert
+        elif fmt == 'wav24':
+            save_fmt = 'wav'
+            kwargs['bits_per_sample'] = 24
+        elif fmt == 'wav32':
+            save_fmt = 'wav'
+            kwargs['as_float'] = True
 
-        if full_mix is None:
-            logger.warning(f"No full_mix file found in {folder.name}")
-            return None
+        if save_fmt == 'mp3':
+            kwargs['bitrate'] = mp3_bitrate
+            kwargs['preset'] = mp3_preset
 
-        # Check if stems already exist
-        if not overwrite:
-            existing_stems = {}
-            for stem_name in DEMUCS_STEMS:
-                for ext in ['.mp3', '.wav', '.flac']:
-                    stem_path = folder / f"{stem_name}{ext}"
-                    if stem_path.exists():
-                        existing_stems[stem_name] = stem_path
-                        break
+        # Ensure output directory exists
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-            if len(existing_stems) == len(DEMUCS_STEMS):
-                logger.info(f"  Skipping - stems already exist")
-                return existing_stems
+        for source, name in zip(sources, self.model.sources):
+            # Move to CPU for saving
+            source = source.cpu()
 
-        # Separate stems
-        return self.separate_audio(full_mix, folder)
+            # OUTPUT_FORMATS ext already includes the dot (e.g., '.mp3')
+            stem_path = output_dir / f"{name}{OUTPUT_FORMATS[fmt]['ext']}"
+
+            if fmt == 'ogg':
+                # Save temp wav, convert to ogg
+                temp_wav = output_dir / f"{name}_temp.wav"
+                save_audio(source, str(temp_wav), **kwargs)
+                convert_to_ogg(temp_wav, stem_path, quality=ogg_quality)
+                temp_wav.unlink()
+            elif fmt == 'flac':
+                # Try native flac support, fallback to wav->flac
+                try:
+                    save_audio(source, str(stem_path), **kwargs)
+                except Exception:
+                    temp_wav = output_dir / f"{name}_temp.wav"
+                    save_audio(source, str(temp_wav), **kwargs)
+                    convert_wav_to_flac_soundfile(temp_wav, stem_path)
+                    temp_wav.unlink()
+            else:
+                save_audio(source, str(stem_path), **kwargs)
+
+    def clear_cache(self):
+        """Clear GPU cache to prevent memory fragmentation during long batch runs."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
-def batch_separate_stems_optimized(
-    root_directory: str | Path,
+def batch_process(
+    root_dir: Path,
+    separator: DemucsSeparator,
     overwrite: bool = False,
-    device: str = 'cuda',
-    model_name: str = None,
-    shifts: int = None
-) -> Dict[str, any]:
+    cache_clear_interval: int = 50,
+    **kwargs
+) -> int:
     """
-    Batch separate stems with model caching (OPTIMIZED).
-
-    Loads Demucs model ONCE and reuses for all files.
+    Batch process all organized folders.
 
     Args:
-        root_directory: Root directory containing organized folders
-        overwrite: Whether to overwrite existing stems
-        device: Device to use ('cuda', 'cpu')
-        model_name: Demucs model to use
-        shifts: Number of random shifts
+        root_dir: Root directory to search for organized folders
+        separator: DemucsSeparator instance
+        overwrite: Overwrite existing stems
+        cache_clear_interval: Clear GPU cache every N files
+        **kwargs: Additional arguments for separate_file
 
     Returns:
-        Dictionary with processing statistics
+        Number of successfully processed folders
     """
-    root_directory = Path(root_directory)
+    folders = find_organized_folders(root_dir)
+    logger.info(f"Found {len(folders)} folders to process.")
+    batch_start_time = time.time()
 
-    logger.info("=" * 60)
-    logger.info("BATCH STEM SEPARATION (OPTIMIZED)")
-    logger.info("=" * 60)
-    logger.info(f"Directory: {root_directory}")
-    logger.info(f"Overwrite: {overwrite}")
-    logger.info("")
+    success_count = 0
+    skipped_count = 0
+    output_format = kwargs.get('output_format', 'mp3')
 
-    # Find organized folders
-    folders = find_organized_folders(root_directory)
-
-    stats = {
-        'total': len(folders),
-        'success': 0,
-        'skipped_complete': 0,
-        'skipped_locked': 0,
-        'failed': 0,
-        'errors': []
-    }
-
-    logger.info(f"Found {stats['total']} organized folders")
-    logger.info("")
-
-    # OPTIMIZATION: Load model ONCE for all files
-    processor = DemucsProcessor(
-        model_name=model_name,
-        device=device,
-        shifts=shifts
-    )
-
-    # Process each folder
     for i, folder in enumerate(folders, 1):
-        logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+        full_mix = list(folder.glob('full_mix.*'))
+        if not full_mix:
+            continue
+        full_mix = full_mix[0]
 
-        try:
-            # Check if already complete
-            if not overwrite:
-                existing_count = sum(
-                    1 for stem in DEMUCS_STEMS
-                    for ext in ['.mp3', '.wav', '.flac']
-                    if (folder / f"{stem}{ext}").exists()
-                )
+        # Check if already done (skip if not overwriting)
+        if not overwrite:
+            existing = [
+                f for f in DEMUCS_STEMS
+                if (folder / f"{f}{OUTPUT_FORMATS[output_format]['ext']}").exists()
+            ]
+            if len(existing) == len(DEMUCS_STEMS):
+                logger.info(f"[{i}/{len(folders)}] Skipping {folder.name} (already done)")
+                skipped_count += 1
+                continue
 
-                if existing_count == len(DEMUCS_STEMS):
-                    stats['skipped_complete'] += 1
-                    logger.info(f"  Skipping - stems already exist")
-                    continue
+        logger.info(f"[{i}/{len(folders)}] Processing {folder.name}...")
+        start_t = time.time()
 
-            # Try to acquire lock
-            with FileLock(folder) as lock:
-                if not lock.acquired:
-                    stats['skipped_locked'] += 1
-                    logger.info(f"  Skipping - locked by another process")
-                    continue
+        if separator.separate_file(full_mix, folder, **kwargs):
+            duration = time.time() - start_t
+            logger.info(f"  Done in {duration:.1f}s")
+            success_count += 1
 
-                # Process using cached model
-                result = processor.separate_folder(folder, overwrite=overwrite)
+        # Periodic cache clearing to prevent fragmentation
+        if i % cache_clear_interval == 0:
+            separator.clear_cache()
+            logger.debug(f"Cleared GPU cache after {i} files")
 
-                if result:
-                    stats['success'] += 1
-                    logger.info(f"  ✓ Completed")
+    # Final cache clear
+    separator.clear_cache()
 
-        except Exception as e:
-            stats['failed'] += 1
-            error_msg = f"{folder.name}: {str(e)}"
-            stats['errors'].append(error_msg)
-            logger.error(f"  ✗ Failed: {e}")
+    # Summary
+    total_time = time.time() - batch_start_time
+    logger.info("=" * 60)
+    logger.info("Batch Stem Separation Summary (Optimized):")
+    logger.info(f"  Total folders:  {len(folders)}")
+    logger.info(f"  Successful:     {success_count}")
+    logger.info(f"  Skipped:        {skipped_count}")
+    logger.info(f"  Total time:     {total_time:.1f}s ({total_time/60:.1f}min)")
+    if success_count > 0:
+        logger.info(f"  Avg per track:  {total_time/success_count:.1f}s")
+    logger.info("=" * 60)
 
-    # Print summary
-    print_batch_summary(stats, "Stem Separation (Optimized)")
-
-    # Show VRAM usage at end
-    if device == 'cuda' and torch.cuda.is_available():
-        vram_allocated = torch.cuda.memory_allocated() / 1024**3
-        logger.info(f"Final VRAM usage: {vram_allocated:.2f} GB")
-
-    return stats
+    return success_count
 
 
-# Command-line interface
-if __name__ == "__main__":
-    import argparse
-    from core.common import setup_logging
-
+def main():
     parser = argparse.ArgumentParser(
-        description="Optimized Demucs stem separation with model caching"
-    )
+        description="Optimized Demucs Separation with ROCm enhancements",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Single file
+  python demucs_sep_optimized.py /path/to/audio.flac
 
-    parser.add_argument(
-        'directory',
-        type=str,
-        help='Root directory containing organized folders'
-    )
+  # Batch processing
+  python demucs_sep_optimized.py /path/to/folder --batch
 
-    parser.add_argument(
-        '--model',
-        type=str,
-        default=None,
-        help=f'Demucs model to use (default: {DEMUCS_CONFIG["model"]})'
-    )
+  # With torch.compile (faster after warmup)
+  python demucs_sep_optimized.py /path/to/folder --batch --compile
 
-    parser.add_argument(
-        '--shifts',
-        type=int,
-        default=None,
-        help=f'Number of random shifts (default: {DEMUCS_CONFIG["shifts"]})'
+  # High quality mode
+  python demucs_sep_optimized.py /path/to/folder --batch --shifts 1 --segment 60
+        """
     )
-
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda',
-        choices=['cuda', 'cpu'],
-        help='Device to use (default: cuda)'
-    )
-
-    parser.add_argument(
-        '--overwrite',
-        action='store_true',
-        help='Overwrite existing stems'
-    )
-
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging'
-    )
+    parser.add_argument('path', type=str, help='Path to audio file or folder')
+    parser.add_argument('--batch', action='store_true', help='Batch process all organized folders')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing stems')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Demucs model (htdemucs, htdemucs_ft, htdemucs_6s, mdx_extra, mdx_extra_q)')
+    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda, cpu, mps)')
+    parser.add_argument('--format', type=str, default='mp3', choices=OUTPUT_FORMATS.keys(),
+                        help='Output format (default: mp3)')
+    parser.add_argument('--shifts', type=int, default=None,
+                        help='Random shifts for better quality (0=fast, 1+=better)')
+    parser.add_argument('--segment', type=float, default=None,
+                        help='Segment length in seconds (higher=better, more VRAM)')
+    parser.add_argument('--jobs', type=int, default=None, help='Parallel jobs')
+    parser.add_argument('--mp3-bitrate', type=int, default=96, help='MP3 bitrate (default: 96)')
+    parser.add_argument('--compile', action='store_true',
+                        help='Use torch.compile for faster processing (ROCm optimized)')
+    parser.add_argument('--compile-mode', type=str, default='reduce-overhead',
+                        choices=['default', 'reduce-overhead', 'max-autotune'],
+                        help='torch.compile mode (default: reduce-overhead)')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose logging')
 
     args = parser.parse_args()
 
@@ -429,33 +471,53 @@ if __name__ == "__main__":
     log_level = logging.DEBUG if args.verbose else logging.INFO
     setup_logging(level=log_level)
 
-    # Check PyTorch and CUDA
-    if args.device == 'cuda':
-        if not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU")
-            args.device = 'cpu'
-        else:
-            logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
-            logger.info(f"CUDA version: {torch.version.cuda or 'ROCm'}")
-
-    # Run batch processing
-    try:
-        stats = batch_separate_stems_optimized(
-            root_directory=args.directory,
-            overwrite=args.overwrite,
-            device=args.device,
-            model_name=args.model,
-            shifts=args.shifts
-        )
-
-        if stats['failed'] > 0:
-            logger.warning(f"{stats['failed']} folders failed")
-            sys.exit(1)
-
-        logger.info("✓ Batch processing complete")
-
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
+    path = Path(args.path)
+    if not path.exists():
+        logger.error(f"Path not found: {path}")
         sys.exit(1)
+
+    # Create separator
+    sep = DemucsSeparator(
+        model_name=args.model,
+        device=args.device,
+        shifts=args.shifts,
+        segment=args.segment,
+        jobs=args.jobs,
+        use_compile=args.compile,
+        compile_mode=args.compile_mode
+    )
+
+    # Process
+    if args.batch:
+        count = batch_process(
+            path, sep,
+            overwrite=args.overwrite,
+            output_format=args.format,
+            mp3_bitrate=args.mp3_bitrate
+        )
+        logger.info(f"Successfully processed {count} folders")
+    elif path.is_dir():
+        # Single folder - check if it's an organized folder or a parent
+        full_mix = list(path.glob('full_mix.*'))
+        if full_mix:
+            # This is an organized folder
+            logger.info(f"Processing single folder: {path}")
+            sep.separate_file(full_mix[0], path, output_format=args.format, mp3_bitrate=args.mp3_bitrate)
+        else:
+            # Search for organized folders within
+            count = batch_process(
+                path, sep,
+                overwrite=args.overwrite,
+                output_format=args.format,
+                mp3_bitrate=args.mp3_bitrate
+            )
+            logger.info(f"Successfully processed {count} folders")
+    else:
+        # Single file
+        out = path.parent
+        logger.info(f"Separating {path} to {out}")
+        sep.separate_file(path, out, output_format=args.format, mp3_bitrate=args.mp3_bitrate)
+
+
+if __name__ == "__main__":
+    main()

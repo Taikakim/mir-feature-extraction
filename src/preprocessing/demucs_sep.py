@@ -24,6 +24,7 @@ Configuration (from MIR plan):
 
 import subprocess
 import shutil
+import time
 from pathlib import Path
 from typing import List, Dict, Optional
 import logging
@@ -120,6 +121,7 @@ def separate_stems(audio_file: str | Path,
                    output_dir: str | Path,
                    model: str = None,
                    shifts: int = None,
+                   segment: int = None,
                    jobs: int = None,
                    device: str = 'cuda',
                    output_format: str = 'mp3',
@@ -135,6 +137,8 @@ def separate_stems(audio_file: str | Path,
         output_dir: Directory where stems will be saved
         model: Demucs model to use (default: from DEMUCS_CONFIG)
         shifts: Number of random shifts for prediction (default: from config)
+        segment: Segment length in seconds (controls GPU memory, default: None = Demucs default)
+                 Higher = better quality but more VRAM (~45s good for 16GB cards, ~10s minimum)
         jobs: Number of parallel jobs (default: from config)
         device: Device to use ('cuda', 'cpu', 'mps')
         output_format: Output format - 'mp3' (default, VBR ~96kbps), 'flac', 'ogg', 'wav'
@@ -176,7 +180,7 @@ def separate_stems(audio_file: str | Path,
     needs_post_convert = format_config.get('post_convert', False)
 
     logger.info(f"Separating stems: {audio_file.name}")
-    logger.info(f"Model: {model}, Shifts: {shifts}, Device: {device}, Format: {output_format}")
+    logger.info(f"Model: {model}, Shifts: {shifts}, Segment: {segment}, Device: {device}, Format: {output_format}")
 
     # Build demucs command
     cmd = [
@@ -188,6 +192,11 @@ def separate_stems(audio_file: str | Path,
         '--clip-mode', clip_mode,
         '-d', device,
     ]
+
+    # Add segment length if specified (controls GPU memory usage)
+    # Higher segment = better quality but more VRAM
+    if segment is not None:
+        cmd.extend(['--segment', str(segment)])
 
     # Determine demucs output format
     # Strategy: Try native format first, fallback to WAV+soundfile if torchcodec fails
@@ -392,6 +401,7 @@ def batch_separate_stems(root_directory: str | Path,
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch stem separation: {root_directory}")
+    batch_start_time = time.time()
 
     # Find all organized folders
     folders = find_organized_folders(root_directory)
@@ -409,14 +419,18 @@ def batch_separate_stems(root_directory: str | Path,
     # Process each folder
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+        start_time = time.time()
 
         try:
             result = separate_organized_folder(folder, overwrite=overwrite, **kwargs)
 
             if result and any('full_mix' not in str(p) for p in result.values()):
                 stats['success'] += 1
+                duration = time.time() - start_time
+                logger.info(f"  Done in {duration:.1f}s")
             else:
                 stats['skipped'] += 1
+                logger.info(f"  Skipped (already exists)")
 
         except Exception as e:
             stats['failed'] += 1
@@ -425,12 +439,16 @@ def batch_separate_stems(root_directory: str | Path,
             logger.error(f"Failed to process {folder.name}: {e}")
 
     # Summary
+    total_time = time.time() - batch_start_time
     logger.info("=" * 60)
     logger.info("Batch Stem Separation Summary:")
     logger.info(f"  Total folders:  {stats['total']}")
     logger.info(f"  Successful:     {stats['success']}")
     logger.info(f"  Skipped:        {stats['skipped']}")
     logger.info(f"  Failed:         {stats['failed']}")
+    logger.info(f"  Total time:     {total_time:.1f}s ({total_time/60:.1f}min)")
+    if stats['success'] > 0:
+        logger.info(f"  Avg per track:  {total_time/stats['success']:.1f}s")
     logger.info("=" * 60)
 
     return stats
@@ -480,6 +498,14 @@ Output format examples:
         type=int,
         default=None,
         help=f'Number of random shifts (default: {DEMUCS_CONFIG["shifts"]})'
+    )
+
+    parser.add_argument(
+        '--segment',
+        type=int,
+        default=None,
+        help='Segment length in seconds (controls GPU memory). Higher=better quality but more VRAM. '
+             '~10s minimum, ~45s recommended for 16GB cards, None=Demucs default'
     )
 
     parser.add_argument(
@@ -569,6 +595,7 @@ Output format examples:
         kwargs = {
             'model': args.model,
             'shifts': args.shifts,
+            'segment': args.segment,
             'jobs': args.jobs,
             'device': args.device,
             'output_format': args.format,
@@ -605,6 +632,9 @@ Output format examples:
 
     except Exception as e:
         logger.error(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
         import traceback
         traceback.print_exc()
         sys.exit(1)

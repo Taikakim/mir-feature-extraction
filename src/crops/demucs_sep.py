@@ -37,7 +37,7 @@ def separate_crop_stems(
     crop_file: str | Path,
     output_dir: Optional[Path] = None,
     device: str = 'cuda',
-    output_format: str = 'flac',
+    output_format: str = 'mp3',
     overwrite: bool = False,
     **kwargs
 ) -> Dict[str, Path]:
@@ -120,7 +120,7 @@ def separate_crop_stems(
 def batch_separate_crop_stems(
     crops_folder: str | Path,
     device: str = 'cuda',
-    output_format: str = 'flac',
+    output_format: str = 'mp3',
     overwrite: bool = False,
     **kwargs
 ) -> Dict[str, any]:
@@ -232,9 +232,9 @@ if __name__ == "__main__":
     parser.add_argument(
         '--format', '-f',
         type=str,
-        default='flac',
-        choices=['flac', 'mp3', 'wav', 'ogg'],
-        help='Output format for stems (default: flac)'
+        default='mp3',
+        choices=['mp3', 'flac', 'wav', 'ogg'],
+        help='Output format for stems (default: mp3 VBR 96kbps)'
     )
 
     parser.add_argument(

@@ -86,6 +86,10 @@ python src/preprocessing/file_organizer.py /path/to/audio/
 # Separate stems with Demucs (GPU accelerated)
 python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --device cuda
 
+# ✅ Fast Demucs Separation (ROCm Optimized + Flash Attention)
+python src/preprocessing/demucs_sep_optimized.py /path/to/audio/ --batch
+
+
 # Extract rhythm features
 python src/rhythm/beat_grid.py /path/to/audio/ --batch
 python src/rhythm/bpm.py /path/to/audio/ --batch
@@ -117,10 +121,10 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 ```
 /output/Track Name/
 ├── full_mix.flac              # Original audio (organized from flat files)
-├── drums.flac                 # Demucs separated stems (4-source)
-├── bass.flac
-├── other.flac
-├── vocals.flac
+├── drums.mp3                  # Demucs separated stems (4-source, VBR ~96kbps)
+├── bass.mp3
+├── other.mp3
+├── vocals.mp3
 ├── Track Name.INFO            # All extracted features (JSON)
 ├── Track Name.BEATS_GRID      # Beat timestamps (text, newline-separated)
 ├── Track Name.DOWNBEATS       # Downbeat timestamps (text, newline-separated)
@@ -132,7 +136,7 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 - Original files stay in their source location
 - Organized files go to an outpute folder set in the calling script
 - Full mix must be named `full_mix.{ext}` in its own folder
-- Stems are saved as `drums.flac`, `bass.flac`, etc. (same folder)
+- Stems are saved as `drums.mp3`, `bass.mp3`, etc. (same folder, VBR ~96kbps default)
 - `.INFO` files accumulate features - NEVER overwrite unless specific parameter set by call, only merge
 
 ### Module Architecture
@@ -140,7 +144,7 @@ python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch
 ```
 src/
 ├── core/                          # Foundation utilities (ALWAYS use these)
-│   ├── json_handler.py           # safe_update() - atomic JSON merging
+│   ├── json_handler.py           # safe_update() - thread-safe atomic JSON merging
 │   ├── file_utils.py             # find_organized_folders(), get_stem_files()
 │   ├── text_utils.py             # normalize_music_flamingo_text() for T5 compatibility
 │   ├── file_locks.py             # FileLock for concurrent processing
@@ -149,7 +153,7 @@ src/
 │
 src/
 ├── core/                          # Foundation utilities (ALWAYS use these)
-│   ├── json_handler.py           # safe_update() - atomic JSON merging
+│   ├── json_handler.py           # safe_update() - thread-safe atomic JSON merging
 │   ├── file_utils.py             # find_organized_folders(), get_stem_files()
 │   ├── text_utils.py             # normalize_music_flamingo_text() for T5 compatibility
 │   ├── file_locks.py             # FileLock for concurrent processing
@@ -160,8 +164,8 @@ src/
 │   ├── file_organizer.py         # Main file organizer (convert flat -> folders)
 │   ├── organize_files.py         # Alternative file organizer implementation
 │   ├── filename_cleanup.py       # Normalizes filenames for T5 compatibility
-│   ├── demucs_sep.py             # Stem separation (GPU accelerated)
-│   ├── demucs_sep_optimized.py   # Batch-optimized separation (loads model once)
+│   ├── demucs_sep.py             # Stem separation (Standard)
+│   ├── demucs_sep_optimized.py   # ✅ Stem separation (ROCm Optimized + SDPA)
 │   └── loudness.py               # LUFS/LRA measurement (ITU-R BS.1770)
 │
 ├── tools/                        # Interactive & Batch Tools (High-level)
@@ -441,6 +445,30 @@ RDNA4 hardware supports FP8, but transformers library doesn't support FP8 `torch
 2. ✅ **Drumsep Integration**: Alternative drum transcription via stem separation
 3. ❌ **TensorFlow ADTOF**: Incompatible with Keras 3 (weight format not supported)
 4. ✅ **adtof.py Wrapper**: New wrapper using ADTOF-PyTorch in `src/transcription/drums/adtof.py`
+
+### 2026-01-25 Session (Demucs Parallel Processing & Optimizations)
+
+1. ✅ **Parallel Demucs**: Running multiple instances increases GPU utilization from 27% to 100%
+   - 2 workers: 1.69x speedup, 84% efficiency, ~5.4GB VRAM
+   - 4 workers: ~2.5-3x speedup expected, ~10.8GB VRAM
+   - Benchmark script: `benchmark_demucs_parallel.py`
+2. ✅ **File Organizer Improvements**: Track number removal, Various Artists fix, duplicate prevention
+3. ❌ **torch.compile on Demucs**: Does NOT work on ROCm - complex FFT ops cause dtype errors
+4. ✅ **SDPA Attention Patch**: Works well, provides Flash Attention acceleration
+5. ✅ **StaticSegmentModel**: Created in demucs fork but torch.compile still fails
+6. ✅ **Master Pipeline Fix**: Corrected `batch_analyze_beat_grid` → `batch_create_beat_grids`
+
+**Key Finding**: Demucs GPU utilization is limited to ~27% per instance due to segment-wise processing.
+Running multiple parallel instances is the most effective way to maximize GPU throughput.
+
+**Recommended Demucs config for batch processing**:
+```yaml
+demucs:
+  jobs: 4          # Parallel instances (not used within instance on GPU)
+  model: htdemucs
+  shifts: 0        # Fast mode
+  segment: null    # Use model default (7.8s for htdemucs)
+```
 
 ---
 

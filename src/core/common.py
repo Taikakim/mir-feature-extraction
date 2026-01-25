@@ -181,9 +181,10 @@ CHROMA_CONFIG = {
 
 # Demucs configuration
 DEMUCS_CONFIG = {
-    'model': 'htdemucs_ft',          # Demucs HT v4 fine-tuned (4x slower, better quality)
-    'shifts': 1,
-    'filetype': 'flac',
+    'model': 'htdemucs',             # Demucs HT v4 (fast, good quality)
+    'shifts': 0,                     # 0 = fast for MIR, 1+ = better quality
+    'segment': None,                 # Use model default (htdemucs max is 7.8s)
+    'filetype': 'mp3',
     'jobs': 4,                       # Concurrent jobs
 }
 

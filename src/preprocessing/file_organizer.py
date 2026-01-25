@@ -9,6 +9,10 @@ Output: Organized structure with files copied to output directory (preserves ori
 Structure:
     /input/path/filename.flac -> /output/path/filename/full_mix.flac
 
+Features:
+- Automatically fixes "Various Artists" track names using Spotify/MusicBrainz lookup
+- Skips already organized files (full_mix, stems, etc.)
+
 Dependencies:
 - src.core.file_utils
 - src.core.common
@@ -16,6 +20,9 @@ Dependencies:
 Usage:
     # Copy files to output directory (preserves originals - RECOMMENDED)
     python file_organizer.py /path/to/audio/files --output-dir /path/to/organized
+
+    # With metadata lookup for Various Artists tracks
+    python file_organizer.py /path/to/audio/files --output-dir /path/to/organized --fix-various
 
     # Move files in place (DESTRUCTIVE - deletes originals)
     python file_organizer.py /path/to/audio/files --move
@@ -26,8 +33,9 @@ Usage:
 
 import argparse
 import shutil
+import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import logging
 
 import sys
@@ -38,11 +46,94 @@ from core.common import AUDIO_EXTENSIONS, setup_logging
 
 logger = logging.getLogger(__name__)
 
+# Various Artists aliases (case-insensitive)
+VARIOUS_ARTISTS_ALIASES = {
+    'various artists', 'various', 'va', 'v/a', 'v.a.',
+    'compilation', 'unknown artist', 'unknown'
+}
+
+# Module-level Spotify client (initialized once)
+_spotify_client = None
+
+
+def _init_metadata_lookup():
+    """Initialize Spotify client for metadata lookup (called once)."""
+    global _spotify_client
+    if _spotify_client is not None:
+        return _spotify_client
+
+    try:
+        from tools.track_metadata_lookup import init_spotify
+        _spotify_client = init_spotify()
+        if _spotify_client:
+            logger.info("Spotify API initialized for metadata lookup")
+        return _spotify_client
+    except ImportError:
+        logger.warning("track_metadata_lookup not available")
+        return None
+
+
+def _is_various_artists(filename: str) -> bool:
+    """Check if filename contains a 'Various Artists' pattern."""
+    # Remove leading track numbers
+    name = re.sub(r'^\d+\.?\s*', '', filename).strip()
+
+    # Check for patterns like "Various Artists - Track" or "VA - Track"
+    parts = name.split(' - ')
+    if parts:
+        artist_part = parts[0].strip().lower()
+        return artist_part in VARIOUS_ARTISTS_ALIASES
+
+    return False
+
+
+def _lookup_correct_name(filename: str, audio_path: Path = None) -> Optional[str]:
+    """
+    Look up the correct artist/track name for a Various Artists file.
+
+    Returns the corrected folder name, or None if lookup fails.
+    """
+    sp = _init_metadata_lookup()
+    if not sp:
+        return None
+
+    try:
+        from tools.track_metadata_lookup import extract_track_name, lookup_track
+
+        # Extract track name from filename
+        artist, album, track_name = extract_track_name(filename)
+
+        if not track_name:
+            logger.debug(f"Could not extract track name from: {filename}")
+            return None
+
+        logger.info(f"Looking up: {track_name}")
+
+        # Look up metadata
+        result = lookup_track(track_name, artist_hint=None, sp=sp)
+
+        if not result:
+            logger.warning(f"No match found for: {track_name}")
+            return None
+
+        # Build corrected folder name
+        corrected_name = f"{result['artist']} - {result.get('track', track_name)}"
+        # Clean up for filesystem
+        corrected_name = re.sub(r'[<>:"/\\|?*]', '', corrected_name)
+
+        logger.info(f"  Found: {corrected_name}")
+        return corrected_name
+
+    except Exception as e:
+        logger.debug(f"Metadata lookup failed: {e}")
+        return None
+
 
 def organize_file(audio_file: Path,
                   output_dir: Path = None,
                   move: bool = False,
-                  dry_run: bool = False) -> Tuple[bool, str]:
+                  dry_run: bool = False,
+                  fix_various: bool = False) -> Tuple[bool, str]:
     """
     Organize a single audio file into the required folder structure.
 
@@ -51,11 +142,30 @@ def organize_file(audio_file: Path,
         output_dir: Output directory for organized files (None = organize in place)
         move: If True, move files (destructive). If False, copy files (preserves originals)
         dry_run: If True, don't actually copy/move files (just simulate)
+        fix_various: If True, look up correct artist for "Various Artists" tracks
 
     Returns:
         Tuple of (success: bool, message: str)
     """
-    # Check if already organized (only if organizing in place)
+    # Skip files that are already organized (full_mix.*)
+    if audio_file.stem == 'full_mix':
+        return True, f"Already organized (full_mix): {audio_file}"
+
+    # Skip stem files (drums, bass, other, vocals)
+    stem_names = {'drums', 'bass', 'other', 'vocals', 'piano', 'guitar'}
+    if audio_file.stem.lower() in stem_names:
+        return True, f"Skipped stem file: {audio_file}"
+
+    # Skip files that look like crop stems (e.g., TrackName_0_drums)
+    for stem in stem_names:
+        if audio_file.stem.lower().endswith(f'_{stem}'):
+            return True, f"Skipped crop stem file: {audio_file}"
+
+    # Skip files inside already-organized folders (folder contains full_mix.*)
+    if any(audio_file.parent.glob('full_mix.*')):
+        return True, f"Skipped (in organized folder): {audio_file}"
+
+    # Check if already organized (legacy check for in-place)
     if output_dir is None and is_organized(audio_file):
         return True, f"Already organized: {audio_file}"
 
@@ -64,6 +174,21 @@ def organize_file(audio_file: Path,
         # Create structure in output directory
         # Extract folder name from audio file
         folder_name = audio_file.stem  # filename without extension
+
+        # Remove leading track number (e.g., "013 Track", "02. Track", "1 - Track")
+        track_num_match = re.match(r'^(\d{1,3})[\.\s\-_]+', folder_name)
+        if track_num_match:
+            original_name = folder_name
+            folder_name = folder_name[track_num_match.end():].lstrip()
+            logger.debug(f"Removed track number: {original_name} -> {folder_name}")
+
+        # Fix "Various Artists" names if requested
+        if fix_various and _is_various_artists(folder_name):
+            corrected_name = _lookup_correct_name(folder_name, audio_file)
+            if corrected_name:
+                logger.info(f"  Corrected: {folder_name} -> {corrected_name}")
+                folder_name = corrected_name
+
         folder_path = output_dir / folder_name
         full_mix_path = folder_path / f"full_mix{audio_file.suffix}"
     else:
@@ -72,9 +197,13 @@ def organize_file(audio_file: Path,
         folder_path = structure['folder']
         full_mix_path = structure['full_mix']
 
-    # Check if target already exists
+    # Check if target already exists (skip, not fail)
     if full_mix_path.exists():
-        return False, f"Target already exists: {full_mix_path}"
+        return True, f"Already exists at destination: {full_mix_path}"
+
+    # Check if folder already exists with different content (potential conflict)
+    if folder_path.exists() and any(folder_path.glob('full_mix.*')):
+        return True, f"Folder already has full_mix: {folder_path}"
 
     # Determine operation
     operation = "move" if move else "copy"
@@ -107,7 +236,8 @@ def organize_directory(directory: Path,
                         output_dir: Path = None,
                         move: bool = False,
                         dry_run: bool = False,
-                        recursive: bool = True) -> dict:
+                        recursive: bool = True,
+                        fix_various: bool = False) -> dict:
     """
     Organize all audio files in a directory.
 
@@ -117,6 +247,7 @@ def organize_directory(directory: Path,
         move: If True, move files (destructive). If False, copy files (preserves originals)
         dry_run: If True, don't actually copy/move files
         recursive: If True, search subdirectories
+        fix_various: If True, look up correct artist for "Various Artists" tracks
 
     Returns:
         Dictionary with statistics:
@@ -129,7 +260,7 @@ def organize_directory(directory: Path,
     if output_dir:
         logger.info(f"Output directory: {output_dir}")
     logger.info(f"Mode: {'MOVE (destructive)' if move else 'COPY (preserves originals)'}")
-    logger.info(f"Dry run: {dry_run}, Recursive: {recursive}")
+    logger.info(f"Dry run: {dry_run}, Recursive: {recursive}, Fix Various Artists: {fix_various}")
 
     # Find all audio files
     audio_files = find_audio_files(directory, recursive=recursive)
@@ -155,12 +286,16 @@ def organize_directory(directory: Path,
             audio_file,
             output_dir=output_dir,
             move=move,
-            dry_run=dry_run
+            dry_run=dry_run,
+            fix_various=fix_various
         )
 
         if success:
-            if "Already organized" in message:
+            # Check for various skip conditions
+            skip_keywords = ['Already', 'Skipped', 'exists']
+            if any(kw in message for kw in skip_keywords):
                 stats['skipped'] += 1
+                logger.debug(message)
             else:
                 stats['organized'] += 1
         else:
@@ -189,6 +324,9 @@ Examples:
   Copy files to output directory (RECOMMENDED - preserves originals):
     python file_organizer.py /path/to/audio --output-dir /path/to/organized
 
+  Fix "Various Artists" names during organization (RECOMMENDED):
+    python file_organizer.py /path/to/audio --output-dir /path/to/organized --fix-various
+
   Organize in place by copying (preserves originals):
     python file_organizer.py /path/to/audio
 
@@ -196,7 +334,7 @@ Examples:
     python file_organizer.py /path/to/audio --move
 
   Test organization without copying/moving files:
-    python file_organizer.py /path/to/audio --dry-run --output-dir /path/to/organized
+    python file_organizer.py /path/to/audio --dry-run --output-dir /path/to/organized --fix-various
 
   Organize only files in the root directory (not recursive):
     python file_organizer.py /path/to/audio --output-dir /path/to/organized --no-recursive
@@ -234,6 +372,12 @@ Examples:
         '--no-recursive',
         action='store_true',
         help='Do not search subdirectories (only process root level)'
+    )
+
+    parser.add_argument(
+        '--fix-various',
+        action='store_true',
+        help='Look up correct artist for "Various Artists" tracks using Spotify/MusicBrainz'
     )
 
     parser.add_argument(
@@ -289,12 +433,18 @@ Examples:
     else:
         logger.info("COPY MODE - Original files will be preserved")
 
+    # Initialize metadata lookup if fixing Various Artists
+    if args.fix_various:
+        logger.info("FIX VARIOUS ARTISTS - Will look up correct names via Spotify/MusicBrainz")
+        _init_metadata_lookup()
+
     stats = organize_directory(
         directory,
         output_dir=output_dir,
         move=args.move,
         dry_run=args.dry_run,
-        recursive=not args.no_recursive
+        recursive=not args.no_recursive,
+        fix_various=args.fix_various
     )
 
     # Return appropriate exit code

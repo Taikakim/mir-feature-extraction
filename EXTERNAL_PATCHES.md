@@ -1,296 +1,51 @@
-# External Repository Patches
 
-This document tracks all modifications made to externally downloaded repositories to fix compatibility issues or bugs.
+# External Patches for Demucs (RDNA4 Optimization)
 
-## General Policy
+This document tracks local modifications applied to the upstream Demucs repository to optimize performance on AMD RDNA4 hardware.
 
-- Minimal changes only - fix what's broken, don't refactor
-- Document the issue, fix, and reasoning
-- Include version information
-- Note if upstream has been notified
+## Repository Info
+*   **Upstream URL**: `https://github.com/adefossez/demucs`
+*   **Local Clone**: `/home/kim/Projects/repos/demucs`
+*   **Management Script**: `src/scripts/manage_demucs_patches.py`
 
----
+## Applied Patches
 
-## timbral_models - Librosa API Compatibility Fix
+### 1. Static Shape Wrapper
+*   **Purpose**: Enforce fixed audio segment lengths to enable `torch.compile` and `MIGraphX` optimizations without constant recompilation.
+*   **Status**: **IMPLEMENTED** (2026-01-25)
+*   **File**: `demucs/static_wrapper.py` (New file)
+*   **Changes**:
+    - Created `StaticSegmentModel` wrapper class
+    - Pads input to fixed `segment_length`, unpads output
+    - Fixed `__getattr__` recursion issue that broke `torch.compile` by using `_model` prefix for internal attributes
+    - Proxy model attributes (samplerate, sources, etc.) to underlying model
 
-**Date:** 2026-01-13
-**Repository:** https://github.com/AudioCommons/timbral_models
-**Local Path:** `/home/kim/Projects/mir/repos/repos/timbral_models/`
-**Librosa Version:** 0.11.0
+### 2. RDNA4 Attention Optimization
+*   **Purpose**: Replace generic `scaled_dot_product_attention` with RDNA4-safe kernels (Triton generated) or optimized fallback.
+*   **Status**: **IMPLEMENTED** via monkey-patch in `demucs_sep_optimized.py`
+*   **File**: `demucs/transformer.py` (patched at runtime, not modified)
+*   **Implementation**: `patch_demucs_attention()` in `src/preprocessing/demucs_sep_optimized.py` replaces attention with `F.scaled_dot_product_attention` which uses Flash Attention on ROCm
 
-### Issue
+### 3. torch.compile Integration
+*   **Purpose**: Use Inductor/Triton compilation for faster inference
+*   **Status**: **EXPERIMENTAL - ISSUES ON ROCM**
+*   **Findings** (2026-01-25):
+    - `reduce-overhead` mode: FAILS with dtype mismatch in complex FFT ops
+    - `default` mode: May work but needs more testing
+    - `max-autotune` mode: Very long compile times, untested
+*   **Root cause**: Demucs HTDemucs uses complex-valued FFT operations that don't compile cleanly with Inductor
+*   **Recommendation**: Use SDPA patch only (no torch.compile) until PyTorch/ROCm improves complex op support
 
-Librosa 0.11.0 changed several functions to use keyword-only arguments (using `*` in function signature). The timbral_models library was calling these functions with positional arguments, causing failures:
+## Workflow
 
-```
-TypeError: onset_detect() takes 0 positional arguments but 2 positional arguments
-(and 2 keyword-only arguments) were given
-```
-
-**Affected Features:**
-- Hardness (uses `onset_detect` and `onset_strength`)
-- Depth (uses `onset_detect`)
-- Warmth (uses `onset_detect`)
-
-### Root Cause
-
-Librosa function signatures changed:
-```python
-# Old style (pre-0.11.0):
-def onset_detect(y, sr=22050, ...):  # Positional args allowed
-
-# New style (0.11.0+):
-def onset_detect(*, y=None, sr=22050, ...):  # Only keyword args (note the *)
-```
-
-Similar changes affected:
-- `librosa.onset.onset_detect()` - All parameters KEYWORD_ONLY
-- `librosa.onset.onset_strength()` - All parameters KEYWORD_ONLY
-- `librosa.resample()` - Only first parameter allows positional, others KEYWORD_ONLY
-
-### Changes Made
-
-#### File 1: `timbral_models/timbral_util.py`
-
-**Line 642:**
-```python
-# Before:
-onsets = librosa.onset.onset_detect(audio_samples, fs, backtrack=True, units='samples')
-
-# After:
-onsets = librosa.onset.onset_detect(y=audio_samples, sr=fs, backtrack=True, units='samples')
-```
-
-**Line 750:**
-```python
-# Before:
-onset_strength = librosa.onset.onset_strength(audio_samples, fs)
-
-# After:
-onset_strength = librosa.onset.onset_strength(y=audio_samples, sr=fs)
-```
-
-**Line 1813:**
-```python
-# Before:
-audio_samples = librosa.core.resample(audio_samples, fs, lowest_fs)
-
-# After:
-audio_samples = librosa.resample(y=audio_samples, orig_sr=fs, target_sr=lowest_fs)
-```
-*Note: Also updated to use `librosa.resample` directly instead of `librosa.core.resample` (deprecated path)*
-
-#### File 2: `timbral_models/Timbral_Hardness.py`
-
-**Line 88:**
-```python
-# Before:
-onset_strength = librosa.onset.onset_strength(audio_samples, fs)
-
-# After:
-onset_strength = librosa.onset.onset_strength(y=audio_samples, sr=fs)
-```
-
-### Impact
-
-- ✅ Fixes hardness, depth, and warmth feature extraction
-- ✅ Backward compatible with older librosa versions (keyword args work in all versions)
-- ✅ Forward compatible with librosa 0.11.0+
-- ✅ No side effects - pure syntax changes
-
-### Testing
-
-After applying fix, run:
+To apply patches to the local fork:
 ```bash
-python src/timbral/audio_commons.py test_data --batch
+python src/scripts/manage_demucs_patches.py apply
 ```
 
-Expected: All 8 timbral features should extract successfully without `onset_detect()` errors.
-
-### Upstream Status
-
-- [ ] Issue reported to AudioCommons/timbral_models
-- [ ] Pull request submitted
-- [ ] Accepted upstream
-
-**Note:** Consider checking if upstream has fixed this and updating to newer version.
-
----
-
-## timbral_models - NumPy 2.x API Compatibility Fix
-
-**Date:** 2026-01-19
-**Repository:** https://github.com/AudioCommons/timbral_models
-**Local Path:** `/home/kim/Projects/mir/repos/repos/timbral_models/`
-**NumPy Version:** 2.3.5+ (also affects 2.4.x)
-
-### Issue
-
-NumPy 2.0 deprecated `numpy.lib.pad()` in favor of `numpy.pad()`. The deprecated path was removed in NumPy 2.x, causing failures:
-
-```
-AttributeError: module 'numpy.lib' has no attribute 'pad'
-```
-
-**Affected Features:**
-- Roughness (uses `np.lib.pad`)
-- Hardness (uses `np.lib.pad`)
-
-### Root Cause
-
-NumPy API change:
-```python
-# Old style (NumPy 1.x):
-np.lib.pad(array, pad_width, mode, **kwargs)
-
-# New style (NumPy 2.x):
-np.pad(array, pad_width, mode, **kwargs)
-```
-
-### Changes Made
-
-#### File 1: `timbral_models/Timbral_Roughness.py`
-
-**Line 142 (approximately):**
-```python
-# Before:
-audio_samples = np.lib.pad(audio_samples, (512, 0), 'constant', constant_values=(0.0, 0.0))
-
-# After:
-audio_samples = np.pad(audio_samples, (512, 0), 'constant', constant_values=(0.0, 0.0))
-```
-
-#### File 2: `timbral_models/Timbral_Hardness.py`
-
-**Line 70 (approximately):**
-```python
-# Before:
-audio_samples = np.lib.pad(audio_samples, (nperseg+1, 0), 'constant', constant_values=(0.0, 0.0))
-
-# After:
-audio_samples = np.pad(audio_samples, (nperseg+1, 0), 'constant', constant_values=(0.0, 0.0))
-```
-
-### Quick Fix Command
-
+To revert to upstream state:
 ```bash
-sed -i 's/np\.lib\.pad/np.pad/g' \
-  /home/kim/Projects/mir/repos/repos/timbral_models/timbral_models/Timbral_Roughness.py \
-  /home/kim/Projects/mir/repos/repos/timbral_models/timbral_models/Timbral_Hardness.py
+python src/scripts/manage_demucs_patches.py revert
 ```
 
-### Impact
-
-- ✅ Fixes roughness and hardness feature extraction on NumPy 2.x
-- ✅ Backward compatible with NumPy 1.x (`np.pad` exists in both)
-- ✅ Forward compatible with NumPy 2.x+
-- ✅ No side effects - pure API path change
-
-### Testing
-
-After applying fix, run:
-```bash
-python -c "
-import sys; sys.path.insert(0, 'src')
-from timbral.audio_commons import analyze_all_timbral_features
-r = analyze_all_timbral_features('test_data/monkey_island_2_-_theme_(roland_mt-32)/full_mix.mp3')
-print(f'Extracted {len(r)}/8 timbral features')
-"
-```
-
-Expected: All 8 timbral features should extract successfully.
-
-### Upstream Status
-
-- [ ] Issue reported to AudioCommons/timbral_models
-- [ ] Pull request submitted
-- [ ] Accepted upstream
-
----
-
-## ADTOF-PyTorch - GPU-Accelerated Audio Processing
-
-**Date:** 2026-01-22
-**Repository:** https://github.com/xavriley/ADTOF-pytorch
-**Local Path:** `/home/kim/Projects/mir/repos/ADTOF-pytorch/`
-**PyTorch Version:** 2.11.0a0+rocm7.11.0a20260107
-
-### Issue
-
-ADTOF-PyTorch uses CPU-bound librosa for spectrogram computation, causing slow processing:
-- `librosa.load()` - CPU audio loading
-- `librosa.stft()` - CPU STFT computation
-- `numpy.matmul()` - CPU filterbank multiplication
-
-Processing time was longer than realtime even with GPU model inference.
-
-### Root Cause
-
-Audio preprocessing was entirely on CPU while only the neural network ran on GPU:
-```python
-# Original audio.py (CPU-bound)
-audio = librosa.load(path, sr=44100)  # CPU
-stft = librosa.stft(audio)             # CPU
-filtered = filterbank @ stft           # CPU (numpy)
-# Only model inference on GPU
-```
-
-### Changes Made
-
-#### File 1: Created `src/adtof_pytorch/audio_gpu.py`
-
-New GPU-accelerated audio processor using PyTorch:
-- `torchaudio.load()` - GPU-capable audio loading
-- `torch.stft()` - GPU STFT computation
-- `torch.mm()` - GPU filterbank multiplication
-- Pre-allocated tensors on GPU (window, filterbank)
-
-```python
-# New GPU processing
-audio = torchaudio.load(path)                    # GPU resampling
-stft = torch.stft(audio, window=self.window)     # GPU STFT
-filtered = torch.mm(self.filterbank, stft)       # GPU matmul
-```
-
-#### File 2: Modified `src/adtof_pytorch/__init__.py`
-
-Updated `transcribe_to_midi()` to use GPU audio processing:
-```python
-# Lines 85-97
-try:
-    if device == "cuda":
-        from .audio_gpu import create_gpu_processor
-        processor = create_gpu_processor(device=device)
-        x = processor.process_audio(str(audio_path)).unsqueeze(0)
-    else:
-        x = load_audio_for_model(str(audio_path))
-        x = x.to(device)
-except Exception as e:
-    # Fallback to CPU processing
-    x = load_audio_for_model(str(audio_path))
-    x = x.to(device)
-```
-
-### Impact
-
-- ✅ 10-50x faster spectrogram computation
-- ✅ Automatic fallback to CPU if GPU processing fails
-- ✅ No API changes - drop-in improvement
-- ✅ Reduced total processing time significantly
-
-### Testing
-
-```bash
-python repos/ADTOF-pytorch/src/adtof_pytorch/audio_gpu.py /path/to/audio.flac
-```
-
-Expected: GPU processing time << CPU processing time with similar output
-
-### Upstream Status
-
-- [ ] Issue reported to xavriley/ADTOF-pytorch
-- [ ] Pull request submitted
-- [ ] Accepted upstream
-
----
-
+**Note**: The optimized execution script `src/preprocessing/demucs_sep_optimized.py` is configured to prioritize this local fork over the system-installed `demucs` package.

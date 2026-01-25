@@ -53,7 +53,7 @@ class CropsPipelineConfig:
     """Configuration for the crops processing pipeline."""
     input_dir: Path
     device: str = 'cuda'
-    output_format: str = 'flac'
+    output_format: str = 'mp3'
     overwrite: bool = False
 
     # Skip flags
@@ -64,7 +64,7 @@ class CropsPipelineConfig:
     skip_timbral: bool = False
 
     # Music Flamingo model
-    flamingo_model: str = 'Q6_K'
+    flamingo_model: str = 'Q8_0'
 
 
 @dataclass
@@ -339,9 +339,9 @@ Examples:
 
     parser.add_argument(
         '--format', '-f',
-        default='flac',
-        choices=['flac', 'mp3', 'wav'],
-        help='Output format for stems (default: flac)'
+        default='mp3',
+        choices=['mp3', 'flac', 'wav'],
+        help='Output format for stems (default: mp3 VBR 96kbps)'
     )
 
     parser.add_argument(
@@ -390,9 +390,9 @@ Examples:
 
     parser.add_argument(
         '--flamingo-model',
-        default='Q6_K',
+        default='Q8_0',
         choices=['IQ3_M', 'Q6_K', 'Q8_0'],
-        help='GGUF model for Music Flamingo (default: Q6_K)'
+        help='GGUF model for Music Flamingo (default: Q8_0)'
     )
 
     parser.add_argument(

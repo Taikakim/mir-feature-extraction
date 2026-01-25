@@ -4,6 +4,12 @@ JSON Handler for MIR Project
 This module provides safe JSON read/write operations for .INFO and .MIR files.
 It ensures that existing data is never accidentally destroyed when adding new features.
 
+Thread Safety:
+- Uses per-file threading.Lock() to prevent race conditions when multiple threads
+  write to the same file simultaneously
+- Safe for use with ThreadPoolExecutor and concurrent processing
+- Uses atomic writes (temp file + rename) for crash safety
+
 Dependencies:
 - None (standard library only)
 
@@ -17,6 +23,8 @@ Functions:
 
 import json
 import os
+import threading
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
@@ -24,6 +32,24 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Thread-safe lock registry: one lock per file path
+# Uses defaultdict so accessing a new path automatically creates a lock
+_file_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+_registry_lock = threading.Lock()  # Protects the _file_locks dict itself
+
+
+def _get_file_lock(file_path: Path) -> threading.Lock:
+    """
+    Get or create a thread lock for a specific file path.
+
+    Thread-safe: uses a registry lock to protect the lock dictionary.
+    """
+    key = str(file_path.resolve())
+    with _registry_lock:
+        if key not in _file_locks:
+            _file_locks[key] = threading.Lock()
+        return _file_locks[key]
 
 
 def read_info(file_path: str | Path) -> Dict[str, Any]:
@@ -62,6 +88,8 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
     """
     Write data to a .INFO file. By default, merges with existing data.
 
+    Thread-safe: uses per-file locking to prevent race conditions.
+
     Args:
         file_path: Path to the .INFO file
         data: Dictionary to write
@@ -76,33 +104,36 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # If merging, read existing data first
-    if merge and file_path.exists():
+    # Thread-safe: acquire per-file lock for the entire read-modify-write cycle
+    file_lock = _get_file_lock(file_path)
+    with file_lock:
+        # If merging, read existing data first
+        if merge and file_path.exists():
+            try:
+                existing_data = read_info(file_path)
+                # Merge: new data overwrites existing keys
+                existing_data.update(data)
+                data = existing_data
+                logger.debug(f"Merged data with existing {file_path}")
+            except Exception as e:
+                logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
+
+        # Write atomically using a temporary file
+        temp_path = file_path.with_suffix('.INFO.tmp')
         try:
-            existing_data = read_info(file_path)
-            # Merge: new data overwrites existing keys
-            existing_data.update(data)
-            data = existing_data
-            logger.debug(f"Merged data with existing {file_path}")
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # Atomic rename
+            temp_path.replace(file_path)
+            logger.info(f"Successfully wrote {len(data)} keys to {file_path}")
+
         except Exception as e:
-            logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
-
-    # Write atomically using a temporary file
-    temp_path = file_path.with_suffix('.INFO.tmp')
-    try:
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-        # Atomic rename
-        temp_path.replace(file_path)
-        logger.info(f"Successfully wrote {len(data)} keys to {file_path}")
-
-    except Exception as e:
-        # Clean up temp file if it exists
-        if temp_path.exists():
-            temp_path.unlink()
-        logger.error(f"Error writing {file_path}: {e}")
-        raise
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                temp_path.unlink()
+            logger.error(f"Error writing {file_path}: {e}")
+            raise
 
 
 def read_mir(file_path: str | Path) -> Dict[str, Any]:
@@ -141,6 +172,8 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
     """
     Write temporal data to a .MIR file. By default, merges with existing data.
 
+    Thread-safe: uses per-file locking to prevent race conditions.
+
     Args:
         file_path: Path to the .MIR file
         data: Dictionary with temporal data to write
@@ -155,33 +188,36 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # If merging, read existing data first
-    if merge and file_path.exists():
+    # Thread-safe: acquire per-file lock for the entire read-modify-write cycle
+    file_lock = _get_file_lock(file_path)
+    with file_lock:
+        # If merging, read existing data first
+        if merge and file_path.exists():
+            try:
+                existing_data = read_mir(file_path)
+                # Merge: new data overwrites existing keys
+                existing_data.update(data)
+                data = existing_data
+                logger.debug(f"Merged temporal data with existing {file_path}")
+            except Exception as e:
+                logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
+
+        # Write atomically using a temporary file
+        temp_path = file_path.with_suffix('.MIR.tmp')
         try:
-            existing_data = read_mir(file_path)
-            # Merge: new data overwrites existing keys
-            existing_data.update(data)
-            data = existing_data
-            logger.debug(f"Merged temporal data with existing {file_path}")
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # Atomic rename
+            temp_path.replace(file_path)
+            logger.info(f"Successfully wrote temporal data to {file_path}")
+
         except Exception as e:
-            logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
-
-    # Write atomically using a temporary file
-    temp_path = file_path.with_suffix('.MIR.tmp')
-    try:
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-        # Atomic rename
-        temp_path.replace(file_path)
-        logger.info(f"Successfully wrote temporal data to {file_path}")
-
-    except Exception as e:
-        # Clean up temp file if it exists
-        if temp_path.exists():
-            temp_path.unlink()
-        logger.error(f"Error writing {file_path}: {e}")
-        raise
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                temp_path.unlink()
+            logger.error(f"Error writing {file_path}: {e}")
+            raise
 
 
 def safe_update(file_path: str | Path, updates: Dict[str, Any], file_type: str = 'INFO') -> None:

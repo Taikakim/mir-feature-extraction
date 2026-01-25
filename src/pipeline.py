@@ -6,12 +6,15 @@ Master orchestrator script that runs all feature extraction steps in sequence.
 Supports --output-dir to organize files to a destination before processing.
 
 Usage:
-    # Process in place
+    # Process organized folders (full_mix.flac structure)
     python src/pipeline.py /path/to/audio --batch
-    
+
+    # Process crop files (TrackName_0.flac structure)
+    python src/pipeline.py /path/to/crops --batch --crops
+
     # Copy to output directory first, then process there
     python src/pipeline.py /path/to/audio --output-dir /path/to/output --batch
-    
+
     # Skip specific modules
     python src/pipeline.py /path/to/audio --batch --skip-demucs --skip-flamingo
 """
@@ -23,14 +26,15 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.common import setup_logging
-from src.core.file_utils import find_organized_folders
+from src.core.file_utils import find_organized_folders, find_crop_files, find_crop_folders, get_crop_stem_files
+from src.core.json_handler import get_crop_info_path, safe_update, read_info
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,8 @@ class PipelineConfig:
     batch: bool = False
     overwrite: bool = False
     verbose: bool = False
-    
+    crops: bool = False  # Process crop files instead of organized folders
+
     # Skip flags
     skip_organize: bool = False
     skip_demucs: bool = False
@@ -56,11 +61,12 @@ class PipelineConfig:
     skip_classification: bool = False
     skip_per_stem: bool = False
     skip_flamingo: bool = False
+    skip_audiobox: bool = False
     skip_midi: bool = False
-    
+
     # Flamingo options
-    flamingo_model: str = "Q6_K"
-    
+    flamingo_model: str = "Q8_0"
+
     @property
     def working_dir(self) -> Path:
         """Directory where processing happens."""
@@ -69,17 +75,19 @@ class PipelineConfig:
 
 class Pipeline:
     """MIR Feature Extraction Pipeline."""
-    
+
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.stats = {
             "steps_completed": 0,
             "steps_failed": 0,
             "steps_skipped": 0,
+            "crops_processed": 0,
+            "crops_failed": 0,
             "total_time": 0.0
         }
-        
-    def run_step(self, name: str, script: str, args: List[str], 
+
+    def run_step(self, name: str, script: str, args: List[str],
                  skip_flag: bool = False) -> bool:
         """Run a single pipeline step."""
         if skip_flag:
@@ -121,9 +129,13 @@ class Pipeline:
             
     def run(self) -> bool:
         """Run the full pipeline."""
+        # Use crops mode if --crops flag is set
+        if self.config.crops:
+            return self.run_crops()
+
         start_time = time.time()
         working_dir = str(self.config.working_dir)
-        
+
         logger.info("=" * 60)
         logger.info("MIR FEATURE EXTRACTION PIPELINE")
         logger.info("=" * 60)
@@ -265,6 +277,211 @@ class Pipeline:
         
         return self.stats["steps_failed"] == 0
         
+    def run_crops(self) -> bool:
+        """Run pipeline in crops mode - process crop files directly."""
+        start_time = time.time()
+        working_dir = self.config.working_dir
+
+        logger.info("=" * 60)
+        logger.info("MIR FEATURE EXTRACTION PIPELINE (CROPS MODE)")
+        logger.info("=" * 60)
+        logger.info(f"Input:  {self.config.input_dir}")
+        logger.info(f"Device: {self.config.device}")
+        logger.info("=" * 60)
+
+        # Find crop files or folders
+        if self.config.batch:
+            crop_folders = find_crop_folders(working_dir)
+            all_crops = []
+            for folder in crop_folders:
+                all_crops.extend(find_crop_files(folder))
+        else:
+            all_crops = find_crop_files(working_dir)
+
+        if not all_crops:
+            logger.warning("No crop files found")
+            return True
+
+        logger.info(f"Found {len(all_crops)} crop files to process")
+
+        # Import feature extraction functions
+        from src.timbral.loudness import analyze_file_loudness
+        from src.spectral.spectral_features import analyze_spectral_features
+        from src.spectral.multiband_rms import analyze_multiband_rms
+        from src.harmonic.chroma import analyze_chroma
+        import librosa
+        import soundfile as sf
+
+        # Optional imports
+        timbral_func = None
+        if not self.config.skip_timbral:
+            try:
+                from src.timbral.audio_commons import analyze_all_timbral_features
+                timbral_func = analyze_all_timbral_features
+            except ImportError:
+                logger.warning("Audio Commons timbral not available")
+
+        essentia_func = None
+        if not self.config.skip_classification:
+            try:
+                from src.classification.essentia_features import analyze_essentia_features
+                essentia_func = analyze_essentia_features
+            except ImportError:
+                logger.warning("Essentia not available")
+
+        audiobox_func = None
+        if not self.config.skip_audiobox:
+            try:
+                from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
+                audiobox_func = analyze_audiobox_aesthetics
+            except ImportError:
+                logger.debug("AudioBox not available")
+
+        flamingo_analyzer = None
+        if not self.config.skip_flamingo:
+            try:
+                from src.classification.music_flamingo import MusicFlamingoGGUF
+                logger.info(f"Loading Music Flamingo ({self.config.flamingo_model})...")
+                flamingo_analyzer = MusicFlamingoGGUF(model=self.config.flamingo_model)
+            except Exception as e:
+                logger.warning(f"Music Flamingo not available: {e}")
+
+        # Process each crop
+        for i, crop_path in enumerate(all_crops, 1):
+            logger.info(f"\n[{i}/{len(all_crops)}] {crop_path.name}")
+
+            try:
+                info_path = get_crop_info_path(crop_path)
+                existing = read_info(info_path) if info_path.exists() else {}
+                results = {}
+
+                # Get stems if available
+                stems = get_crop_stem_files(crop_path)
+
+                # Loudness
+                if not self.config.skip_loudness:
+                    if self.config.overwrite or 'lufs' not in existing:
+                        try:
+                            results.update(analyze_file_loudness(crop_path))
+                            # Analyze stems too
+                            for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                                if stem_name in stems:
+                                    stem_loud = analyze_file_loudness(stems[stem_name])
+                                    results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                                    results[f'lra_{stem_name}'] = stem_loud.get('lra')
+                            logger.info("  ✓ Loudness")
+                        except Exception as e:
+                            logger.warning(f"  Loudness failed: {e}")
+
+                # BPM (if not already in crop .INFO from cropping)
+                if not self.config.skip_rhythm:
+                    if self.config.overwrite or 'bpm' not in existing:
+                        try:
+                            # Use librosa for simple BPM estimation
+                            y, sr = sf.read(str(crop_path))
+                            if y.ndim > 1:
+                                y = y.mean(axis=1)  # Convert to mono
+                            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                            # Handle both scalar and array returns from librosa
+                            bpm_value = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
+                            results['bpm'] = round(bpm_value, 1)
+                            logger.info("  ✓ BPM")
+                        except Exception as e:
+                            logger.warning(f"  BPM failed: {e}")
+
+                # Spectral
+                if not self.config.skip_spectral:
+                    if self.config.overwrite or 'spectral_centroid' not in existing:
+                        try:
+                            results.update(analyze_spectral_features(crop_path))
+                            logger.info("  ✓ Spectral")
+                        except Exception as e:
+                            logger.warning(f"  Spectral failed: {e}")
+
+                    if self.config.overwrite or 'rms_bass' not in existing:
+                        try:
+                            results.update(analyze_multiband_rms(crop_path))
+                            logger.info("  ✓ Multiband RMS")
+                        except Exception as e:
+                            logger.warning(f"  Multiband RMS failed: {e}")
+
+                # Chroma
+                if not self.config.skip_harmonic:
+                    if self.config.overwrite or 'chroma_mean' not in existing:
+                        try:
+                            # Use 'other' stem for melodic content if available
+                            # Pass use_stems=False since we're already providing the specific file
+                            chroma_input = stems.get('other', crop_path)
+                            results.update(analyze_chroma(chroma_input, use_stems=False))
+                            logger.info("  ✓ Chroma")
+                        except Exception as e:
+                            logger.warning(f"  Chroma failed: {e}")
+
+                # Timbral
+                if timbral_func and (self.config.overwrite or 'brightness' not in existing):
+                    try:
+                        results.update(timbral_func(crop_path))
+                        logger.info("  ✓ Timbral")
+                    except Exception as e:
+                        logger.warning(f"  Timbral failed: {e}")
+
+                # Essentia
+                if essentia_func and (self.config.overwrite or 'danceability' not in existing):
+                    try:
+                        results.update(essentia_func(crop_path))
+                        logger.info("  ✓ Essentia")
+                    except Exception as e:
+                        logger.warning(f"  Essentia failed: {e}")
+
+                # AudioBox
+                if audiobox_func and (self.config.overwrite or 'content_enjoyment' not in existing):
+                    try:
+                        results.update(audiobox_func(crop_path))
+                        logger.info("  ✓ AudioBox")
+                    except Exception as e:
+                        logger.warning(f"  AudioBox failed: {e}")
+
+                # Music Flamingo
+                if flamingo_analyzer and (self.config.overwrite or 'music_flamingo_full' not in existing):
+                    try:
+                        for prompt_type in ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']:
+                            key = f'music_flamingo_{prompt_type}'
+                            if self.config.overwrite or key not in existing:
+                                results[key] = flamingo_analyzer.analyze(crop_path, prompt_type=prompt_type)
+                        results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
+                        logger.info("  ✓ Music Flamingo")
+                    except Exception as e:
+                        logger.warning(f"  Music Flamingo failed: {e}")
+
+                # Save results
+                if results:
+                    safe_update(info_path, results)
+                    logger.info(f"  Saved {len(results)} features to {info_path.name}")
+
+                self.stats["crops_processed"] += 1
+
+            except Exception as e:
+                logger.error(f"  Failed: {e}")
+                self.stats["crops_failed"] += 1
+
+        self.stats["total_time"] = time.time() - start_time
+        self._print_crops_summary()
+
+        return self.stats["crops_failed"] == 0
+
+    def _print_crops_summary(self):
+        """Print crops pipeline summary."""
+        print("\n" + "=" * 60)
+        print("CROPS PIPELINE SUMMARY")
+        print("=" * 60)
+        print(f"✅ Processed: {self.stats['crops_processed']}")
+        print(f"❌ Failed:    {self.stats['crops_failed']}")
+        print(f"⏱️  Total Time: {self.stats['total_time']:.1f}s ({self.stats['total_time']/60:.1f} min)")
+        if self.stats['crops_processed'] > 0:
+            rate = self.stats['total_time'] / self.stats['crops_processed']
+            print(f"📊 Rate:      {rate:.2f}s per crop")
+        print("=" * 60)
+
     def _print_summary(self):
         """Print pipeline summary."""
         print("\n" + "=" * 60)
@@ -283,8 +500,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process all files in place
+  # Process organized folders (full_mix.flac structure)
   python src/pipeline.py /path/to/audio --batch
+
+  # Process crop files (TrackName_0.flac structure)
+  python src/pipeline.py /path/to/crops --batch --crops
 
   # Copy to output directory, then process there
   python src/pipeline.py /path/to/audio --output-dir /path/to/output --batch
@@ -296,15 +516,17 @@ Examples:
   python src/pipeline.py /path/to/audio --batch -v
         """
     )
-    
+
     parser.add_argument("input", help="Input directory containing audio files")
     parser.add_argument("--output-dir", "-o", help="Output directory (copies files here first)")
     parser.add_argument("--batch", "-b", action="store_true", help="Batch process all folders")
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"], 
+    parser.add_argument("--crops", "-c", action="store_true",
+                        help="Process crop files (TrackName_0.flac) instead of organized folders")
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"],
                         help="Device for GPU processing (default: cuda)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    
+
     # Skip flags
     parser.add_argument("--skip-organize", action="store_true", help="Skip file organization")
     parser.add_argument("--skip-demucs", action="store_true", help="Skip stem separation")
@@ -316,12 +538,13 @@ Examples:
     parser.add_argument("--skip-classification", action="store_true", help="Skip classification")
     parser.add_argument("--skip-per-stem", action="store_true", help="Skip per-stem analysis")
     parser.add_argument("--skip-flamingo", action="store_true", help="Skip Music Flamingo")
+    parser.add_argument("--skip-audiobox", action="store_true", help="Skip AudioBox aesthetics")
     parser.add_argument("--skip-midi", action="store_true", help="Skip MIDI transcription")
-    
+
     # Flamingo options
-    parser.add_argument("--flamingo-model", default="Q6_K", 
+    parser.add_argument("--flamingo-model", default="Q8_0",
                         choices=["IQ3_M", "Q6_K", "Q8_0"],
-                        help="Music Flamingo GGUF model (default: Q6_K)")
+                        help="Music Flamingo GGUF model (default: Q8_0)")
     
     args = parser.parse_args()
     
@@ -341,6 +564,7 @@ Examples:
         batch=args.batch,
         overwrite=args.overwrite,
         verbose=args.verbose,
+        crops=args.crops,
         skip_organize=args.skip_organize,
         skip_demucs=args.skip_demucs,
         skip_rhythm=args.skip_rhythm,
@@ -351,6 +575,7 @@ Examples:
         skip_classification=args.skip_classification,
         skip_per_stem=args.skip_per_stem,
         skip_flamingo=args.skip_flamingo,
+        skip_audiobox=args.skip_audiobox,
         skip_midi=args.skip_midi,
         flamingo_model=args.flamingo_model
     )
