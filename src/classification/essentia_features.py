@@ -25,7 +25,9 @@ Features extracted:
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
+import os
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -835,12 +837,58 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
     return results
 
 
+# =============================================================================
+# Parallel Processing Worker Function
+# =============================================================================
+
+def _process_folder_essentia(args: Tuple[Path, bool, bool, bool, bool, bool]) -> Tuple[str, str, Optional[str]]:
+    """
+    Worker function for parallel Essentia processing.
+
+    Must be at module level for pickling by ProcessPoolExecutor.
+
+    Args:
+        args: Tuple of (folder_path, save_to_info, include_voice, include_gender, include_gmi, overwrite)
+
+    Returns:
+        Tuple of (folder_name, status, error_message)
+        status is one of: 'success', 'skipped', 'failed'
+    """
+    folder, save_to_info, include_voice, include_gender, include_gmi, overwrite = args
+
+    try:
+        # Check for existing data if not overwriting
+        if not overwrite:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' in stems:
+                info_path = get_info_path(stems['full_mix'])
+                if info_path.exists():
+                    from core.json_handler import read_info
+                    existing = read_info(info_path)
+                    if 'danceability' in existing:
+                        return (folder.name, 'skipped', None)
+
+        # Process the folder
+        analyze_folder_essentia_features(
+            folder,
+            save_to_info=save_to_info,
+            include_voice_analysis=include_voice,
+            include_gender=include_gender,
+            include_gmi=include_gmi
+        )
+        return (folder.name, 'success', None)
+
+    except Exception as e:
+        return (folder.name, 'failed', str(e))
+
+
 def batch_analyze_essentia_features(root_directory: str | Path,
                                     save_to_info: bool = True,
                                     include_voice_analysis: bool = False,
                                     include_gender: bool = False,
                                     include_gmi: bool = False,
-                                    overwrite: bool = False) -> Dict[str, any]:
+                                    overwrite: bool = False,
+                                    workers: int = 0) -> Dict[str, any]:
     """
     Batch analyze Essentia features for all organized folders.
 
@@ -851,12 +899,12 @@ def batch_analyze_essentia_features(root_directory: str | Path,
         include_gender: Whether to analyze vocal gender
         include_gmi: Whether to analyze genre, mood, and instrument
         overwrite: Whether to overwrite existing Essentia data
+        workers: Number of parallel workers (0 = auto based on CPU count, 1 = sequential)
 
     Returns:
         Dictionary with statistics about the batch processing
     """
     from core.file_utils import find_organized_folders
-    from core.json_handler import read_info
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch Essentia features analysis: {root_directory}")
@@ -874,37 +922,73 @@ def batch_analyze_essentia_features(root_directory: str | Path,
 
     logger.info(f"Found {stats['total']} organized folders")
 
-    # Process each folder
-    for i, folder in enumerate(folders, 1):
-        logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+    if stats['total'] == 0:
+        return stats
 
-        # Check for existing data if not overwriting
-        if not overwrite:
-            stems = get_stem_files(folder, include_full_mix=True)
-            if 'full_mix' in stems:
-                info_path = get_info_path(stems['full_mix'])
-                if info_path.exists():
-                    existing = read_info(info_path)
-                    if 'danceability' in existing:
-                        logger.info(f"  Essentia data already exists. Use --overwrite to regenerate.")
+    # Determine number of workers
+    if workers == 0:
+        # Auto: use 75% of CPU cores (Essentia is CPU-bound)
+        workers = max(1, int(os.cpu_count() * 0.75))
+    elif workers < 0:
+        workers = 1
+
+    # Build work arguments
+    work_args = [
+        (folder, save_to_info, include_voice_analysis, include_gender, include_gmi, overwrite)
+        for folder in folders
+    ]
+
+    # Sequential processing if workers == 1
+    if workers == 1:
+        logger.info("Processing sequentially (workers=1)")
+        for i, args in enumerate(work_args, 1):
+            folder_name, status, error = _process_folder_essentia(args)
+            logger.info(f"[{i}/{stats['total']}] {folder_name}: {status}")
+
+            if status == 'success':
+                stats['success'] += 1
+            elif status == 'skipped':
+                stats['skipped'] += 1
+            else:
+                stats['failed'] += 1
+                if error:
+                    stats['errors'].append(f"{folder_name}: {error}")
+    else:
+        # Parallel processing
+        logger.info(f"Processing with {workers} parallel workers")
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(_process_folder_essentia, args): args[0]
+                for args in work_args
+            }
+
+            # Process completed tasks
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                folder = futures[future]
+
+                try:
+                    folder_name, status, error = future.result()
+
+                    if status == 'success':
+                        stats['success'] += 1
+                        logger.info(f"[{completed}/{stats['total']}] {folder_name}: success")
+                    elif status == 'skipped':
                         stats['skipped'] += 1
-                        continue
+                        logger.debug(f"[{completed}/{stats['total']}] {folder_name}: skipped")
+                    else:
+                        stats['failed'] += 1
+                        if error:
+                            stats['errors'].append(f"{folder_name}: {error}")
+                        logger.error(f"[{completed}/{stats['total']}] {folder_name}: failed - {error}")
 
-        try:
-            analyze_folder_essentia_features(
-                folder,
-                save_to_info=save_to_info,
-                include_voice_analysis=include_voice_analysis,
-                include_gender=include_gender,
-                include_gmi=include_gmi
-            )
-            stats['success'] += 1
-
-        except Exception as e:
-            stats['failed'] += 1
-            error_msg = f"{folder.name}: {str(e)}"
-            stats['errors'].append(error_msg)
-            logger.error(f"Failed to process {folder.name}: {e}")
+                except Exception as e:
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{folder.name}: {str(e)}")
+                    logger.error(f"[{completed}/{stats['total']}] {folder.name}: exception - {e}")
 
     # Summary
     logger.info("=" * 60)
@@ -913,6 +997,7 @@ def batch_analyze_essentia_features(root_directory: str | Path,
     logger.info(f"  Successful:     {stats['success']}")
     logger.info(f"  Skipped:        {stats['skipped']}")
     logger.info(f"  Failed:         {stats['failed']}")
+    logger.info(f"  Workers used:   {workers}")
     logger.info("=" * 60)
 
     return stats
@@ -970,6 +1055,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--workers', '-w',
+        type=int,
+        default=0,
+        help='Number of parallel workers (0=auto ~75%% CPU cores, 1=sequential)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -1000,7 +1092,8 @@ if __name__ == "__main__":
                 include_voice_analysis=args.voice,
                 include_gender=args.gender,
                 include_gmi=args.gmi,
-                overwrite=args.overwrite
+                overwrite=args.overwrite,
+                workers=args.workers
             )
 
             if stats['failed'] > 0:
