@@ -703,35 +703,51 @@ class Pipeline:
                 logger.info("  All files already analyzed.")
 
         # =========================================================================
-        # PASS 2: AudioBox
+        # PASS 2: AudioBox (Batched for GPU efficiency)
         # =========================================================================
         if not self.config.skip_audiobox:
             logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
             try:
-                from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
-                
-                # Check which files actually need processing to avoid progress bar spam
+                from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics_batch, get_predictor
+                from src.core.common import ProgressBar
+
+                # Check which files actually need processing
                 to_process = []
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
                     existing = read_info(info_path) if info_path.exists() else {}
                     if self.config.overwrite or 'content_enjoyment' not in existing:
                         to_process.append(crop_path)
-                
+
                 if to_process:
-                    logger.info(f"  Processing {len(to_process)} files...")
-                    for i, crop_path in enumerate(to_process, 1):
+                    # Initialize predictor once
+                    get_predictor()
+
+                    batch_size = 16  # Process 16 files per GPU batch
+                    logger.info(f"  Processing {len(to_process)} files (batch_size={batch_size})...")
+                    progress = ProgressBar(len(to_process), desc="AudioBox")
+
+                    for batch_start in range(0, len(to_process), batch_size):
+                        batch_end = min(batch_start + batch_size, len(to_process))
+                        batch_paths = to_process[batch_start:batch_end]
+
                         try:
-                            results = analyze_audiobox_aesthetics(crop_path)
-                            if results:
-                                safe_update(get_crop_info_path(crop_path), results)
-                            if i % 5 == 0:
-                                logger.info(f"  {i}/{len(to_process)}")
+                            # Process batch
+                            batch_results = analyze_audiobox_aesthetics_batch(batch_paths)
+
+                            # Save results
+                            for crop_path, results in zip(batch_paths, batch_results):
+                                if results:
+                                    safe_update(get_crop_info_path(crop_path), results)
                         except Exception as e:
-                            logger.error(f"  AudioBox failed for {crop_path.name}: {e}")
+                            logger.error(f"  AudioBox batch failed: {e}")
+
+                        logger.info(progress.update(batch_end))
+
+                    logger.info(progress.finish("Complete"))
                 else:
                     logger.info("  All files already analyzed.")
-                    
+
             except ImportError:
                 logger.warning("  AudioBox not available")
 
