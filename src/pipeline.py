@@ -81,10 +81,14 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     """
     Worker function for parallel CPU feature extraction.
     Must be top-level for pickling.
+
+    Args is a tuple of (crop_path, config_dict, existing_keys) where existing_keys
+    is a set of keys already present in the .INFO file.
     """
-    crop_path, config_dict = args
+    crop_path, config_dict, existing_keys = args
     results = {}
-    
+    overwrite = config_dict.get('overwrite', False)
+
     try:
         # Re-import locally for worker process
         from src.timbral.loudness import analyze_file_loudness
@@ -94,7 +98,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         from src.core.file_utils import get_crop_stem_files
         import librosa
         import soundfile as sf
-        
+
         # Optional imports
         timbral_func = None
         if not config_dict.get('skip_timbral'):
@@ -103,54 +107,54 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                 timbral_func = analyze_all_timbral_features
             except ImportError: pass
 
-        # Load existing info to avoid re-computing if not overwrite
-        # Note: We can't easily check existing in worker without re-reading info file, 
-        # so we rely on passed config or check here.
-        # Ideally, main process should filter what needs to be run. 
-        # But for simplicity, we check skip flags here.
-        
         stems = get_crop_stem_files(crop_path)
-        
-        # Loudness
+
+        # Loudness - check if already exists
         if not config_dict.get('skip_loudness'):
-            try:
-                results.update(analyze_file_loudness(crop_path))
-                for stem_name in ['drums', 'bass', 'other', 'vocals']:
-                    if stem_name in stems:
-                        stem_loud = analyze_file_loudness(stems[stem_name])
-                        results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
-            except Exception: pass
+            if overwrite or 'lufs' not in existing_keys:
+                try:
+                    results.update(analyze_file_loudness(crop_path))
+                    for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                        if stem_name in stems:
+                            stem_loud = analyze_file_loudness(stems[stem_name])
+                            results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                except Exception: pass
 
-        # BPM
+        # BPM - check if already exists
         if not config_dict.get('skip_rhythm'):
-            try:
-                y, sr = sf.read(str(crop_path))
-                if y.ndim > 1: y = y.mean(axis=1)
-                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-                # Handle both scalar and array returns from librosa
-                bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
-                results['bpm'] = round(bpm, 1)
-            except Exception: pass
+            if overwrite or 'bpm' not in existing_keys:
+                try:
+                    y, sr = sf.read(str(crop_path))
+                    if y.ndim > 1: y = y.mean(axis=1)
+                    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                    # Handle both scalar and array returns from librosa
+                    bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
+                    results['bpm'] = round(bpm, 1)
+                except Exception: pass
 
-        # Spectral
+        # Spectral - check if already exists
         if not config_dict.get('skip_spectral'):
-            try: results.update(analyze_spectral_features(crop_path))
-            except Exception: pass
-            try: results.update(analyze_multiband_rms(crop_path))
-            except Exception: pass
+            if overwrite or 'spectral_flatness' not in existing_keys:
+                try: results.update(analyze_spectral_features(crop_path))
+                except Exception: pass
+            if overwrite or 'rms_energy_bass' not in existing_keys:
+                try: results.update(analyze_multiband_rms(crop_path))
+                except Exception: pass
 
-        # Chroma
+        # Chroma - check if already exists
         if not config_dict.get('skip_harmonic'):
-            try:
-                chroma_input = stems.get('other', crop_path)
-                results.update(analyze_chroma(chroma_input, use_stems=False))
-            except Exception: pass
+            if overwrite or 'chroma_0' not in existing_keys:
+                try:
+                    chroma_input = stems.get('other', crop_path)
+                    results.update(analyze_chroma(chroma_input, use_stems=False))
+                except Exception: pass
 
-        # Timbral
+        # Timbral - check if already exists
         if timbral_func and not config_dict.get('skip_timbral'):
-            try: results.update(timbral_func(crop_path))
-            except Exception: pass
-            
+            if overwrite or 'brightness' not in existing_keys:
+                try: results.update(timbral_func(crop_path))
+                except Exception: pass
+
         return {'path': crop_path, 'results': results, 'success': True}
 
     except Exception as e:
@@ -650,26 +654,25 @@ class Pipeline:
             tasks = []
             for crop_path in all_crops:
                 # Filter what needs running based on overwrite/existing
-                # Optimization: To avoid pickling too much, we could filter here.
-                # But checking .INFO file existence is fast enough.
                 info_path = get_crop_info_path(crop_path)
                 existing = read_info(info_path) if info_path.exists() else {}
-                
+                existing_keys = set(existing.keys())
+
                 # Check if we really need to run anything for this file
                 needs_run = False
                 if self.config.overwrite:
                     needs_run = True
                 else:
-                    # Rough check: if any main key missing, run it.
-                    # This might re-run some parts, but it's simpler than granular check in worker.
-                    if not self.config.skip_loudness and 'lufs' not in existing: needs_run = True
-                    elif not self.config.skip_rhythm and 'bpm' not in existing: needs_run = True
-                    elif not self.config.skip_spectral and 'spectral_centroid' not in existing: needs_run = True
-                    elif not self.config.skip_harmonic and 'chroma_mean' not in existing: needs_run = True
-                    elif not self.config.skip_timbral and 'brightness' not in existing: needs_run = True
-                
+                    # Check each feature type - run if ANY is missing
+                    if not self.config.skip_loudness and 'lufs' not in existing_keys: needs_run = True
+                    elif not self.config.skip_rhythm and 'bpm' not in existing_keys: needs_run = True
+                    elif not self.config.skip_spectral and 'spectral_flatness' not in existing_keys: needs_run = True
+                    elif not self.config.skip_harmonic and 'chroma_0' not in existing_keys: needs_run = True
+                    elif not self.config.skip_timbral and 'brightness' not in existing_keys: needs_run = True
+
                 if needs_run:
-                    tasks.append((crop_path, worker_config))
+                    # Pass existing_keys to worker so it can skip features that already exist
+                    tasks.append((crop_path, worker_config, existing_keys))
             
             if tasks:
                 logger.info(f"  Processing {len(tasks)} files...")
