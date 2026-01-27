@@ -360,7 +360,8 @@ def analyze_folder_bpm(audio_folder: str | Path,
 
 def batch_analyze_bpm(root_directory: str | Path,
                       create_grid_if_missing: bool = True,
-                      save_to_info: bool = True) -> Dict[str, any]:
+                      save_to_info: bool = True,
+                      overwrite: bool = False) -> Dict[str, any]:
     """
     Batch analyze BPM for all organized folders in a directory tree.
 
@@ -368,11 +369,13 @@ def batch_analyze_bpm(root_directory: str | Path,
         root_directory: Root directory to search
         create_grid_if_missing: Whether to create beat grids if missing
         save_to_info: Whether to save results to .INFO files
+        overwrite: Whether to overwrite existing BPM data
 
     Returns:
         Dictionary with statistics about the batch processing
     """
     from core.file_utils import find_organized_folders
+    from core.json_handler import read_info
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch BPM analysis: {root_directory}")
@@ -383,6 +386,7 @@ def batch_analyze_bpm(root_directory: str | Path,
     stats = {
         'total': len(folders),
         'success': 0,
+        'skipped': 0,
         'failed': 0,
         'rhythmic': 0,
         'non_rhythmic': 0,
@@ -394,6 +398,18 @@ def batch_analyze_bpm(root_directory: str | Path,
     # Process each folder
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+
+        # Check for existing data if not overwriting
+        if not overwrite:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' in stems:
+                info_path = get_info_path(stems['full_mix'])
+                if info_path.exists():
+                    existing = read_info(info_path)
+                    if 'bpm' in existing:
+                        logger.info(f"  BPM data already exists. Use --overwrite to regenerate.")
+                        stats['skipped'] += 1
+                        continue
 
         try:
             results = analyze_folder_bpm(
@@ -420,6 +436,7 @@ def batch_analyze_bpm(root_directory: str | Path,
     logger.info("Batch BPM Analysis Summary:")
     logger.info(f"  Total folders:    {stats['total']}")
     logger.info(f"  Successful:       {stats['success']}")
+    logger.info(f"  Skipped:          {stats['skipped']}")
     logger.info(f"  Rhythmic:         {stats['rhythmic']}")
     logger.info(f"  Non-rhythmic:     {stats['non_rhythmic']}")
     logger.info(f"  Failed:           {stats['failed']}")
@@ -462,6 +479,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Overwrite existing BPM data'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -485,7 +508,8 @@ if __name__ == "__main__":
             stats = batch_analyze_bpm(
                 path,
                 create_grid_if_missing=not args.no_create_grid,
-                save_to_info=not args.no_save
+                save_to_info=not args.no_save,
+                overwrite=args.overwrite
             )
 
             if stats['failed'] > 0:

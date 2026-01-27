@@ -109,6 +109,29 @@ features:
   per_stem: true
 
 # =============================================================================
+# PER-FEATURE OVERWRITE CONTROL
+# =============================================================================
+# By default, existing features are NOT overwritten. Set individual keys to true
+# to force regeneration of specific features even if they already exist.
+# These override the global processing.overwrite setting.
+overwrite:
+  demucs: false                  # Overwrite existing stem separations
+  beats: false                   # Overwrite existing beat grids
+  bpm: false                     # Overwrite existing BPM data
+  crops: false                   # Overwrite existing training crops
+  loudness: false                # Overwrite existing loudness data
+  spectral: false                # Overwrite existing spectral features
+  multiband_rms: false           # Overwrite existing multiband RMS data
+  chroma: false                  # Overwrite existing chroma features
+  timbral: false                 # Overwrite existing timbral features
+  essentia: false                # Overwrite existing Essentia classification
+  audiobox: false                # Overwrite existing AudioBox aesthetics
+  per_stem_rhythm: false         # Overwrite existing per-stem rhythm features
+  per_stem_harmonic: false       # Overwrite existing per-stem harmonic features
+  music_flamingo: false          # Overwrite existing AI descriptions
+  metadata: false                # Overwrite existing metadata lookups
+
+# =============================================================================
 # MUSIC FLAMINGO (AI Descriptions)
 # =============================================================================
 music_flamingo:

@@ -234,7 +234,8 @@ def analyze_folder_loudness(audio_folder: str | Path,
 
 def batch_analyze_loudness(root_directory: str | Path,
                             analyze_stems: bool = True,
-                            save_to_info: bool = True) -> Dict[str, Any]:
+                            save_to_info: bool = True,
+                            overwrite: bool = False) -> Dict[str, Any]:
     """
     Batch analyze loudness for all organized folders in a directory tree.
 
@@ -242,11 +243,13 @@ def batch_analyze_loudness(root_directory: str | Path,
         root_directory: Root directory to search
         analyze_stems: Whether to analyze individual stems
         save_to_info: Whether to save results to .INFO files
+        overwrite: Whether to overwrite existing loudness data
 
     Returns:
         Dictionary with statistics about the batch processing
     """
     from core.file_utils import find_organized_folders
+    from core.json_handler import read_info
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch loudness analysis: {root_directory}")
@@ -257,6 +260,7 @@ def batch_analyze_loudness(root_directory: str | Path,
     stats = {
         'total': len(folders),
         'success': 0,
+        'skipped': 0,
         'failed': 0,
         'errors': []
     }
@@ -266,6 +270,20 @@ def batch_analyze_loudness(root_directory: str | Path,
     # Process each folder
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+
+        # Check for existing data
+        if not overwrite:
+            info_path = get_info_path(folder / "full_mix.flac")  # Approximate path
+            # Try to find actual full_mix
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' in stems:
+                info_path = get_info_path(stems['full_mix'])
+                if info_path.exists():
+                    existing = read_info(info_path)
+                    if 'lufs' in existing:
+                        logger.info(f"  Loudness data already exists. Use --overwrite to regenerate.")
+                        stats['skipped'] += 1
+                        continue
 
         try:
             analyze_folder_loudness(folder, analyze_stems=analyze_stems, save_to_info=save_to_info)
@@ -281,6 +299,7 @@ def batch_analyze_loudness(root_directory: str | Path,
     logger.info("Batch Loudness Analysis Summary:")
     logger.info(f"  Total folders: {stats['total']}")
     logger.info(f"  Successful:    {stats['success']}")
+    logger.info(f"  Skipped:       {stats['skipped']}")
     logger.info(f"  Failed:        {stats['failed']}")
     logger.info("=" * 60)
 
@@ -321,6 +340,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Overwrite existing loudness data'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -344,7 +369,8 @@ if __name__ == "__main__":
             stats = batch_analyze_loudness(
                 path,
                 analyze_stems=not args.no_stems,
-                save_to_info=not args.no_save
+                save_to_info=not args.no_save,
+                overwrite=args.overwrite
             )
 
             if stats['failed'] > 0:

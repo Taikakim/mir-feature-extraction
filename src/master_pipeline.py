@@ -395,17 +395,17 @@ def _process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
             return (folder_name, False, str(e))
 
 
-def _process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool]) -> Tuple[str, int, str]:
+def _process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool, bool]) -> Tuple[str, int, str]:
     """
     Worker function for parallel crop creation.
 
     Args:
-        args: Tuple of (folder_path, crops_dir, length_samples, sequential, overlap, div4)
+        args: Tuple of (folder_path, crops_dir, length_samples, sequential, overlap, div4, overwrite)
 
     Returns:
         Tuple of (folder_name, crop_count, message)
     """
-    folder, crops_dir, length_samples, sequential, overlap, div4 = args
+    folder, crops_dir, length_samples, sequential, overlap, div4, overwrite = args
     folder_name = folder.name
 
     # Use file lock to prevent race conditions
@@ -424,6 +424,7 @@ def _process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool]) -> Tup
                 sequential=sequential,
                 overlap=overlap,
                 div4=div4,
+                overwrite=overwrite,
             )
             return (folder_name, count, f"Created {count} crops")
 
@@ -549,12 +550,28 @@ class MasterPipelineConfig:
     cleanup_filenames: bool = True
 
     # Processing
-    overwrite: bool = False
+    overwrite: bool = False  # Global overwrite flag
+    per_feature_overwrite: Dict[str, bool] = field(default_factory=dict)  # Per-feature overwrite flags
     dry_run: bool = False
     verbose: bool = False
     feature_workers: int = 8  # Parallel workers for feature extraction
     batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
     flamingo_prompts: Dict[str, bool] = field(default_factory=dict)  # Enabled prompts
+
+    def should_overwrite(self, feature: str) -> bool:
+        """Check if a specific feature should be overwritten.
+
+        Returns True if either:
+        - Global overwrite is True, OR
+        - Per-feature overwrite for this feature is True
+
+        Args:
+            feature: Feature name (e.g., 'loudness', 'demucs', 'beats', 'crops')
+
+        Returns:
+            True if the feature should be overwritten
+        """
+        return self.overwrite or self.per_feature_overwrite.get(feature, False)
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> 'MasterPipelineConfig':
@@ -634,6 +651,7 @@ class MasterPipelineConfig:
 
             # Processing
             overwrite=processing.get('overwrite', False),
+            per_feature_overwrite=data.get('overwrite', {}),  # Per-feature overwrite from 'overwrite' section
             verbose=processing.get('verbose', False),
             feature_workers=processing.get('feature_workers', 8),
             batch_feature_extraction=processing.get('batch_feature_extraction', True),
@@ -707,6 +725,7 @@ class MasterPipelineConfig:
                 'feature_workers': self.feature_workers,
                 'batch_feature_extraction': self.batch_feature_extraction,
             },
+            'overwrite': self.per_feature_overwrite,  # Per-feature overwrite settings
             'music_flamingo': {
                 'enabled': not self.skip_flamingo,
                 'model': self.flamingo_model,
@@ -889,7 +908,7 @@ class MasterPipeline:
 
             # Check if we already have metadata
             existing = read_info(info_path) if info_path.exists() else {}
-            if 'track_metadata_artist' in existing and not self.config.overwrite:
+            if 'track_metadata_artist' in existing and not self.config.should_overwrite('metadata'):
                 continue
 
             # Extract metadata
@@ -985,7 +1004,7 @@ class MasterPipeline:
             full_mix = full_mix_files[0]
 
             # Check if already done
-            if not self.config.overwrite:
+            if not self.config.should_overwrite('demucs'):
                 ext = '.mp3' if self.config.demucs_format == 'mp3' else '.flac'
                 existing_stems = [f for f in ['drums', 'bass', 'other', 'vocals']
                                   if (folder / f"{f}{ext}").exists()]
@@ -1072,7 +1091,7 @@ class MasterPipeline:
                 source_path = source_stems[stem_name]
                 target_path = folder / source_path.name
 
-                if target_path.exists() and not self.config.overwrite:
+                if target_path.exists() and not self.config.should_overwrite('demucs'):
                     continue
 
                 try:
@@ -1091,7 +1110,7 @@ class MasterPipeline:
         try:
             stats = batch_create_beat_grids(
                 self.working_dir,
-                overwrite=self.config.overwrite,
+                overwrite=self.config.should_overwrite('beats'),
                 workers=self.config.rhythm_workers,
             )
             logger.info(f"Rhythm analysis: {stats.get('success', 0)}/{len(folders)}")
@@ -1330,14 +1349,14 @@ class MasterPipeline:
                 results = {}
 
                 # Loudness
-                if self.config.overwrite or 'lufs' not in existing:
+                if self.config.should_overwrite('loudness') or 'lufs' not in existing:
                     try:
                         results.update(analyze_file_loudness(full_mix))
                     except Exception as e:
                         logger.debug(f"Loudness failed: {e}")
 
                 # Spectral
-                if self.config.overwrite or 'spectral_flatness' not in existing:
+                if self.config.should_overwrite('spectral') or 'spectral_flatness' not in existing:
                     try:
                         results.update(analyze_spectral_features(full_mix))
                     except Exception as e:
@@ -1393,7 +1412,8 @@ class MasterPipeline:
                 sequential = self.config.crop_mode == 'sequential'
                 args_list = [
                     (folder, crops_dir, self.config.crop_length_samples,
-                     sequential, self.config.crop_overlap, self.config.crop_div4)
+                     sequential, self.config.crop_overlap, self.config.crop_div4,
+                     self.config.should_overwrite('crops'))
                     for folder in folders
                 ]
 
@@ -1454,6 +1474,7 @@ class MasterPipeline:
                     sequential=self.config.crop_mode == 'sequential',
                     overlap=self.config.crop_overlap,
                     div4=self.config.crop_div4,
+                    overwrite=self.config.should_overwrite('crops'),
                 )
                 self.stats.crops_created += count
             except Exception as e:
@@ -1565,7 +1586,7 @@ class MasterPipeline:
                 crops_dir,
                 self.config.stems_source,
                 output_format='mp3',
-                overwrite=self.config.overwrite,
+                overwrite=self.config.should_overwrite('crops'),
             )
         except Exception as e:
             logger.error(f"Stem cropping failed: {e}")
@@ -1582,7 +1603,7 @@ class MasterPipeline:
                 device=self.config.device,
                 batch=self.config.batch_feature_extraction,
                 crops=True,
-                overwrite=self.config.overwrite,
+                overwrite=self.config.overwrite,  # Global overwrite passed to sub-pipeline
                 feature_workers=self.config.feature_workers,
                 skip_organize=True,
                 skip_demucs=True,  # Already done

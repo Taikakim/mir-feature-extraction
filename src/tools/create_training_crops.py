@@ -476,7 +476,8 @@ def create_crops_for_file(folder_path: Path,
                           overlap: bool = True,
                           div4: bool = False,
                           sequential: bool = False,
-                          output_dir: Optional[Path] = None) -> int:
+                          output_dir: Optional[Path] = None,
+                          overwrite: bool = False) -> int:
     """
     Generate crops for a single folder.
 
@@ -486,11 +487,27 @@ def create_crops_for_file(folder_path: Path,
         overlap: If True, next crop starts at last_start + length/2
         div4: If True, ensure each crop contains downbeats divisible by 4
         sequential: If True, use simple sequential mode (no beat alignment)
+        output_dir: Optional output directory for crops
+        overwrite: If False, skip folders that already have crops
     """
     stems = get_stem_files(folder_path, include_full_mix=True)
     if 'full_mix' not in stems:
         logger.warning(f"No full_mix in {folder_path.name}")
         return 0
+
+    # Determine crops output directory
+    if output_dir:
+        track_name = folder_path.name
+        crops_dir = output_dir / track_name
+    else:
+        crops_dir = folder_path / "crops"
+
+    # Check if crops already exist (skip if not overwriting)
+    if not overwrite and crops_dir.exists():
+        existing_crops = list(crops_dir.glob("*_[0-9].flac")) + list(crops_dir.glob("*_[0-9][0-9].flac"))
+        if existing_crops:
+            logger.info(f"Crops already exist ({len(existing_crops)} files): {folder_path.name}. Use --overwrite to regenerate.")
+            return 0
 
     full_mix_path = stems['full_mix']
 
@@ -802,8 +819,10 @@ def main():
                         help="Sequential mode: fixed sample length, no beat alignment")
     parser.add_argument("--output-dir", "-o", type=str, default=None,
                         help="Output directory for crops (creates per-track folders)")
-    parser.add_argument("--threads", "-j", type=int, default=1,
-                        help="Number of parallel threads (default: 1)")
+    parser.add_argument("--workers", "-j", type=int, default=1,
+                        help="Number of parallel workers (default: 1)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing crops (default: skip if crops exist)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
@@ -879,15 +898,16 @@ def main():
                 logger.warning(f"Skipping {folder.name} - locked by another process")
                 return 0
             return create_crops_for_file(
-                folder, args.length, args.overlap, args.div4, args.sequential, output_dir
+                folder, args.length, args.overlap, args.div4, args.sequential,
+                output_dir, overwrite=args.overwrite
             )
 
     total_crops = 0
     failed = 0
-    
-    if args.threads > 1:
-        logger.info(f"Using {args.threads} parallel threads")
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+
+    if args.workers > 1:
+        logger.info(f"Using {args.workers} parallel workers")
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
                 executor.submit(process_folder_with_lock, folder): folder 
                 for folder in folders

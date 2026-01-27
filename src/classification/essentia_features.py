@@ -773,7 +773,8 @@ def batch_analyze_essentia_features(root_directory: str | Path,
                                     save_to_info: bool = True,
                                     include_voice_analysis: bool = False,
                                     include_gender: bool = False,
-                                    include_gmi: bool = False) -> Dict[str, any]:
+                                    include_gmi: bool = False,
+                                    overwrite: bool = False) -> Dict[str, any]:
     """
     Batch analyze Essentia features for all organized folders.
 
@@ -783,11 +784,13 @@ def batch_analyze_essentia_features(root_directory: str | Path,
         include_voice_analysis: Whether to analyze voice/instrumental content
         include_gender: Whether to analyze vocal gender
         include_gmi: Whether to analyze genre, mood, and instrument
+        overwrite: Whether to overwrite existing Essentia data
 
     Returns:
         Dictionary with statistics about the batch processing
     """
     from core.file_utils import find_organized_folders
+    from core.json_handler import read_info
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch Essentia features analysis: {root_directory}")
@@ -798,6 +801,7 @@ def batch_analyze_essentia_features(root_directory: str | Path,
     stats = {
         'total': len(folders),
         'success': 0,
+        'skipped': 0,
         'failed': 0,
         'errors': []
     }
@@ -807,6 +811,18 @@ def batch_analyze_essentia_features(root_directory: str | Path,
     # Process each folder
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+
+        # Check for existing data if not overwriting
+        if not overwrite:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' in stems:
+                info_path = get_info_path(stems['full_mix'])
+                if info_path.exists():
+                    existing = read_info(info_path)
+                    if 'danceability' in existing:
+                        logger.info(f"  Essentia data already exists. Use --overwrite to regenerate.")
+                        stats['skipped'] += 1
+                        continue
 
         try:
             analyze_folder_essentia_features(
@@ -829,6 +845,7 @@ def batch_analyze_essentia_features(root_directory: str | Path,
     logger.info("Batch Essentia Features Analysis Summary:")
     logger.info(f"  Total folders:  {stats['total']}")
     logger.info(f"  Successful:     {stats['success']}")
+    logger.info(f"  Skipped:        {stats['skipped']}")
     logger.info(f"  Failed:         {stats['failed']}")
     logger.info("=" * 60)
 
@@ -881,6 +898,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Overwrite existing Essentia data'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -910,7 +933,8 @@ if __name__ == "__main__":
                 save_to_info=not args.no_save,
                 include_voice_analysis=args.voice,
                 include_gender=args.gender,
-                include_gmi=args.gmi
+                include_gmi=args.gmi,
+                overwrite=args.overwrite
             )
 
             if stats['failed'] > 0:
