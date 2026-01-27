@@ -288,6 +288,37 @@ def cleanup_dead_locks(root_directory: Path, timeout: Optional[float] = None) ->
     return removed_count
 
 
+def remove_all_locks(root_directory: Path) -> int:
+    """
+    Remove ALL lock files in a directory tree, regardless of state.
+
+    Use this for recovery after crashes or interrupted processing.
+    WARNING: This will remove locks even if processes are still running.
+
+    Args:
+        root_directory: Directory to scan
+
+    Returns:
+        Number of lock files removed
+    """
+    root_directory = Path(root_directory)
+    removed_count = 0
+
+    lock_files = list(root_directory.rglob('*.lock'))
+
+    for lock_file in lock_files:
+        try:
+            lock_file.unlink()
+            removed_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to remove {lock_file.name}: {e}")
+
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} lock files from {root_directory}")
+
+    return removed_count
+
+
 def is_locked(file_path: Path) -> bool:
     """
     Check if a file is currently locked (without acquiring lock).

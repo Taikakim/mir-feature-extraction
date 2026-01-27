@@ -790,6 +790,12 @@ class MasterPipeline:
             logger.info(f"Stems:  {fmt_filename(str(self.config.stems_source))}")
         logger.info(fmt_header("=" * 70))
 
+        # Clean up any stale lock files from previous interrupted runs
+        from core.file_locks import remove_all_locks
+        locks_removed = remove_all_locks(self.working_dir)
+        if locks_removed > 0:
+            logger.info(f"Cleaned up {locks_removed} stale lock files")
+
         total_start = time.time()
 
         # Stage 1: Organization
@@ -1504,6 +1510,12 @@ class MasterPipeline:
         if not crops_dir.exists():
             logger.warning(f"Crops directory not found: {crops_dir}")
             return
+
+        # Clean up any stale lock files in crops directory
+        from core.file_locks import remove_all_locks
+        locks_removed = remove_all_locks(crops_dir)
+        if locks_removed > 0:
+            logger.info(f"Cleaned up {locks_removed} stale lock files in crops")
 
         crop_folders = find_crop_folders(crops_dir)
         all_crops = []
