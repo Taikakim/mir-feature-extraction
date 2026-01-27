@@ -52,7 +52,7 @@ os.environ.setdefault('MIOPEN_FIND_MODE', '2')
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.common import setup_logging
+from core.common import setup_logging, ProgressBar
 from core.file_utils import find_organized_folders, find_crop_folders, find_crop_files, get_stem_files
 from core.json_handler import safe_update, read_info, get_info_path
 from core.file_locks import FileLock
@@ -1034,6 +1034,7 @@ class MasterPipeline:
 
         success_count = 0
         fail_count = 0
+        progress = ProgressBar(len(tracks_to_process), desc="Demucs")
 
         try:
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -1048,23 +1049,19 @@ class MasterPipeline:
                         folder_name, success, elapsed, message = future.result()
                         if success:
                             success_count += 1
-                            logger.info(f"[{i}/{len(tracks_to_process)}] {fmt_filename(folder_name)}: "
-                                       f"{fmt_success(message)}")
+                            logger.debug(f"{fmt_filename(folder_name)}: {fmt_success(message)}")
                         else:
                             fail_count += 1
-                            logger.warning(f"[{i}/{len(tracks_to_process)}] {fmt_filename(folder_name)}: "
-                                          f"{fmt_error(message)}")
+                            logger.warning(f"{fmt_filename(folder_name)}: {fmt_error(message)}")
                     except Exception as e:
                         fail_count += 1
-                        logger.error(f"[{i}/{len(tracks_to_process)}] {track.parent.name}: {e}")
+                        logger.error(f"{track.parent.name}: {e}")
 
-                    # Progress update
-                    if i % max(1, len(tracks_to_process) // 5) == 0:
-                        logger.info(fmt_progress(f"Progress: {i}/{len(tracks_to_process)} "
-                                                f"({100*i//len(tracks_to_process)}%)"))
+                    # Progress bar update
+                    logger.info(progress.update(i, f"{success_count} ok, {fail_count} failed"))
 
             self.stats.tracks_separated = success_count
-            logger.info(fmt_success(f"Demucs complete: {success_count} success, {fail_count} failed"))
+            logger.info(progress.finish(f"{success_count} success, {fail_count} failed"))
 
         except Exception as e:
             logger.error(f"Demucs batch failed: {e}")
@@ -1300,6 +1297,7 @@ class MasterPipeline:
 
         success_count = 0
         fail_count = 0
+        progress = ProgressBar(len(folders), desc="Features")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit all tasks
@@ -1315,20 +1313,19 @@ class MasterPipeline:
                     folder_name, success, message = future.result()
                     if success:
                         success_count += 1
-                        logger.debug(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                        logger.debug(f"{folder_name}: {message}")
                     else:
                         fail_count += 1
-                        logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                        logger.warning(f"{folder_name}: {message}")
                 except Exception as e:
                     fail_count += 1
-                    logger.error(f"[{i}/{len(folders)}] {folder.name}: {e}")
+                    logger.error(f"{folder.name}: {e}")
 
-                # Progress update every 10%
-                if i % max(1, len(folders) // 10) == 0:
-                    logger.info(f"Progress: {i}/{len(folders)} ({100*i//len(folders)}%)")
+                # Progress bar update
+                logger.info(progress.update(i))
 
         self.stats.tracks_analyzed = success_count
-        logger.info(f"Feature extraction complete: {success_count} success, {fail_count} failed")
+        logger.info(progress.finish(f"{success_count} success, {fail_count} failed"))
 
     def _run_first_stage_features_sequential(self, folders: List[Path]):
         """Sequential fallback for feature extraction."""
@@ -1336,11 +1333,12 @@ class MasterPipeline:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
 
-            for i, folder in enumerate(folders, 1):
-                logger.info(f"[{i}/{len(folders)}] {folder.name}")
+            progress = ProgressBar(len(folders), desc="Features")
 
+            for i, folder in enumerate(folders, 1):
                 stems = get_stem_files(folder, include_full_mix=True)
                 if 'full_mix' not in stems:
+                    logger.info(progress.update(i))
                     continue
 
                 full_mix = stems['full_mix']
@@ -1366,6 +1364,9 @@ class MasterPipeline:
                     safe_update(info_path, results)
 
                 self.stats.tracks_analyzed += 1
+                logger.info(progress.update(i))
+
+            logger.info(progress.finish(f"{self.stats.tracks_analyzed} analyzed"))
 
         except ImportError as e:
             logger.warning(f"First-stage features not available: {e}")
@@ -1420,6 +1421,7 @@ class MasterPipeline:
                 success_count = 0
                 fail_count = 0
                 total_crops = 0
+                progress = ProgressBar(len(folders), desc="Cropping")
 
                 with ProcessPoolExecutor(max_workers=num_workers) as executor:
                     future_to_folder = {
@@ -1434,22 +1436,21 @@ class MasterPipeline:
                             if crop_count > 0:
                                 success_count += 1
                                 total_crops += crop_count
-                                logger.debug(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                                logger.debug(f"{folder_name}: {message}")
                             elif "lock" in message.lower():
-                                logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                                logger.warning(f"{folder_name}: {message}")
                             else:
                                 fail_count += 1
-                                logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                                logger.warning(f"{folder_name}: {message}")
                         except Exception as e:
                             fail_count += 1
-                            logger.error(f"[{i}/{len(folders)}] {folder.name}: {e}")
+                            logger.error(f"{folder.name}: {e}")
 
-                        # Progress update every 10%
-                        if i % max(1, len(folders) // 10) == 0:
-                            logger.info(f"Progress: {i}/{len(folders)} ({100*i//len(folders)}%)")
+                        # Progress bar update
+                        logger.info(progress.update(i, f"{total_crops} crops"))
 
                 self.stats.crops_created = total_crops
-                logger.info(f"Cropping complete: {total_crops} crops from {success_count} tracks, {fail_count} failed")
+                logger.info(progress.finish(f"{total_crops} crops from {success_count} tracks"))
 
         except Exception as e:
             logger.error(f"Cropping failed: {e}")
@@ -1464,8 +1465,10 @@ class MasterPipeline:
         """Sequential fallback for cropping."""
         from tools.create_training_crops import create_crops_for_file
 
+        progress = ProgressBar(len(folders), desc="Cropping")
+        total_crops = 0
+
         for i, folder in enumerate(folders, 1):
-            logger.info(f"[{i}/{len(folders)}] Creating crops: {folder.name}")
             try:
                 count = create_crops_for_file(
                     folder,
@@ -1477,8 +1480,13 @@ class MasterPipeline:
                     overwrite=self.config.should_overwrite('crops'),
                 )
                 self.stats.crops_created += count
+                total_crops += count
             except Exception as e:
-                logger.warning(f"  Failed: {e}")
+                logger.warning(f"{folder.name}: {e}")
+
+            logger.info(progress.update(i, f"{total_crops} crops"))
+
+        logger.info(progress.finish(f"{total_crops} crops created"))
 
     def _run_crop_analysis(self):
         """Stage 4: Analyze all crops."""

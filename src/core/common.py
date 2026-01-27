@@ -197,6 +197,109 @@ SPECTRAL_CONFIG = {
 }
 
 
+class ProgressBar:
+    """
+    Simple progress bar with time estimation for batch processing.
+
+    Usage:
+        progress = ProgressBar(total=100, desc="Processing")
+        for i, item in enumerate(items):
+            process(item)
+            progress.update(i + 1)
+        progress.finish()
+    """
+
+    def __init__(self, total: int, desc: str = "Progress", width: int = 40):
+        """
+        Initialize progress bar.
+
+        Args:
+            total: Total number of items to process
+            desc: Description label for the progress bar
+            width: Width of the bar in characters (default: 40)
+        """
+        import time
+        self.total = total
+        self.desc = desc
+        self.width = width
+        self.start_time = time.time()
+        self.current = 0
+        self._last_print_len = 0
+
+    def update(self, current: int, extra_info: str = "") -> str:
+        """
+        Update progress and return formatted progress string.
+
+        Args:
+            current: Current progress count (1-indexed)
+            extra_info: Optional extra information to display
+
+        Returns:
+            Formatted progress bar string
+        """
+        import time
+        self.current = current
+        elapsed = time.time() - self.start_time
+
+        # Calculate percentage and ETA
+        pct = current / self.total if self.total > 0 else 0
+
+        if current > 0 and pct > 0:
+            eta_seconds = (elapsed / pct) - elapsed
+            eta_str = self._format_time(eta_seconds)
+        else:
+            eta_str = "--:--"
+
+        elapsed_str = self._format_time(elapsed)
+
+        # Build the bar
+        filled = int(self.width * pct)
+        bar = "=" * filled
+        if filled < self.width:
+            bar += ">" if filled > 0 else ""
+            bar = bar.ljust(self.width)
+
+        # Format the line
+        line = f"{self.desc}: [{bar}] {current}/{self.total} ({pct*100:.0f}%) | {elapsed_str}<{eta_str}"
+        if extra_info:
+            line += f" | {extra_info}"
+
+        return line
+
+    def _format_time(self, seconds: float) -> str:
+        """Format seconds as MM:SS or HH:MM:SS."""
+        if seconds < 0:
+            return "--:--"
+
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
+
+    def finish(self, message: str = "Complete") -> str:
+        """
+        Mark progress as complete.
+
+        Args:
+            message: Completion message
+
+        Returns:
+            Final progress bar string
+        """
+        import time
+        elapsed = time.time() - self.start_time
+        elapsed_str = self._format_time(elapsed)
+
+        bar = "=" * self.width
+        line = f"{self.desc}: [{bar}] {self.total}/{self.total} (100%) | {elapsed_str} | {message}"
+
+        return line
+
+
 def setup_logging(level: int = LOG_LEVEL, log_file: str = None) -> None:
     """
     Set up logging configuration for the project.
