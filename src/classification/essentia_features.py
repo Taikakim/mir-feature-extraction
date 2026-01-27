@@ -682,6 +682,72 @@ def format_instrument_for_prompt(instrument_dict: Dict[str, float], max_items: i
     return ", ".join(parts)
 
 
+def analyze_essentia_features(audio_path: str | Path,
+                              include_voice_analysis: bool = False,
+                              include_gender: bool = False,
+                              include_gmi: bool = False) -> Dict[str, Any]:
+    """
+    Analyze Essentia high-level features for a single audio file.
+
+    Args:
+        audio_path: Path to audio file
+        include_voice_analysis: Whether to analyze voice/instrumental content
+        include_gender: Whether to analyze vocal gender
+        include_gmi: Whether to analyze genre, mood, and instrument
+
+    Returns:
+        Dictionary with Essentia features
+    """
+    audio_path = Path(audio_path)
+
+    if not audio_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    logger.info(f"Analyzing Essentia features: {audio_path.name}")
+
+    results = {}
+
+    # Analyze danceability
+    try:
+        danceability = analyze_danceability(audio_path)
+        results['danceability'] = danceability
+    except Exception as e:
+        logger.error(f"Could not analyze danceability: {e}")
+
+    # Analyze atonality
+    try:
+        atonality = analyze_atonality(audio_path)
+        results['atonality'] = atonality
+    except Exception as e:
+        logger.error(f"Could not analyze atonality: {e}")
+
+    # Analyze voice/instrumental if requested
+    if include_voice_analysis:
+        try:
+            voice_results = analyze_voice_instrumental(audio_path)
+            results.update(voice_results)
+
+            # Only analyze gender if voice is detected
+            if include_gender and voice_results.get('voice_probability', 0) > 0.5:
+                try:
+                    gender_results = analyze_vocal_gender(audio_path)
+                    results.update(gender_results)
+                except Exception as e:
+                    logger.warning(f"Could not analyze vocal gender: {e}")
+        except Exception as e:
+            logger.error(f"Could not analyze voice/instrumental: {e}")
+
+    # Analyze genre, mood, and instrument if requested
+    if include_gmi:
+        try:
+            gmi_results = analyze_genre_mood_instrument(audio_path)
+            results.update(gmi_results)
+        except Exception as e:
+            logger.error(f"Could not analyze genre/mood/instrument: {e}")
+
+    return results
+
+
 def analyze_folder_essentia_features(audio_folder: str | Path,
                                      save_to_info: bool = True,
                                      include_voice_analysis: bool = False,
