@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.file_utils import find_audio_files, get_audio_folder_structure, is_organized
 from core.common import AUDIO_EXTENSIONS, setup_logging
+from preprocessing.filename_cleanup import clean_filename
 
 logger = logging.getLogger(__name__)
 
@@ -191,11 +192,16 @@ def organize_file(audio_file: Path,
 
         folder_path = output_dir / folder_name
         full_mix_path = folder_path / f"full_mix{audio_file.suffix}"
+
+        # Also check for cleaned version of the folder name (for resume after filename cleanup)
+        cleaned_folder_name = clean_filename(folder_name)
+        cleaned_folder_path = output_dir / cleaned_folder_name
     else:
         # Use existing logic for in-place organization
         structure = get_audio_folder_structure(audio_file)
         folder_path = structure['folder']
         full_mix_path = structure['full_mix']
+        cleaned_folder_path = None  # Not needed for in-place organization
 
     # Check if target already exists (skip, not fail)
     if full_mix_path.exists():
@@ -204,6 +210,11 @@ def organize_file(audio_file: Path,
     # Check if folder already exists with different content (potential conflict)
     if folder_path.exists() and any(folder_path.glob('full_mix.*')):
         return True, f"Folder already has full_mix: {folder_path}"
+
+    # Check if cleaned version of folder already exists (resume after filename cleanup)
+    if cleaned_folder_path and cleaned_folder_path != folder_path:
+        if cleaned_folder_path.exists() and any(cleaned_folder_path.glob('full_mix.*')):
+            return True, f"Already exists (cleaned name): {cleaned_folder_path}"
 
     # Determine operation
     operation = "move" if move else "copy"

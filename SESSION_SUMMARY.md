@@ -1,42 +1,116 @@
-# Session Summary - 2026-01-23 (Latest Updates)
+# Session Summary - 2026-01-26 (Latest Updates)
 
 ## What We Accomplished
 
-### 1. Training Crop Generation: Major Upgrades ✅
+### 1. Major Pipeline Improvements
 
-**Goal:** Transform `create_training_crops.py` into a high-performance, production-ready tool.
+**Parallel Processing:**
+- Feature extraction now uses `ProcessPoolExecutor` with 8 workers (configurable)
+- Cropping now uses `ProcessPoolExecutor` with 6 workers (configurable)
+- Rhythm/beat detection now uses `ProcessPoolExecutor` with 4 workers (configurable)
+- Demucs now uses subprocess-based parallel processing with 2 workers (configurable)
+- All use `FileLock` to prevent race conditions
 
-**Key Features Implemented:**
-- **Parallel Processing:** Integrated `ThreadPoolExecutor` and `FileLock` to process folders concurrently (`--threads` / `-j` argument).
-- **Rhythm File Slicing:** Automatically slices and retimes `.BEATS_GRID`, `.ONSETS`, and `.DOWNBEATS` files to match each crop.
-- **Enhanced Metadata:** Transfers comprehensive source metadata (release year, Spotify features, AI docs) and calculates per-crop `bpm` and `beat_count`.
-- **Smart Alignment:** Improved beat/zero-crossing alignment logic.
+**Bug Fixes:**
+- Fixed duplicate file creation on resume (cleaned filename check)
+- Fixed cropping import error (`process_folder` -> `create_crops_for_file`)
+- Fixed MP3 stem sample rate (96kbps->128kbps, added resampling)
+- Removed unnecessary BPM requirement for beat-aligned cropping
+- Added rhythm file slicing to sequential mode
 
-### 2. Aux File Cleanup & Metadata Consistency ✅
+**New Features:**
+- Audio file metadata extraction (MP3 ID3 tags) via mutagen
+- Infinite loop prevention for cropping
+- Colored terminal output for better readability
+- Batch feature extraction mode (GPU model persistence)
 
-**Problem:** Renamed folders often left behind orphaned auxiliary files (e.g., `01_Track.BEATS_GRID` inside `Track` folder).
+### 2. Configuration Changes
 
-**Solution:**
-- Implemented `normalize_aux_filenames` in `track_metadata_lookup.py`.
-- Strict enforcement: Any file inside `Artist - Track` folder is renamed to match the folder name (e.g. `Artist - Track.BEATS_GRID`).
-- Enhanced `process_folder` to handle canonical renaming more robustly.
+**New CLI Arguments:**
+```bash
+--feature-workers N   # Parallel workers for feature extraction (default: 8)
+--crop-workers N      # Parallel workers for cropping (default: 6)
+--rhythm-workers N    # Parallel workers for rhythm/beat detection (default: 4)
+--demucs-workers N    # Parallel Demucs processes (default: 2, ~5GB VRAM each)
+```
 
-### 3. Documentation Synchronization ✅
+**YAML Config (master_pipeline.yaml):**
+```yaml
+demucs:
+  workers: 2                     # Subprocess-based parallel processing
 
-**Goal:** Ensure all documentation is accurate and easy to use.
+rhythm:
+  workers: 4                     # Parallel beat/downbeat detection
 
-**Updates:**
-- **CLAUDE.md:** Added Spotify API keys and new "Common Tasks".
-- **README.md:** Updated "Create Training Crops" section with parallel processing details.
-- **USER_MANUAL.md:** Expanded "Metadata Enhancement" and "Training Data Preparation" with detailed CLI options and feature descriptions.
+cropping:
+  workers: 6                     # Parallel cropping
+
+processing:
+  feature_workers: 8             # Parallel feature extraction
+
+music_flamingo:
+  model: Q8_0
+  prompts:                       # Select which prompts to generate
+    full: true
+    technical: true
+    genre_mood: true
+    instrumentation: true
+    structure: true
+  max_tokens:                    # Max tokens per prompt type
+    full: 500
+    technical: 500
+    genre_mood: 500
+    instrumentation: 500
+    structure: 500
+```
+
+### 3. Batch Feature Extraction Mode
+
+New "hybrid batch" approach for crop analysis:
+- **Pass 1:** Light CPU features (Loudness, Spectral, Rhythm, Chroma) - one pass per file
+- **Pass 2:** AudioBox Aesthetics - load model once, process all
+- **Pass 3:** Essentia Classification - load model once, process all
+- **Pass 4:** Music Flamingo - load model once, process all
+- **Pass 5:** MIDI Transcription
+
+Controlled by `batch_feature_extraction: true` in config.
+
+### 4. Music Flamingo Config Fixes
+
+- Prompts now respect config settings (was ignoring and running all 5)
+- Token limits per prompt type are now configurable
+- Model selection (IQ3_M, Q6_K, Q8_0) via config
+
+### 5. Metadata Extraction (Stage 1c)
+
+Extracts MP3/FLAC metadata at pipeline start:
+- `track_metadata_artist`
+- `track_metadata_title`
+- `track_metadata_album`
+- `track_metadata_year`
+- `track_metadata_genre`
+
+Optionally renames "Various Artists" folders using extracted metadata.
 
 ## Key Files Modified
-- `src/tools/create_training_crops.py` (Parallelization, Rhythm Slicing)
-- `src/tools/track_metadata_lookup.py` (Aux file cleanup)
-- `README.md`
-- `USER_MANUAL.md`
-- `CLAUDE.md`
 
-## Next Steps
-- Verify the parallel processing on a large dataset.
-- Consider adding a "verification" mode to check if crops were generated correctly.
+- `src/master_pipeline.py` (parallel processing, batch mode, config parsing)
+- `src/pipeline.py` (batch feature extraction, flamingo config)
+- `src/classification/music_flamingo.py` (token limits, prompt filtering)
+- `src/rhythm/beat_grid.py` (parallel processing with workers)
+- `src/tools/create_training_crops.py` (resampling, BPM fix, rhythm slicing)
+- `src/preprocessing/file_organizer.py` (cleaned filename check)
+- `src/preprocessing/demucs_sep.py` (128kbps default)
+- `src/preprocessing/demucs_sep_optimized.py` (128kbps default)
+- `config/master_pipeline.yaml` (all new parallel/flamingo settings)
+- `requirements.txt` (added mutagen)
+
+## Dependencies Added
+```bash
+pip install mutagen  # MP3/FLAC metadata extraction (optional)
+```
+
+## Previous Sessions
+- See `SESSION_SUMMARY_2026-01-26.md` for full details
+- See `SESSION_SUMMARY_2026-01-23.md` for crop generation upgrades
+- See `SESSION_SUMMARY_2026-01-22.md` for earlier work

@@ -125,7 +125,7 @@ def separate_stems(audio_file: str | Path,
                    jobs: int = None,
                    device: str = 'cuda',
                    output_format: str = 'mp3',
-                   mp3_bitrate: int = 96,
+                   mp3_bitrate: int = 128,
                    mp3_preset: int = 5,
                    ogg_quality: float = 0.5,
                    clip_mode: str = 'rescale') -> Dict[str, Path]:
@@ -142,7 +142,7 @@ def separate_stems(audio_file: str | Path,
         jobs: Number of parallel jobs (default: from config)
         device: Device to use ('cuda', 'cpu', 'mps')
         output_format: Output format - 'mp3' (default, VBR ~96kbps), 'flac', 'ogg', 'wav'
-        mp3_bitrate: Bitrate for MP3 output (64-320, default 96 for stems)
+        mp3_bitrate: Bitrate for MP3 output (64-320, default 128 for stems)
         mp3_preset: VBR preset for MP3 (2-7, 5=balanced for stems)
         ogg_quality: Quality for OGG output (0.0-1.0, default 0.5)
         clip_mode: Clipping strategy - 'rescale' or 'clamp'
@@ -535,8 +535,8 @@ Output format examples:
     parser.add_argument(
         '--bitrate',
         type=int,
-        default=96,
-        help='MP3 bitrate in kbps (64-320, default: 96 for stems)'
+        default=128,
+        help='MP3 bitrate in kbps (64-320, default: 128 for stems)'
     )
 
     parser.add_argument(

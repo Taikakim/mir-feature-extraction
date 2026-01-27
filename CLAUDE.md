@@ -461,14 +461,46 @@ RDNA4 hardware supports FP8, but transformers library doesn't support FP8 `torch
 **Key Finding**: Demucs GPU utilization is limited to ~27% per instance due to segment-wise processing.
 Running multiple parallel instances is the most effective way to maximize GPU throughput.
 
-**Recommended Demucs config for batch processing**:
+**Recommended config for batch processing**:
 ```yaml
 demucs:
-  jobs: 4          # Parallel instances (not used within instance on GPU)
+  workers: 2         # Subprocess-based parallel (each ~5GB VRAM)
   model: htdemucs
-  shifts: 0        # Fast mode
-  segment: null    # Use model default (7.8s for htdemucs)
+  shifts: 0          # Fast mode
+  segment: null      # Use model default (7.8s for htdemucs)
+
+rhythm:
+  workers: 4         # Parallel beat/downbeat detection
+
+cropping:
+  workers: 6         # Parallel crop creation
+
+processing:
+  feature_workers: 8 # Parallel feature extraction
+
+music_flamingo:
+  model: Q8_0
+  prompts:
+    full: true
+    technical: true
+    genre_mood: true
+    instrumentation: true
+    structure: true
+  max_tokens:
+    full: 500
+    technical: 500
+    genre_mood: 500
+    instrumentation: 500
+    structure: 500
 ```
+
+### 2026-01-26 Session (Parallel Processing & Config Improvements)
+
+1. **Parallel Rhythm/Beat Detection**: Added `ProcessPoolExecutor` with configurable workers
+2. **Music Flamingo Config**: Token limits and prompt selection now configurable in YAML
+3. **Batch Feature Extraction**: New hybrid batch mode for GPU model persistence
+4. **Demucs Workers**: Changed from unused `jobs` to subprocess-based `workers`
+5. **All Config Updated**: `master_pipeline.yaml` now has all parallel processing settings
 
 ---
 
@@ -499,6 +531,6 @@ demucs:
 
 ---
 
-**Last Updated**: 2026-01-23 (Session: Statistics, BPM improvements, metadata tools)
+**Last Updated**: 2026-01-26 (Session: Parallel processing, Music Flamingo config, batch feature extraction)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
 

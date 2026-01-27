@@ -275,7 +275,7 @@ class DemucsSeparator:
         sources: torch.Tensor,
         output_dir: Path,
         fmt: str,
-        mp3_bitrate: int = 96,
+        mp3_bitrate: int = 128,
         mp3_preset: int = 5,
         ogg_quality: float = 0.5,
         clip_mode: str = 'rescale'
@@ -457,7 +457,7 @@ Examples:
     parser.add_argument('--segment', type=float, default=None,
                         help='Segment length in seconds (higher=better, more VRAM)')
     parser.add_argument('--jobs', type=int, default=None, help='Parallel jobs')
-    parser.add_argument('--mp3-bitrate', type=int, default=96, help='MP3 bitrate (default: 96)')
+    parser.add_argument('--mp3-bitrate', type=int, default=128, help='MP3 bitrate (default: 128)')
     parser.add_argument('--compile', action='store_true',
                         help='Use torch.compile for faster processing (ROCm optimized)')
     parser.add_argument('--compile-mode', type=str, default='reduce-overhead',

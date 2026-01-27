@@ -32,6 +32,7 @@ import logging
 import json
 import numpy as np
 import soundfile as sf
+from scipy import signal
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 import sys
@@ -91,6 +92,35 @@ OPTIONAL_TRANSFERRABLE = [
 STEM_NAMES = ['drums', 'bass', 'other', 'vocals']
 
 
+def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """
+    Resample audio to target sample rate using scipy.
+
+    Args:
+        audio: Audio array of shape (samples,) or (samples, channels)
+        orig_sr: Original sample rate
+        target_sr: Target sample rate
+
+    Returns:
+        Resampled audio array
+    """
+    if orig_sr == target_sr:
+        return audio
+
+    # Calculate resampling ratio
+    ratio = target_sr / orig_sr
+    new_length = int(audio.shape[0] * ratio)
+
+    if audio.ndim == 1:
+        return signal.resample(audio, new_length)
+    else:
+        # Resample each channel
+        resampled = np.zeros((new_length, audio.shape[1]), dtype=audio.dtype)
+        for ch in range(audio.shape[1]):
+            resampled[:, ch] = signal.resample(audio[:, ch], new_length)
+        return resampled
+
+
 def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
                    start_sample: int, end_sample: int, sr: int,
                    fade_len: int) -> Optional[Path]:
@@ -103,7 +133,7 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         stem_name: Name of stem (drums, bass, other, vocals)
         start_sample: Start sample index
         end_sample: End sample index
-        sr: Sample rate
+        sr: Sample rate (target)
         fade_len: Fade length in samples
 
     Returns:
@@ -116,10 +146,10 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         # Load stem audio
         stem_audio, stem_sr = sf.read(str(stem_path))
 
-        # Ensure same sample rate
+        # Resample if needed (e.g., 32kHz MP3 stems to 44.1kHz)
         if stem_sr != sr:
-            logger.warning(f"Sample rate mismatch for {stem_name}: {stem_sr} vs {sr}")
-            return None
+            logger.debug(f"Resampling {stem_name}: {stem_sr} -> {sr} Hz")
+            stem_audio = resample_audio(stem_audio, stem_sr, sr)
 
         # Ensure shape is (samples, channels)
         if stem_audio.ndim == 1:
@@ -405,6 +435,15 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         end_sec = end_sample / sr
         position = start_sec / duration_sec
 
+        # Slice rhythm files (beats, downbeats, onsets)
+        rhythm_suffixes = ['.BEATS_GRID', '.ONSETS', '.DOWNBEATS']
+        for suffix in rhythm_suffixes:
+            candidates = list(folder_path.glob(f"*{suffix}"))
+            if candidates:
+                source_file = candidates[0]
+                dest_file = crop_path.with_suffix(suffix)
+                slice_rhythm_file(source_file, dest_file, start_sec, end_sec)
+
         meta = {
             "position": position,
             "start_time": start_sec,
@@ -478,19 +517,7 @@ def create_crops_for_file(folder_path: Path,
     if sequential:
         return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
 
-    # Beat-aligned mode
-    # Load BPM Info
-    info_path = get_info_path(full_mix_path)
-    info_data = read_info(info_path)
-    bpm = info_data.get('bpm', 0)
-
-    use_beat_logic = True
-    if bpm is None or float(bpm) <= 0:
-        use_beat_logic = False
-        logger.info(f"{folder_path.name}: BPM not defined, using sequential fallback.")
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
-
-    # Load beat grid
+    # Beat-aligned mode - load beat grid (BPM not needed when grids are available)
     beat_times = None
     downbeat_times = None
 
@@ -517,6 +544,18 @@ def create_crops_for_file(folder_path: Path,
     else:
         logger.warning(f"No beat grid for {folder_path.name}, using sequential fallback.")
         return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
+
+    # Get BPM from INFO file or calculate from beat times
+    info_path = get_info_path(full_mix_path)
+    info_data = read_info(info_path)
+    bpm = info_data.get('bpm', 0)
+
+    # If BPM not in INFO, calculate from beat times
+    if not bpm and beat_times is not None and len(beat_times) > 1:
+        ibis = np.diff(beat_times)
+        mean_ibi = np.median(ibis)  # Use median to avoid outliers
+        if mean_ibi > 0:
+            bpm = 60.0 / mean_ibi
 
     # Find start after silence (-72dB threshold)
     start_offset_samples = get_start_offset_above_threshold(audio, threshold_db=-72.0)
@@ -772,6 +811,14 @@ def main():
     setup_logging(level=logging.DEBUG if args.verbose else logging.INFO)
 
     input_path = Path(args.path)
+
+    # Resolve output directory first (needed for filtering)
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else None
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory: {output_dir}")
+
+    # Snapshot folders BEFORE any processing to prevent infinite loops
     folders = []
 
     if input_path.is_file():
@@ -783,25 +830,47 @@ def main():
             logger.info(f"Processing single folder: {input_path}")
             folders = [input_path]
         else:
-            folders = find_organized_folders(input_path)
+            all_folders = find_organized_folders(input_path)
+
+            # Filter out folders that are inside the output directory or look like crop folders
+            for folder in all_folders:
+                folder_resolved = folder.resolve()
+
+                # Skip if folder is inside output_dir
+                if output_dir:
+                    try:
+                        folder_resolved.relative_to(output_dir)
+                        logger.debug(f"Skipping (inside output_dir): {folder.name}")
+                        continue
+                    except ValueError:
+                        pass  # Not inside output_dir, keep it
+
+                # Skip folders that look like crop folders (contain _N.flac files)
+                crop_files = list(folder.glob("*_[0-9].flac")) + list(folder.glob("*_[0-9][0-9].flac"))
+                if crop_files and not any(folder.glob("full_mix.*")):
+                    logger.debug(f"Skipping (looks like crop folder): {folder.name}")
+                    continue
+
+                # Skip "crops" subfolders
+                if folder.name == "crops":
+                    logger.debug(f"Skipping (crops subfolder): {folder}")
+                    continue
+
+                folders.append(folder)
 
     if not folders:
         logger.error(f"No valid organized folders found for: {input_path}")
         return
 
-    logger.info(f"Found {len(folders)} folders to process.")
+    # Freeze the folder list - this snapshot prevents processing newly created folders
+    folders = list(folders)
+    logger.info(f"Found {len(folders)} folders to process (snapshot taken).")
     logger.info(f"Crop length: {args.length} samples")
 
     if args.sequential:
         logger.info("Mode: Sequential (fixed sample length, no beat alignment)")
     else:
         logger.info(f"Mode: Beat-aligned (overlap={args.overlap}, div4={args.div4})")
-
-    # Resolve output directory
-    output_dir = Path(args.output_dir) if args.output_dir else None
-    if output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Output directory: {output_dir}")
 
     def process_folder_with_lock(folder):
         """Process a single folder with file locking."""

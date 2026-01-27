@@ -122,3 +122,4 @@ pillow>=10.0.0
 # - torchcodec (ROCm) - bash install_torchcodec_rocm.sh
 # - audiobox-aesthetics (Meta) - pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
 # - llama.cpp (GGUF inference) - build from source with HIP support (see CLAUDE.md)
+mutagen  # MP3/FLAC metadata extraction (optional)

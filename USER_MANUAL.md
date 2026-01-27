@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.3
-**Last Updated:** 2026-01-22
+**Version:** 1.4
+**Last Updated:** 2026-01-26
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -158,7 +158,7 @@ Once folders are organized and populated with features, you can generate beat-al
 python src/tools/create_training_crops.py my_music/ \
     --output-dir my_crops/ \
     --overlap --div4 \
-    --threads 8
+    --workers 8
 ```
 
 **Resulting Structure:**
@@ -632,11 +632,11 @@ Options:
   --sequential         Simple sequential cuts (no beat alignment)
   --overlap            Overlapping crops (stride = length/2)
   --div4               Ensure crop length beats is divisible by 4 (for loops)
-  --threads N, -j N    Number of parallel threads (default: 1)
+  --workers N, -j N    Number of parallel workers (default: 6)
 ```
 
 **Smart Features:**
-- **Parallel Processing:** Uses `ThreadPoolExecutor` and `FileLock` for safe concurrent processing.
+- **Parallel Processing:** Uses `ProcessPoolExecutor` and `FileLock` for safe concurrent processing.
 - **Rhythm Slicing:** Automatically slices and retimes `.BEATS_GRID`, `.ONSETS`, and `.DOWNBEATS` files for each crop.
 - **Metadata Transfer:** Specific features are transferred from source to crop `.INFO` files.
 - **Per-Crop Rhythm:** Calculates accurate `bpm` and `beat_count` for the specific crop segment.
@@ -1128,6 +1128,6 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Framework Version:** 1.2
+**Framework Version:** 1.4
 **Compatible with:** Stable Audio Tools (Stability AI)
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-01-26

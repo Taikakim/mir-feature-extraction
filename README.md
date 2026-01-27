@@ -210,7 +210,7 @@ python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --seq
 python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap --div4
 
 # Parallel processing (Fastest) - Process 8 folders concurrently
-python src/tools/create_training_crops.py /path/to/audio/ --output-dir /path/to/crops --threads 8
+python src/tools/create_training_crops.py /path/to/audio/ --output-dir /path/to/crops --workers 8
 
 # Save to custom output directory
 python src/tools/create_training_crops.py /path/to/audio/ -o /path/to/output --div4
@@ -501,7 +501,7 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Version:** 1.3
-**Last Updated:** 2026-01-22
+**Version:** 1.4
+**Last Updated:** 2026-01-26
 **Status:** Production Ready (Core + AI Features + Training Crops + MIDI Drums)
-**Features:** 77+ numeric + 496 AI labels + 5 AI descriptions + smart cropping + MIDI drum transcription
+**Features:** 97+ numeric + 496 AI labels + 5 AI descriptions + smart cropping + MIDI drum transcription + parallel processing

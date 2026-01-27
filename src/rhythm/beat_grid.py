@@ -21,6 +21,7 @@ import numpy as np
 import soundfile as sf
 from pathlib import Path
 from typing import List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 
 import sys
@@ -300,9 +301,48 @@ def create_beat_grid(audio_path: str | Path,
     return beat_times, grid_file_path
 
 
+def _process_folder_beats(args: Tuple) -> Tuple[str, str, int, str]:
+    """
+    Worker function for parallel beat grid creation.
+
+    Args:
+        args: Tuple of (folder_path, method, overwrite)
+
+    Returns:
+        Tuple of (folder_name, status, num_beats, error_msg)
+        status: 'success', 'skipped', 'failed'
+    """
+    folder_path, method, overwrite = args
+    folder = Path(folder_path)
+
+    try:
+        # Check if grid already exists
+        grid_file = folder / f"{folder.name}{BEATS_GRID_EXT}"
+
+        if grid_file.exists() and not overwrite:
+            return (folder.name, 'skipped', 0, '')
+
+        # Find full_mix file
+        stems = get_stem_files(folder, include_full_mix=True)
+        if 'full_mix' not in stems:
+            return (folder.name, 'failed', 0, 'No full_mix found')
+
+        beat_times, grid_path = create_beat_grid(
+            stems['full_mix'],
+            save_grid=True,
+            method=method
+        )
+
+        return (folder.name, 'success', len(beat_times), '')
+
+    except Exception as e:
+        return (folder.name, 'failed', 0, str(e))
+
+
 def batch_create_beat_grids(root_directory: str | Path,
                              method: str = 'auto',
-                             overwrite: bool = False) -> dict:
+                             overwrite: bool = False,
+                             workers: int = 4) -> dict:
     """
     Batch create beat grids for all organized folders.
 
@@ -310,6 +350,7 @@ def batch_create_beat_grids(root_directory: str | Path,
         root_directory: Root directory to search
         method: Beat detection method
         overwrite: Whether to overwrite existing grids
+        workers: Number of parallel workers (default: 4)
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -332,39 +373,66 @@ def batch_create_beat_grids(root_directory: str | Path,
 
     logger.info(f"Found {stats['total']} organized folders")
 
-    # Process each folder
-    for i, folder in enumerate(folders, 1):
-        logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+    if workers <= 1:
+        # Sequential processing
+        for i, folder in enumerate(folders, 1):
+            logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
 
-        # Check if grid already exists
-        grid_file = folder / f"{folder.name}{BEATS_GRID_EXT}"
+            # Check if grid already exists
+            grid_file = folder / f"{folder.name}{BEATS_GRID_EXT}"
 
-        if grid_file.exists() and not overwrite:
-            logger.info("Beat grid already exists. Use --overwrite to regenerate.")
-            stats['skipped'] += 1
-            continue
+            if grid_file.exists() and not overwrite:
+                logger.info("Beat grid already exists. Use --overwrite to regenerate.")
+                stats['skipped'] += 1
+                continue
 
-        # Find full_mix file
-        stems = get_stem_files(folder, include_full_mix=True)
-        if 'full_mix' not in stems:
-            logger.warning(f"No full_mix found in {folder.name}")
-            stats['failed'] += 1
-            continue
+            # Find full_mix file
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                logger.warning(f"No full_mix found in {folder.name}")
+                stats['failed'] += 1
+                continue
 
-        try:
-            beat_times, grid_path = create_beat_grid(
-                stems['full_mix'],
-                save_grid=True,
-                method=method
-            )
-            stats['success'] += 1
-            logger.info(f"Created beat grid with {len(beat_times)} beats")
+            try:
+                beat_times, grid_path = create_beat_grid(
+                    stems['full_mix'],
+                    save_grid=True,
+                    method=method
+                )
+                stats['success'] += 1
+                logger.info(f"Created beat grid with {len(beat_times)} beats")
 
-        except Exception as e:
-            stats['failed'] += 1
-            error_msg = f"{folder.name}: {str(e)}"
-            stats['errors'].append(error_msg)
-            logger.error(f"Failed to process {folder.name}: {e}")
+            except Exception as e:
+                stats['failed'] += 1
+                error_msg = f"{folder.name}: {str(e)}"
+                stats['errors'].append(error_msg)
+                logger.error(f"Failed to process {folder.name}: {e}")
+    else:
+        # Parallel processing
+        logger.info(f"Using {workers} parallel workers")
+
+        # Prepare arguments for workers
+        work_args = [(str(folder), method, overwrite) for folder in folders]
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_process_folder_beats, args): args[0]
+                      for args in work_args}
+
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                folder_name, status, num_beats, error_msg = future.result()
+
+                if status == 'success':
+                    stats['success'] += 1
+                    logger.info(f"[{completed}/{stats['total']}] {folder_name}: {num_beats} beats")
+                elif status == 'skipped':
+                    stats['skipped'] += 1
+                    logger.debug(f"[{completed}/{stats['total']}] {folder_name}: skipped (exists)")
+                else:
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{folder_name}: {error_msg}")
+                    logger.error(f"[{completed}/{stats['total']}] {folder_name}: {error_msg}")
 
     # Summary
     logger.info("=" * 60)
@@ -414,6 +482,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--workers', '-j',
+        type=int,
+        default=4,
+        help='Number of parallel workers for batch processing (default: 4)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -437,7 +512,8 @@ if __name__ == "__main__":
             stats = batch_create_beat_grids(
                 path,
                 method=args.method,
-                overwrite=args.overwrite
+                overwrite=args.overwrite,
+                workers=args.workers
             )
 
             if stats['failed'] > 0:

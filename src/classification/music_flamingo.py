@@ -76,13 +76,13 @@ DEFAULT_PROMPTS = {
     'structure': "Describe the arrangement and structure of this track. Include sections, transitions, and how the energy develops.",
 }
 
-# Token limits per prompt type
-TOKEN_LIMITS = {
+# Default token limits per prompt type
+DEFAULT_TOKEN_LIMITS = {
     'full': 500,
-    'technical': 200,
-    'genre_mood': 150,
-    'instrumentation': 100,
-    'structure': 300,
+    'technical': 500,
+    'genre_mood': 500,
+    'instrumentation': 500,
+    'structure': 500,
 }
 
 
@@ -99,6 +99,7 @@ class MusicFlamingoGGUF:
         cli_path: Optional[Path] = None,
         model_dir: Optional[Path] = None,
         gpu_layers: int = 99,
+        token_limits: Optional[Dict[str, int]] = None,
     ):
         """
         Initialize Music Flamingo GGUF.
@@ -108,10 +109,16 @@ class MusicFlamingoGGUF:
             cli_path: Path to llama-mtmd-cli binary
             model_dir: Directory containing GGUF files
             gpu_layers: Layers to offload to GPU (99 = all)
+            token_limits: Custom max tokens per prompt type (overrides defaults)
         """
         self.cli_path = Path(cli_path) if cli_path else DEFAULT_CLI_PATH
         self.model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
         self.gpu_layers = gpu_layers
+
+        # Merge custom token limits with defaults
+        self.token_limits = DEFAULT_TOKEN_LIMITS.copy()
+        if token_limits:
+            self.token_limits.update(token_limits)
 
         # Validate model selection
         if model not in AVAILABLE_MODELS:
@@ -178,7 +185,7 @@ class MusicFlamingoGGUF:
 
         # Get token limit
         if max_new_tokens is None:
-            max_new_tokens = TOKEN_LIMITS.get(prompt_type, 300)
+            max_new_tokens = self.token_limits.get(prompt_type, 300)
 
         logger.info(f"Analyzing: {audio_path.name} [{prompt_type}]")
 
@@ -275,20 +282,27 @@ class MusicFlamingoGGUF:
         # Just call analyze_all_prompts for consistency
         return self.analyze_all_prompts(audio_path)
 
-    def analyze_all_prompts(self, audio_path: str | Path) -> Dict[str, str]:
+    def analyze_all_prompts(self, audio_path: str | Path, prompts: Optional[List[str]] = None) -> Dict[str, str]:
         """
         Run all prompt types and return results keyed for .INFO file.
 
         Args:
             audio_path: Path to audio file
+            prompts: List of prompt types to run (default: all)
 
         Returns:
             Dict with keys matching transformers output:
                 music_flamingo_full, music_flamingo_technical, etc.
         """
         results = {}
+        
+        target_prompts = prompts if prompts else list(DEFAULT_PROMPTS.keys())
 
-        for prompt_type in DEFAULT_PROMPTS.keys():
+        for prompt_type in target_prompts:
+            if prompt_type not in DEFAULT_PROMPTS:
+                logger.warning(f"Unknown prompt type: {prompt_type}")
+                continue
+                
             key = f"music_flamingo_{prompt_type}"
             logger.info(f"Running {prompt_type} analysis...")
             results[key] = self.analyze(audio_path, prompt_type=prompt_type)
@@ -300,6 +314,7 @@ def batch_analyze_music_flamingo_gguf(
     root_directory: str | Path,
     model: str = 'Q8_0',
     overwrite: bool = False,
+    token_limits: Optional[Dict[str, int]] = None,
 ) -> Dict[str, any]:
     """
     Batch analyze with Music Flamingo GGUF.
@@ -312,6 +327,7 @@ def batch_analyze_music_flamingo_gguf(
         root_directory: Root directory with organized folders
         model: Quantization level ('IQ3_M', 'Q6_K', 'Q8_0')
         overwrite: Overwrite existing results
+        token_limits: Custom max tokens per prompt type
 
     Returns:
         Statistics dict
@@ -341,7 +357,7 @@ def batch_analyze_music_flamingo_gguf(
 
     # Initialize analyzer ONCE
     try:
-        analyzer = MusicFlamingoGGUF(model=model)
+        analyzer = MusicFlamingoGGUF(model=model, token_limits=token_limits)
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
         return stats

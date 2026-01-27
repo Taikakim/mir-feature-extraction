@@ -27,11 +27,14 @@ Config file: config/master_pipeline.yaml contains all options with documentation
 import argparse
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import yaml
@@ -50,10 +53,186 @@ os.environ.setdefault('MIOPEN_FIND_MODE', '2')
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.common import setup_logging
-from core.file_utils import find_organized_folders, find_crop_folders, find_crop_files
+from core.file_utils import find_organized_folders, find_crop_folders, find_crop_files, get_stem_files
 from core.json_handler import safe_update, read_info, get_info_path
+from core.file_locks import FileLock
+
+
+# =============================================================================
+# ANSI Color Codes for Terminal Output
+# =============================================================================
+class Colors:
+    """ANSI escape codes for colored terminal output."""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+
+    # Standard colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
+    # Bright/Light colors
+    LIGHT_RED = '\033[91m'
+    LIGHT_GREEN = '\033[92m'
+    LIGHT_YELLOW = '\033[93m'
+    LIGHT_BLUE = '\033[94m'
+    LIGHT_MAGENTA = '\033[95m'
+    LIGHT_CYAN = '\033[96m'
+
+    # Background colors
+    BG_RED = '\033[41m'
+    BG_GREEN = '\033[42m'
+    BG_YELLOW = '\033[43m'
+
+    # Semantic aliases
+    HEADER = LIGHT_GREEN + BOLD
+    FILENAME = YELLOW
+    STAGE = LIGHT_CYAN + BOLD
+    SUCCESS = GREEN
+    WARNING = YELLOW  # Orange not available, yellow is close
+    ERROR = LIGHT_RED
+    NOTIFICATION = LIGHT_YELLOW
+    PROGRESS = CYAN
+    DIM_TEXT = DIM
+
+
+def color(text: str, color_code: str) -> str:
+    """Wrap text with color code and reset."""
+    return f"{color_code}{text}{Colors.RESET}"
+
+
+def fmt_filename(name: str) -> str:
+    """Format a filename with yellow color."""
+    return color(name, Colors.FILENAME)
+
+
+def fmt_header(text: str) -> str:
+    """Format a header with light green bold."""
+    return color(text, Colors.HEADER)
+
+
+def fmt_stage(text: str) -> str:
+    """Format a stage name with cyan bold."""
+    return color(text, Colors.STAGE)
+
+
+def fmt_success(text: str) -> str:
+    """Format success message with green."""
+    return color(text, Colors.SUCCESS)
+
+
+def fmt_warning(text: str) -> str:
+    """Format warning with yellow/orange."""
+    return color(text, Colors.WARNING)
+
+
+def fmt_error(text: str) -> str:
+    """Format error with light red."""
+    return color(text, Colors.ERROR)
+
+
+def fmt_progress(text: str) -> str:
+    """Format progress info with cyan."""
+    return color(text, Colors.PROGRESS)
+
+
+def fmt_notification(text: str) -> str:
+    """Format notification with light yellow."""
+    return color(text, Colors.NOTIFICATION)
+
+
+def fmt_dim(text: str) -> str:
+    """Format text as dimmed."""
+    return color(text, Colors.DIM_TEXT)
+
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter that adds colors based on log level and content."""
+
+    LEVEL_COLORS = {
+        logging.DEBUG: Colors.DIM,
+        logging.INFO: Colors.RESET,
+        logging.WARNING: Colors.YELLOW,
+        logging.ERROR: Colors.LIGHT_RED,
+        logging.CRITICAL: Colors.BG_RED + Colors.WHITE,
+    }
+
+    def format(self, record):
+        # Get base color for log level
+        level_color = self.LEVEL_COLORS.get(record.levelno, Colors.RESET)
+
+        # Format the message
+        msg = record.getMessage()
+
+        # Apply special formatting based on content
+        if record.levelno >= logging.ERROR:
+            msg = f"{Colors.LIGHT_RED}{msg}{Colors.RESET}"
+        elif record.levelno >= logging.WARNING:
+            msg = f"{Colors.YELLOW}{msg}{Colors.RESET}"
+        elif '=====' in msg or '-----' in msg:
+            # Headers/separators
+            msg = f"{Colors.LIGHT_GREEN}{Colors.BOLD}{msg}{Colors.RESET}"
+        elif msg.startswith('[STAGE') or msg.startswith('[1') or msg.startswith('[2'):
+            # Stage markers
+            msg = f"{Colors.LIGHT_CYAN}{Colors.BOLD}{msg}{Colors.RESET}"
+        elif 'Progress:' in msg or '%' in msg:
+            # Progress updates
+            msg = f"{Colors.CYAN}{msg}{Colors.RESET}"
+        elif 'complete' in msg.lower() or 'success' in msg.lower() or 'finished' in msg.lower():
+            # Success messages
+            msg = f"{Colors.GREEN}{msg}{Colors.RESET}"
+        elif 'skip' in msg.lower():
+            # Skipped items
+            msg = f"{Colors.DIM}{msg}{Colors.RESET}"
+
+        # Format timestamp and level
+        timestamp = self.formatTime(record, self.datefmt)
+        level = record.levelname
+
+        if record.levelno >= logging.WARNING:
+            level = f"{level_color}{level}{Colors.RESET}"
+
+        return f"{Colors.DIM}{timestamp}{Colors.RESET} {level}: {msg}"
+
+
+def setup_colored_logging(level=logging.INFO):
+    """Setup logging with colored output for the master pipeline."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(ColoredFormatter(datefmt='%H:%M:%S'))
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Remove existing handlers and add colored one
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
+    root_logger.addHandler(handler)
+
+    # Also configure our module logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(level)
+
+    return logger
+
 
 logger = logging.getLogger(__name__)
+
+# Try to import mutagen for MP3 metadata extraction
+try:
+    import mutagen
+    from mutagen.easyid3 import EasyID3
+    from mutagen.id3 import ID3
+    MUTAGEN_AVAILABLE = True
+except ImportError:
+    MUTAGEN_AVAILABLE = False
+    logger.debug("mutagen not available - MP3 metadata extraction disabled (pip install mutagen)")
 
 # Artists that should trigger metadata lookup for real artist
 VARIOUS_ARTISTS_ALIASES = {
@@ -68,6 +247,246 @@ VARIOUS_ARTISTS_ALIASES = {
     'unknown',
     '',
 }
+
+
+def extract_audio_metadata(audio_path: Path) -> Dict[str, Any]:
+    """
+    Extract metadata from audio file (MP3 ID3 tags, FLAC tags, etc.).
+
+    Args:
+        audio_path: Path to audio file
+
+    Returns:
+        Dictionary with metadata keys:
+        - track_metadata_artist
+        - track_metadata_title
+        - track_metadata_album
+        - track_metadata_year
+        - track_metadata_genre
+    """
+    if not MUTAGEN_AVAILABLE:
+        return {}
+
+    metadata = {}
+
+    try:
+        # Try to load with mutagen (handles MP3, FLAC, OGG, etc.)
+        audio = mutagen.File(audio_path, easy=True)
+
+        if audio is None:
+            return {}
+
+        # Extract common tags
+        if 'artist' in audio:
+            metadata['track_metadata_artist'] = audio['artist'][0]
+        if 'title' in audio:
+            metadata['track_metadata_title'] = audio['title'][0]
+        if 'album' in audio:
+            metadata['track_metadata_album'] = audio['album'][0]
+        if 'date' in audio:
+            # Date can be YYYY or YYYY-MM-DD
+            date_str = audio['date'][0]
+            if date_str:
+                metadata['track_metadata_year'] = int(date_str[:4])
+        if 'genre' in audio:
+            metadata['track_metadata_genre'] = audio['genre'][0]
+
+        # For MP3, also try to get year from TDRC if date wasn't found
+        if 'track_metadata_year' not in metadata and audio_path.suffix.lower() == '.mp3':
+            try:
+                id3 = ID3(audio_path)
+                if 'TDRC' in id3:
+                    year_str = str(id3['TDRC'].text[0])
+                    if year_str:
+                        metadata['track_metadata_year'] = int(year_str[:4])
+                elif 'TYER' in id3:
+                    year_str = str(id3['TYER'].text[0])
+                    if year_str:
+                        metadata['track_metadata_year'] = int(year_str[:4])
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.debug(f"Failed to extract metadata from {audio_path.name}: {e}")
+
+    return metadata
+
+
+def build_folder_name_from_metadata(metadata: Dict[str, Any], original_name: str) -> Optional[str]:
+    """
+    Build a folder name from metadata.
+
+    Format: "Artist - Title" or "Artist - Album - Title"
+
+    Returns None if insufficient metadata.
+    """
+    artist = metadata.get('track_metadata_artist')
+    title = metadata.get('track_metadata_title')
+
+    if not artist or not title:
+        return None
+
+    # Clean up for filesystem
+    def clean(s):
+        return re.sub(r'[<>:"/\\|?*]', '', s).strip()
+
+    artist = clean(artist)
+    title = clean(title)
+
+    if not artist or not title:
+        return None
+
+    return f"{artist} - {title}"
+
+
+def _process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
+    """
+    Worker function for parallel feature extraction.
+
+    Args:
+        args: Tuple of (folder_path, overwrite)
+
+    Returns:
+        Tuple of (folder_name, success, message)
+    """
+    folder, overwrite = args
+    folder_name = folder.name
+
+    # Use file lock to prevent race conditions
+    with FileLock(folder) as lock:
+        if not lock.acquired:
+            return (folder_name, False, "Could not acquire lock")
+
+        try:
+            # Import here to avoid issues with multiprocessing
+            from timbral.loudness import analyze_file_loudness
+            from spectral.spectral_features import analyze_spectral_features
+
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                return (folder_name, False, "No full_mix found")
+
+            full_mix = stems['full_mix']
+            info_path = get_info_path(full_mix)
+            existing = read_info(info_path) if info_path.exists() else {}
+            results = {}
+
+            # Loudness
+            if overwrite or 'lufs' not in existing:
+                try:
+                    results.update(analyze_file_loudness(full_mix))
+                except Exception as e:
+                    pass  # Non-critical
+
+            # Spectral
+            if overwrite or 'spectral_flatness' not in existing:
+                try:
+                    results.update(analyze_spectral_features(full_mix))
+                except Exception as e:
+                    pass  # Non-critical
+
+            if results:
+                safe_update(info_path, results)
+                return (folder_name, True, f"Extracted {len(results)} features")
+            else:
+                return (folder_name, True, "Already complete")
+
+        except Exception as e:
+            return (folder_name, False, str(e))
+
+
+def _process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool]) -> Tuple[str, int, str]:
+    """
+    Worker function for parallel crop creation.
+
+    Args:
+        args: Tuple of (folder_path, crops_dir, length_samples, sequential, overlap, div4)
+
+    Returns:
+        Tuple of (folder_name, crop_count, message)
+    """
+    folder, crops_dir, length_samples, sequential, overlap, div4 = args
+    folder_name = folder.name
+
+    # Use file lock to prevent race conditions
+    with FileLock(folder) as lock:
+        if not lock.acquired:
+            return (folder_name, 0, "Could not acquire lock")
+
+        try:
+            # Import here to avoid issues with multiprocessing
+            from tools.create_training_crops import create_crops_for_file
+
+            count = create_crops_for_file(
+                folder,
+                length_samples=length_samples,
+                output_dir=crops_dir,
+                sequential=sequential,
+                overlap=overlap,
+                div4=div4,
+            )
+            return (folder_name, count, f"Created {count} crops")
+
+        except Exception as e:
+            return (folder_name, 0, str(e))
+
+
+def _process_demucs_subprocess(args: Tuple[Path, Path, str, int, str, int]) -> Tuple[str, bool, float, str]:
+    """
+    Worker function for parallel Demucs separation via subprocess.
+
+    Each subprocess gets its own GPU context, allowing true parallel processing.
+
+    Args:
+        args: Tuple of (audio_path, output_dir, model, shifts, format, bitrate)
+
+    Returns:
+        Tuple of (folder_name, success, elapsed_time, message)
+    """
+    audio_path, output_dir, model, shifts, output_format, bitrate = args
+    folder_name = audio_path.parent.name
+
+    start_time = time.time()
+
+    try:
+        # Build demucs command
+        cmd = [
+            'demucs',
+            '-n', model,
+            '--shifts', str(shifts),
+            '-j', '1',  # Single-threaded within each instance
+            '--out', str(output_dir),
+        ]
+
+        # Add format options
+        if output_format == 'mp3':
+            cmd.extend(['--mp3', '--mp3-bitrate', str(bitrate)])
+        elif output_format == 'flac':
+            cmd.append('--flac')
+
+        cmd.append(str(audio_path))
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout per track
+        )
+
+        elapsed = time.time() - start_time
+
+        if result.returncode == 0:
+            return (folder_name, True, elapsed, f"Done in {elapsed:.1f}s")
+        else:
+            error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+            return (folder_name, False, elapsed, error_msg)
+
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start_time
+        return (folder_name, False, elapsed, "Timeout (>10min)")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return (folder_name, False, elapsed, str(e))
 
 
 @dataclass
@@ -91,8 +510,7 @@ class MasterPipelineConfig:
     demucs_shifts: int = 0  # 0 for MIR analysis (faster), 1+ for hifi
     demucs_segment: Optional[int] = None  # Segment length (None = model default, htdemucs max ~7.8s)
     demucs_format: str = 'mp3'
-    demucs_jobs: int = 4
-    demucs_optimized: bool = True  # Use optimized implementation (model persistence, SDPA)
+    demucs_workers: int = 2  # Parallel workers (subprocess-based, each ~5GB VRAM)
     demucs_compile: bool = False  # Use torch.compile (faster after warmup)
     demucs_compile_mode: str = 'reduce-overhead'  # torch.compile mode for ROCm
 
@@ -102,7 +520,10 @@ class MasterPipelineConfig:
     crop_overlap: bool = False
     crop_div4: bool = False
     crop_include_stems: bool = True
-    crop_threads: int = 1
+    crop_workers: int = 6  # Parallel workers for cropping
+
+    # Rhythm analysis
+    rhythm_workers: int = 4  # Parallel workers for beat/downbeat detection
 
     # Feature settings
     skip_loudness: bool = False
@@ -116,6 +537,7 @@ class MasterPipelineConfig:
     # Music Flamingo
     skip_flamingo: bool = False
     flamingo_model: str = 'Q8_0'
+    flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
 
     # Metadata
     skip_metadata: bool = False
@@ -130,6 +552,9 @@ class MasterPipelineConfig:
     overwrite: bool = False
     dry_run: bool = False
     verbose: bool = False
+    feature_workers: int = 8  # Parallel workers for feature extraction
+    batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
+    flamingo_prompts: Dict[str, bool] = field(default_factory=dict)  # Enabled prompts
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> 'MasterPipelineConfig':
@@ -144,6 +569,7 @@ class MasterPipelineConfig:
         paths = data.get('paths', {})
         stages = data.get('stages', {})
         demucs = data.get('demucs', {})
+        rhythm = data.get('rhythm', {})
         cropping = data.get('cropping', {})
         features = data.get('features', {})
         flamingo = data.get('music_flamingo', {})
@@ -167,8 +593,7 @@ class MasterPipelineConfig:
             demucs_shifts=demucs.get('shifts', 0),
             demucs_segment=demucs.get('segment', 45),
             demucs_format=demucs.get('output_format', 'mp3'),
-            demucs_jobs=demucs.get('jobs', 4),
-            demucs_optimized=demucs.get('optimized', True),
+            demucs_workers=demucs.get('workers', 2),
             demucs_compile=demucs.get('compile', False),
             demucs_compile_mode=demucs.get('compile_mode', 'reduce-overhead'),
             device=demucs.get('device', processing.get('device', 'cuda')),
@@ -179,7 +604,10 @@ class MasterPipelineConfig:
             crop_overlap=cropping.get('overlap', False),
             crop_div4=cropping.get('div4', False),
             crop_include_stems=cropping.get('include_stems', True),
-            crop_threads=cropping.get('threads', 1),
+            crop_workers=cropping.get('workers', 6),
+
+            # Rhythm
+            rhythm_workers=rhythm.get('workers', 4),
 
             # Features
             skip_loudness=not features.get('loudness', True),
@@ -193,6 +621,7 @@ class MasterPipelineConfig:
             # Music Flamingo
             skip_flamingo=not flamingo.get('enabled', True),
             flamingo_model=flamingo.get('model', 'Q8_0'),
+            flamingo_token_limits=flamingo.get('max_tokens', {}),
 
             # Metadata
             skip_metadata=not metadata.get('enabled', True),
@@ -206,6 +635,9 @@ class MasterPipelineConfig:
             # Processing
             overwrite=processing.get('overwrite', False),
             verbose=processing.get('verbose', False),
+            feature_workers=processing.get('feature_workers', 8),
+            batch_feature_extraction=processing.get('batch_feature_extraction', True),
+            flamingo_prompts=flamingo.get('prompts', {}),
         )
 
         return config
@@ -232,11 +664,13 @@ class MasterPipelineConfig:
                 'shifts': self.demucs_shifts,
                 'segment': self.demucs_segment,
                 'output_format': self.demucs_format,
-                'jobs': self.demucs_jobs,
+                'workers': self.demucs_workers,
                 'device': self.device,
-                'optimized': self.demucs_optimized,
                 'compile': self.demucs_compile,
                 'compile_mode': self.demucs_compile_mode,
+            },
+            'rhythm': {
+                'workers': self.rhythm_workers,
             },
             'cropping': {
                 'length_samples': self.crop_length_samples,
@@ -244,7 +678,7 @@ class MasterPipelineConfig:
                 'overlap': self.crop_overlap,
                 'div4': self.crop_div4,
                 'include_stems': self.crop_include_stems,
-                'threads': self.crop_threads,
+                'workers': self.crop_workers,
             },
             'features': {
                 'loudness': not self.skip_loudness,
@@ -258,6 +692,7 @@ class MasterPipelineConfig:
             'music_flamingo': {
                 'enabled': not self.skip_flamingo,
                 'model': self.flamingo_model,
+                'max_tokens': self.flamingo_token_limits,
             },
             'metadata': {
                 'enabled': not self.skip_metadata,
@@ -269,6 +704,14 @@ class MasterPipelineConfig:
                 'device': self.device,
                 'overwrite': self.overwrite,
                 'verbose': self.verbose,
+                'feature_workers': self.feature_workers,
+                'batch_feature_extraction': self.batch_feature_extraction,
+            },
+            'music_flamingo': {
+                'enabled': not self.skip_flamingo,
+                'model': self.flamingo_model,
+                'max_tokens': self.flamingo_token_limits,
+                'prompts': self.flamingo_prompts,
             },
         }
 
@@ -319,14 +762,14 @@ class MasterPipeline:
 
     def run(self) -> PipelineStats:
         """Run the complete pipeline."""
-        logger.info("=" * 70)
-        logger.info("MIR MASTER PIPELINE")
-        logger.info("=" * 70)
-        logger.info(f"Input:  {self.config.input_dir}")
-        logger.info(f"Output: {self.working_dir}")
+        logger.info(fmt_header("=" * 70))
+        logger.info(fmt_header("MIR MASTER PIPELINE"))
+        logger.info(fmt_header("=" * 70))
+        logger.info(f"Input:  {fmt_filename(str(self.config.input_dir))}")
+        logger.info(f"Output: {fmt_filename(str(self.working_dir))}")
         if self.config.stems_source:
-            logger.info(f"Stems:  {self.config.stems_source}")
-        logger.info("=" * 70)
+            logger.info(f"Stems:  {fmt_filename(str(self.config.stems_source))}")
+        logger.info(fmt_header("=" * 70))
 
         total_start = time.time()
 
@@ -334,25 +777,28 @@ class MasterPipeline:
         if not self.config.skip_organize:
             self._run_organization()
         else:
-            logger.info("\n[STAGE 1] Organization: SKIPPED")
+            logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED"))
+
+        # Stage 1c: Extract audio file metadata (MP3 tags, etc.)
+        self._run_metadata_extraction()
 
         # Stage 2: Full Track Analysis
         if not self.config.skip_track_analysis:
             self._run_track_analysis()
         else:
-            logger.info("\n[STAGE 2] Track Analysis: SKIPPED")
+            logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
         # Stage 3: Create Crops
         if not self.config.skip_crops:
             self._run_cropping()
         else:
-            logger.info("\n[STAGE 3] Cropping: SKIPPED")
+            logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED"))
 
         # Stage 4: Crop Analysis
         if not self.config.skip_crop_analysis:
             self._run_crop_analysis()
         else:
-            logger.info("\n[STAGE 4] Crop Analysis: SKIPPED")
+            logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
 
         # Summary
         total_time = time.time() - total_start
@@ -362,9 +808,9 @@ class MasterPipeline:
 
     def _run_organization(self):
         """Stage 1: Organize raw files into project structure."""
-        logger.info("\n" + "=" * 70)
-        logger.info("[STAGE 1] ORGANIZATION")
-        logger.info("=" * 70)
+        logger.info("\n" + fmt_header("=" * 70))
+        logger.info(fmt_stage("[STAGE 1] ORGANIZATION"))
+        logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
 
@@ -416,11 +862,75 @@ class MasterPipeline:
             logger.warning(f"Filename cleanup failed: {e}")
             self.stats.errors.append(f"Filename cleanup: {e}")
 
+    def _run_metadata_extraction(self):
+        """Extract metadata from audio files (MP3 ID3 tags, etc.) and optionally rename."""
+        logger.info("\n[1c] Audio File Metadata Extraction")
+
+        if not MUTAGEN_AVAILABLE:
+            logger.warning("mutagen not installed - skipping metadata extraction (pip install mutagen)")
+            return
+
+        folders = find_organized_folders(self.working_dir)
+
+        if not folders:
+            logger.info("No folders to process")
+            return
+
+        extracted_count = 0
+        renamed_count = 0
+
+        for folder in folders:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                continue
+
+            full_mix = stems['full_mix']
+            info_path = get_info_path(full_mix)
+
+            # Check if we already have metadata
+            existing = read_info(info_path) if info_path.exists() else {}
+            if 'track_metadata_artist' in existing and not self.config.overwrite:
+                continue
+
+            # Extract metadata
+            metadata = extract_audio_metadata(full_mix)
+
+            if not metadata:
+                continue
+
+            extracted_count += 1
+
+            # Save metadata to INFO
+            safe_update(info_path, metadata)
+            logger.debug(f"{folder.name}: Extracted {list(metadata.keys())}")
+
+            # Optionally rename folder based on metadata
+            if self.config.fix_various_artists:
+                # Check if current name is a "Various Artists" type
+                current_artist = folder.name.split(' - ')[0].strip().lower() if ' - ' in folder.name else ''
+
+                if current_artist in VARIOUS_ARTISTS_ALIASES:
+                    new_name = build_folder_name_from_metadata(metadata, folder.name)
+
+                    if new_name and new_name != folder.name:
+                        new_folder = folder.parent / new_name
+
+                        if not new_folder.exists():
+                            try:
+                                # Rename folder
+                                folder.rename(new_folder)
+                                renamed_count += 1
+                                logger.info(f"Renamed: {folder.name} -> {new_name}")
+                            except Exception as e:
+                                logger.warning(f"Failed to rename {folder.name}: {e}")
+
+        logger.info(f"Metadata extraction: {extracted_count} files processed, {renamed_count} renamed")
+
     def _run_track_analysis(self):
         """Stage 2: Analyze full tracks (Demucs, beats, metadata)."""
-        logger.info("\n" + "=" * 70)
-        logger.info("[STAGE 2] FULL TRACK ANALYSIS")
-        logger.info("=" * 70)
+        logger.info("\n" + fmt_header("=" * 70))
+        logger.info(fmt_stage("[STAGE 2] FULL TRACK ANALYSIS"))
+        logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
 
@@ -452,52 +962,91 @@ class MasterPipeline:
         self.stats.time_track_analysis = time.time() - start_time
 
     def _run_demucs_batch(self, folders: List[Path]):
-        """Run Demucs separation on all tracks."""
+        """Run Demucs separation on all tracks (parallel subprocess-based)."""
         # Check if we should use existing stems
         if self.config.stems_source:
-            logger.info(f"Using pre-existing stems from: {self.config.stems_source}")
+            logger.info(f"Using pre-existing stems from: {fmt_filename(str(self.config.stems_source))}")
             self._link_existing_stems(folders)
             return
 
-        compile_info = f", compile={self.config.demucs_compile}" if self.config.demucs_compile else ""
-        impl_name = "optimized" if self.config.demucs_optimized else "subprocess"
-        logger.info(f"Separating stems (model={self.config.demucs_model}, shifts={self.config.demucs_shifts}, "
-                    f"segment={self.config.demucs_segment}, impl={impl_name}{compile_info})...")
+        num_workers = self.config.demucs_workers
+        logger.info(f"Separating stems (model={fmt_notification(self.config.demucs_model)}, "
+                    f"shifts={self.config.demucs_shifts}, workers={fmt_notification(str(num_workers))})")
+
+        # Find all tracks that need processing
+        tracks_to_process = []
+        skipped = 0
+
+        for folder in folders:
+            full_mix_files = list(folder.glob('full_mix.*'))
+            if not full_mix_files:
+                continue
+
+            full_mix = full_mix_files[0]
+
+            # Check if already done
+            if not self.config.overwrite:
+                ext = '.mp3' if self.config.demucs_format == 'mp3' else '.flac'
+                existing_stems = [f for f in ['drums', 'bass', 'other', 'vocals']
+                                  if (folder / f"{f}{ext}").exists()]
+                if len(existing_stems) == 4:
+                    skipped += 1
+                    continue
+
+            tracks_to_process.append(full_mix)
+
+        if skipped > 0:
+            logger.info(fmt_dim(f"Skipping {skipped} tracks (already have stems)"))
+
+        if not tracks_to_process:
+            logger.info("No tracks need stem separation")
+            return
+
+        logger.info(f"Processing {fmt_notification(str(len(tracks_to_process)))} tracks with "
+                    f"{fmt_notification(str(num_workers))} parallel workers...")
+
+        # Prepare arguments - output to parent folder (where full_mix is)
+        bitrate = 128  # Default MP3 bitrate
+        args_list = [
+            (track, track.parent, self.config.demucs_model, self.config.demucs_shifts,
+             self.config.demucs_format, bitrate)
+            for track in tracks_to_process
+        ]
+
+        success_count = 0
+        fail_count = 0
 
         try:
-            if self.config.demucs_optimized:
-                # Use optimized implementation (model persistence, SDPA, optional torch.compile)
-                from preprocessing.demucs_sep_optimized import DemucsSeparator, batch_process
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                future_to_track = {
+                    executor.submit(_process_demucs_subprocess, args): args[0]
+                    for args in args_list
+                }
 
-                separator = DemucsSeparator(
-                    model_name=self.config.demucs_model,
-                    device=self.config.device,
-                    shifts=self.config.demucs_shifts,
-                    segment=self.config.demucs_segment,
-                    jobs=self.config.demucs_jobs,
-                    use_compile=self.config.demucs_compile,
-                    compile_mode=self.config.demucs_compile_mode,
-                )
-                success_count = batch_process(
-                    self.working_dir,
-                    separator,
-                    overwrite=self.config.overwrite,
-                    output_format=self.config.demucs_format,
-                )
-                self.stats.tracks_separated = success_count
-            else:
-                # Use subprocess-based implementation (fallback)
-                from preprocessing.demucs_sep import batch_separate_stems
+                for i, future in enumerate(as_completed(future_to_track), 1):
+                    track = future_to_track[future]
+                    try:
+                        folder_name, success, elapsed, message = future.result()
+                        if success:
+                            success_count += 1
+                            logger.info(f"[{i}/{len(tracks_to_process)}] {fmt_filename(folder_name)}: "
+                                       f"{fmt_success(message)}")
+                        else:
+                            fail_count += 1
+                            logger.warning(f"[{i}/{len(tracks_to_process)}] {fmt_filename(folder_name)}: "
+                                          f"{fmt_error(message)}")
+                    except Exception as e:
+                        fail_count += 1
+                        logger.error(f"[{i}/{len(tracks_to_process)}] {track.parent.name}: {e}")
 
-                stats = batch_separate_stems(
-                    self.working_dir,
-                    model=self.config.demucs_model,
-                    device=self.config.device,
-                    shifts=self.config.demucs_shifts,
-                    segment=self.config.demucs_segment,
-                    overwrite=self.config.overwrite,
-                )
-                self.stats.tracks_separated = stats.get('success', 0)
+                    # Progress update
+                    if i % max(1, len(tracks_to_process) // 5) == 0:
+                        logger.info(fmt_progress(f"Progress: {i}/{len(tracks_to_process)} "
+                                                f"({100*i//len(tracks_to_process)}%)"))
+
+            self.stats.tracks_separated = success_count
+            logger.info(fmt_success(f"Demucs complete: {success_count} success, {fail_count} failed"))
+
         except Exception as e:
             logger.error(f"Demucs batch failed: {e}")
             self.stats.errors.append(f"Demucs: {e}")
@@ -543,6 +1092,7 @@ class MasterPipeline:
             stats = batch_create_beat_grids(
                 self.working_dir,
                 overwrite=self.config.overwrite,
+                workers=self.config.rhythm_workers,
             )
             logger.info(f"Rhythm analysis: {stats.get('success', 0)}/{len(folders)}")
         except Exception as e:
@@ -716,10 +1266,53 @@ class MasterPipeline:
         return None
 
     def _run_first_stage_features(self, folders: List[Path]):
-        """Extract features that will be migrated to crops."""
-        from core.file_utils import get_stem_files
+        """Extract features that will be migrated to crops (parallel processing)."""
+        num_workers = self.config.feature_workers
 
-        # Features: loudness, BPM (already done via rhythm), spectral basics
+        if num_workers <= 1:
+            # Sequential fallback
+            self._run_first_stage_features_sequential(folders)
+            return
+
+        logger.info(f"Processing {len(folders)} folders with {num_workers} workers...")
+
+        # Prepare arguments for worker function
+        args_list = [(folder, self.config.overwrite) for folder in folders]
+
+        success_count = 0
+        fail_count = 0
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_folder = {
+                executor.submit(_process_folder_features, args): args[0]
+                for args in args_list
+            }
+
+            # Process results as they complete
+            for i, future in enumerate(as_completed(future_to_folder), 1):
+                folder = future_to_folder[future]
+                try:
+                    folder_name, success, message = future.result()
+                    if success:
+                        success_count += 1
+                        logger.debug(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                    else:
+                        fail_count += 1
+                        logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                except Exception as e:
+                    fail_count += 1
+                    logger.error(f"[{i}/{len(folders)}] {folder.name}: {e}")
+
+                # Progress update every 10%
+                if i % max(1, len(folders) // 10) == 0:
+                    logger.info(f"Progress: {i}/{len(folders)} ({100*i//len(folders)}%)")
+
+        self.stats.tracks_analyzed = success_count
+        logger.info(f"Feature extraction complete: {success_count} success, {fail_count} failed")
+
+    def _run_first_stage_features_sequential(self, folders: List[Path]):
+        """Sequential fallback for feature extraction."""
         try:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
@@ -759,41 +1352,84 @@ class MasterPipeline:
             logger.warning(f"First-stage features not available: {e}")
 
     def _run_cropping(self):
-        """Stage 3: Create crops from full tracks."""
-        logger.info("\n" + "=" * 70)
-        logger.info("[STAGE 3] CROPPING")
-        logger.info("=" * 70)
+        """Stage 3: Create crops from full tracks (parallel processing)."""
+        logger.info("\n" + fmt_header("=" * 70))
+        logger.info(fmt_stage("[STAGE 3] CROPPING"))
+        logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
 
         # Determine crops output directory
         crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
 
-        logger.info(f"Creating crops in: {crops_dir}")
-        logger.info(f"Mode: {self.config.crop_mode}")
+        logger.info(f"Creating crops in: {fmt_filename(str(crops_dir))}")
+        logger.info(f"Mode: {fmt_notification(self.config.crop_mode)}")
         logger.info(f"Length: {self.config.crop_length_samples} samples (~{self.config.crop_length_samples / 44100:.1f}s at 44.1kHz)")
 
-        try:
-            from tools.create_training_crops import process_folder as create_crops_folder
-            from core.file_utils import find_organized_folders
+        num_workers = self.config.crop_workers
 
-            folders = find_organized_folders(self.working_dir)
+        try:
+            # Snapshot folders BEFORE processing to prevent infinite loops
+            # (in case crops_dir somehow ends up inside working_dir)
+            folders = list(find_organized_folders(self.working_dir))
+            logger.info(f"Snapshot: {len(folders)} folders to process")
+
+            # Filter out any folders that might be inside crops_dir
+            crops_dir_resolved = crops_dir.resolve()
+            folders = [
+                f for f in folders
+                if not str(f.resolve()).startswith(str(crops_dir_resolved))
+            ]
+
             crops_dir.mkdir(parents=True, exist_ok=True)
 
-            for i, folder in enumerate(folders, 1):
-                logger.info(f"[{i}/{len(folders)}] Creating crops: {folder.name}")
-                try:
-                    count = create_crops_folder(
-                        folder,
-                        length_samples=self.config.crop_length_samples,
-                        output_dir=crops_dir,
-                        sequential=self.config.crop_mode == 'sequential',
-                        overlap=self.config.crop_overlap,
-                        div4=self.config.crop_div4,
-                    )
-                    self.stats.crops_created += count
-                except Exception as e:
-                    logger.warning(f"  Failed: {e}")
+            if num_workers <= 1:
+                # Sequential fallback
+                self._run_cropping_sequential(folders, crops_dir)
+            else:
+                logger.info(f"Processing {len(folders)} folders with {num_workers} workers...")
+
+                # Prepare arguments for worker function
+                sequential = self.config.crop_mode == 'sequential'
+                args_list = [
+                    (folder, crops_dir, self.config.crop_length_samples,
+                     sequential, self.config.crop_overlap, self.config.crop_div4)
+                    for folder in folders
+                ]
+
+                success_count = 0
+                fail_count = 0
+                total_crops = 0
+
+                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    future_to_folder = {
+                        executor.submit(_process_folder_crops, args): args[0]
+                        for args in args_list
+                    }
+
+                    for i, future in enumerate(as_completed(future_to_folder), 1):
+                        folder = future_to_folder[future]
+                        try:
+                            folder_name, crop_count, message = future.result()
+                            if crop_count > 0:
+                                success_count += 1
+                                total_crops += crop_count
+                                logger.debug(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                            elif "lock" in message.lower():
+                                logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                            else:
+                                fail_count += 1
+                                logger.warning(f"[{i}/{len(folders)}] {folder_name}: {message}")
+                        except Exception as e:
+                            fail_count += 1
+                            logger.error(f"[{i}/{len(folders)}] {folder.name}: {e}")
+
+                        # Progress update every 10%
+                        if i % max(1, len(folders) // 10) == 0:
+                            logger.info(f"Progress: {i}/{len(folders)} ({100*i//len(folders)}%)")
+
+                self.stats.crops_created = total_crops
+                logger.info(f"Cropping complete: {total_crops} crops from {success_count} tracks, {fail_count} failed")
 
         except Exception as e:
             logger.error(f"Cropping failed: {e}")
@@ -804,11 +1440,30 @@ class MasterPipeline:
         # Update working dir for crop analysis
         self.crops_dir = crops_dir
 
+    def _run_cropping_sequential(self, folders: List[Path], crops_dir: Path):
+        """Sequential fallback for cropping."""
+        from tools.create_training_crops import create_crops_for_file
+
+        for i, folder in enumerate(folders, 1):
+            logger.info(f"[{i}/{len(folders)}] Creating crops: {folder.name}")
+            try:
+                count = create_crops_for_file(
+                    folder,
+                    length_samples=self.config.crop_length_samples,
+                    output_dir=crops_dir,
+                    sequential=self.config.crop_mode == 'sequential',
+                    overlap=self.config.crop_overlap,
+                    div4=self.config.crop_div4,
+                )
+                self.stats.crops_created += count
+            except Exception as e:
+                logger.warning(f"  Failed: {e}")
+
     def _run_crop_analysis(self):
         """Stage 4: Analyze all crops."""
-        logger.info("\n" + "=" * 70)
-        logger.info("[STAGE 4] CROP ANALYSIS")
-        logger.info("=" * 70)
+        logger.info("\n" + fmt_header("=" * 70))
+        logger.info(fmt_stage("[STAGE 4] CROP ANALYSIS"))
+        logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
 
@@ -925,7 +1580,7 @@ class MasterPipeline:
             config = PipelineConfig(
                 input_dir=crops_dir,
                 device=self.config.device,
-                batch=True,
+                batch=self.config.batch_feature_extraction,
                 crops=True,
                 overwrite=self.config.overwrite,
                 skip_organize=True,
@@ -934,6 +1589,8 @@ class MasterPipeline:
                 skip_audiobox=self.config.skip_audiobox,
                 skip_midi=True,
                 flamingo_model=self.config.flamingo_model,
+                flamingo_token_limits=self.config.flamingo_token_limits,
+                flamingo_prompts=self.config.flamingo_prompts,
             )
 
             pipeline = Pipeline(config)
@@ -968,44 +1625,44 @@ class MasterPipeline:
 
     def _print_summary(self, total_time: float):
         """Print pipeline summary."""
-        print("\n" + "=" * 70)
-        print("MASTER PIPELINE SUMMARY")
-        print("=" * 70)
+        print("\n" + fmt_header("=" * 70))
+        print(fmt_header("MASTER PIPELINE SUMMARY"))
+        print(fmt_header("=" * 70))
 
         if not self.config.skip_organize:
-            print(f"\n[Stage 1] Organization")
+            print(fmt_stage("\n[Stage 1] Organization"))
             print(f"  Files found:     {self.stats.files_found}")
-            print(f"  Files organized: {self.stats.files_organized}")
-            print(f"  Time:            {self.stats.time_organize:.1f}s")
+            print(f"  Files organized: {fmt_success(str(self.stats.files_organized))}")
+            print(f"  Time:            {fmt_dim(f'{self.stats.time_organize:.1f}s')}")
 
         if not self.config.skip_track_analysis:
-            print(f"\n[Stage 2] Track Analysis")
+            print(fmt_stage("\n[Stage 2] Track Analysis"))
             print(f"  Tracks total:    {self.stats.tracks_total}")
-            print(f"  Stems separated: {self.stats.tracks_separated}")
+            print(f"  Stems separated: {fmt_success(str(self.stats.tracks_separated))}")
             print(f"  Metadata found:  {self.stats.tracks_metadata_found}")
-            print(f"  Analyzed:        {self.stats.tracks_analyzed}")
-            print(f"  Time:            {self.stats.time_track_analysis:.1f}s")
+            print(f"  Analyzed:        {fmt_success(str(self.stats.tracks_analyzed))}")
+            print(f"  Time:            {fmt_dim(f'{self.stats.time_track_analysis:.1f}s')}")
 
         if not self.config.skip_crops:
-            print(f"\n[Stage 3] Cropping")
-            print(f"  Crops created:   {self.stats.crops_created}")
-            print(f"  Time:            {self.stats.time_cropping:.1f}s")
+            print(fmt_stage("\n[Stage 3] Cropping"))
+            print(f"  Crops created:   {fmt_success(str(self.stats.crops_created))}")
+            print(f"  Time:            {fmt_dim(f'{self.stats.time_cropping:.1f}s')}")
 
         if not self.config.skip_crop_analysis:
-            print(f"\n[Stage 4] Crop Analysis")
-            print(f"  Crops analyzed:  {self.stats.crops_analyzed}")
-            print(f"  Time:            {self.stats.time_crop_analysis:.1f}s")
+            print(fmt_stage("\n[Stage 4] Crop Analysis"))
+            print(f"  Crops analyzed:  {fmt_success(str(self.stats.crops_analyzed))}")
+            print(f"  Time:            {fmt_dim(f'{self.stats.time_crop_analysis:.1f}s')}")
 
-        print(f"\nTotal Time: {total_time:.1f}s ({total_time/60:.1f} min)")
+        print(fmt_notification(f"\nTotal Time: {total_time:.1f}s ({total_time/60:.1f} min)"))
 
         if self.stats.errors:
-            print(f"\nErrors ({len(self.stats.errors)}):")
+            print(fmt_error(f"\nErrors ({len(self.stats.errors)}):"))
             for err in self.stats.errors[:5]:
-                print(f"  - {err}")
+                print(fmt_error(f"  - {err}"))
             if len(self.stats.errors) > 5:
-                print(f"  ... and {len(self.stats.errors) - 5} more")
+                print(fmt_dim(f"  ... and {len(self.stats.errors) - 5} more"))
 
-        print("=" * 70)
+        print(fmt_header("=" * 70))
 
 
 def main():
@@ -1054,19 +1711,18 @@ Config file template: config/master_pipeline.yaml
     parser.add_argument('--demucs-segment', type=int,
                         help='Segment length in seconds (higher=better quality, more VRAM). '
                              '~10s min, ~45s recommended for 16GB cards')
-    parser.add_argument('--demucs-subprocess', action='store_true',
-                        help='Use subprocess implementation instead of optimized (fallback)')
-    parser.add_argument('--demucs-compile', action='store_true',
-                        help='Use torch.compile for faster processing (ROCm optimized)')
-    parser.add_argument('--demucs-compile-mode', type=str,
-                        choices=['default', 'reduce-overhead', 'max-autotune'],
-                        help='torch.compile mode (default: reduce-overhead for ROCm)')
+    parser.add_argument('--demucs-workers', type=int,
+                        help='Number of parallel Demucs workers (default: 2, each uses ~5GB VRAM)')
 
     # Cropping (CLI overrides config)
     parser.add_argument('--crop-length', type=int)
     parser.add_argument('--crop-mode', choices=['sequential', 'beat-aligned'])
     parser.add_argument('--crop-overlap', action='store_true')
     parser.add_argument('--crop-div4', action='store_true')
+    parser.add_argument('--crop-workers', type=int,
+                        help='Number of parallel workers for cropping (default: 6)')
+    parser.add_argument('--rhythm-workers', type=int,
+                        help='Number of parallel workers for rhythm analysis (default: 4)')
 
     # Features (CLI overrides config)
     parser.add_argument('--skip-flamingo', action='store_true')
@@ -1081,6 +1737,8 @@ Config file template: config/master_pipeline.yaml
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--verbose', '-v', action='store_true')
+    parser.add_argument('--feature-workers', type=int,
+                        help='Number of parallel workers for feature extraction (default: 8)')
 
     # Generate config template
     parser.add_argument('--generate-config', type=str, metavar='PATH',
@@ -1135,12 +1793,8 @@ Config file template: config/master_pipeline.yaml
         config.demucs_shifts = args.demucs_shifts
     if args.demucs_segment is not None:
         config.demucs_segment = args.demucs_segment
-    if args.demucs_subprocess:
-        config.demucs_optimized = False
-    if args.demucs_compile:
-        config.demucs_compile = True
-    if args.demucs_compile_mode:
-        config.demucs_compile_mode = args.demucs_compile_mode
+    if args.demucs_workers is not None:
+        config.demucs_workers = args.demucs_workers
     if args.crop_length is not None:
         config.crop_length_samples = args.crop_length
     if args.crop_mode:
@@ -1149,6 +1803,10 @@ Config file template: config/master_pipeline.yaml
         config.crop_overlap = True
     if args.crop_div4:
         config.crop_div4 = True
+    if args.crop_workers is not None:
+        config.crop_workers = args.crop_workers
+    if args.rhythm_workers is not None:
+        config.rhythm_workers = args.rhythm_workers
     if args.skip_flamingo:
         config.skip_flamingo = True
     if args.skip_audiobox:
@@ -1167,8 +1825,10 @@ Config file template: config/master_pipeline.yaml
         config.dry_run = True
     if args.verbose:
         config.verbose = True
+    if args.feature_workers is not None:
+        config.feature_workers = args.feature_workers
 
-    setup_logging(level=logging.DEBUG if config.verbose else logging.INFO)
+    setup_colored_logging(level=logging.DEBUG if config.verbose else logging.INFO)
 
     # Validate input
     if not config.input_dir or not config.input_dir.exists():

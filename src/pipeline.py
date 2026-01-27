@@ -46,6 +46,7 @@ class PipelineConfig:
     output_dir: Optional[Path] = None
     device: str = "cuda"
     batch: bool = False
+    batch_feature_extraction: bool = True  # New flag for batched feature extraction per module
     overwrite: bool = False
     verbose: bool = False
     crops: bool = False  # Process crop files instead of organized folders
@@ -66,6 +67,9 @@ class PipelineConfig:
 
     # Flamingo options
     flamingo_model: str = "Q8_0"
+    flamingo_model: str = "Q8_0"
+    flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
+    flamingo_prompts: Dict[str, bool] = field(default_factory=dict)
 
     @property
     def working_dir(self) -> Path:
@@ -302,7 +306,12 @@ class Pipeline:
             logger.warning("No crop files found")
             return True
 
-        logger.info(f"Found {len(all_crops)} crop files to process")
+        # Use batched processing if enabled (more efficient for GPU models)
+        if self.config.batch_feature_extraction:
+            return self._run_crops_batched(all_crops)
+        
+        # Otherwise use original sequential processing
+        logger.info(f"Found {len(all_crops)} crop files to process (Sequential Mode)")
 
         # Import feature extraction functions
         from src.timbral.loudness import analyze_file_loudness
@@ -342,7 +351,10 @@ class Pipeline:
             try:
                 from src.classification.music_flamingo import MusicFlamingoGGUF
                 logger.info(f"Loading Music Flamingo ({self.config.flamingo_model})...")
-                flamingo_analyzer = MusicFlamingoGGUF(model=self.config.flamingo_model)
+                flamingo_analyzer = MusicFlamingoGGUF(
+                    model=self.config.flamingo_model,
+                    token_limits=self.config.flamingo_token_limits or None,
+                )
             except Exception as e:
                 logger.warning(f"Music Flamingo not available: {e}")
 
@@ -442,14 +454,21 @@ class Pipeline:
                         logger.warning(f"  AudioBox failed: {e}")
 
                 # Music Flamingo
-                if flamingo_analyzer and (self.config.overwrite or 'music_flamingo_full' not in existing):
+                if flamingo_analyzer and (self.config.overwrite or 'music_flamingo_model' not in existing):
                     try:
-                        for prompt_type in ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']:
+                        # Determine active prompts
+                        active_prompts = [p for p, enabled in self.config.flamingo_prompts.items() if enabled]
+                        if not active_prompts and not self.config.flamingo_prompts:
+                             active_prompts = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+
+                        for prompt_type in active_prompts:
                             key = f'music_flamingo_{prompt_type}'
                             if self.config.overwrite or key not in existing:
                                 results[key] = flamingo_analyzer.analyze(crop_path, prompt_type=prompt_type)
-                        results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
-                        logger.info("  ✓ Music Flamingo")
+                        
+                        if any(k.startswith('music_flamingo_') for k in results):
+                            results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
+                            logger.info("  ✓ Music Flamingo")
                     except Exception as e:
                         logger.warning(f"  Music Flamingo failed: {e}")
 
@@ -492,6 +511,264 @@ class Pipeline:
         print(f"⏭️  Skipped:   {self.stats['steps_skipped']}")
         print(f"⏱️  Total Time: {self.stats['total_time']:.1f}s ({self.stats['total_time']/60:.1f} min)")
         print("=" * 60)
+
+
+    def _run_crops_batched(self, all_crops: List[Path]) -> bool:
+        """
+        Run feature extraction in batches to optimize resource usage.
+        
+        Strategy:
+        1. cpu_pass: Light features (Loudness, Spectral, Rhythm, Chroma) - One pass per file to minimize I/O.
+        2. audiobox_pass: Heavy GPU - Load model once, process all.
+        3. essentia_pass: Heavy GPU/CPU - Load model once, process all.
+        4. flamingo_pass: Heavy GPU - Load model once, process all.
+        5. midi_pass: Heavy GPU - Load model once, process all.
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("BATCH MODE: STARTING")
+        logger.info("=" * 60)
+        
+        start_time = time.time()
+        
+        # Imports for CPU pass
+        from src.timbral.loudness import analyze_file_loudness
+        from src.spectral.spectral_features import analyze_spectral_features
+        from src.spectral.multiband_rms import analyze_multiband_rms
+        from src.harmonic.chroma import analyze_chroma
+        import librosa
+        import soundfile as sf
+        
+        # Optional CPU imports
+        timbral_func = None
+        if not self.config.skip_timbral:
+            try:
+                from src.timbral.audio_commons import analyze_all_timbral_features
+                timbral_func = analyze_all_timbral_features
+            except ImportError: pass
+            
+        # =========================================================================
+        # PASS 1: CPU / Light Features
+        # =========================================================================
+        if not all([self.config.skip_loudness, self.config.skip_rhythm, 
+                   self.config.skip_spectral, self.config.skip_harmonic, 
+                   self.config.skip_timbral]):
+            
+            logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
+            
+            for i, crop_path in enumerate(all_crops, 1):
+                try:
+                    info_path = get_crop_info_path(crop_path)
+                    existing = read_info(info_path) if info_path.exists() else {}
+                    results = {}
+                    
+                    if i % 10 == 0:
+                        logger.info(f"  Processing {i}/{len(all_crops)}...")
+                    
+                    stems = get_crop_stem_files(crop_path)
+                    
+                    # Loudness
+                    if not self.config.skip_loudness:
+                        if self.config.overwrite or 'lufs' not in existing:
+                            try:
+                                results.update(analyze_file_loudness(crop_path))
+                                for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                                    if stem_name in stems:
+                                        stem_loud = analyze_file_loudness(stems[stem_name])
+                                        results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                            except Exception: pass
+
+                    # BPM
+                    if not self.config.skip_rhythm:
+                        if self.config.overwrite or 'bpm' not in existing:
+                            try:
+                                y, sr = sf.read(str(crop_path))
+                                if y.ndim > 1: y = y.mean(axis=1)
+                                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                                bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
+                                results['bpm'] = round(bpm, 1)
+                            except Exception: pass
+
+                    # Spectral
+                    if not self.config.skip_spectral:
+                        if self.config.overwrite or 'spectral_centroid' not in existing:
+                            try: results.update(analyze_spectral_features(crop_path))
+                            except Exception: pass
+                        if self.config.overwrite or 'rms_bass' not in existing:
+                            try: results.update(analyze_multiband_rms(crop_path))
+                            except Exception: pass
+
+                    # Chroma
+                    if not self.config.skip_harmonic:
+                        if self.config.overwrite or 'chroma_mean' not in existing:
+                            try:
+                                chroma_input = stems.get('other', crop_path)
+                                results.update(analyze_chroma(chroma_input, use_stems=False))
+                            except Exception: pass
+
+                    # Timbral
+                    if timbral_func and (self.config.overwrite or 'brightness' not in existing):
+                        try: results.update(timbral_func(crop_path))
+                        except Exception: pass
+                        
+                    if results:
+                        safe_update(info_path, results)
+                        self.stats["crops_processed"] += 1
+                        
+                except Exception as e:
+                    logger.error(f"  Failed CPU pass for {crop_path.name}: {e}")
+                    self.stats["crops_failed"] += 1
+
+        # =========================================================================
+        # PASS 2: AudioBox
+        # =========================================================================
+        if not self.config.skip_audiobox:
+            logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
+            try:
+                from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics
+                
+                # Check which files actually need processing to avoid progress bar spam
+                to_process = []
+                for crop_path in all_crops:
+                    info_path = get_crop_info_path(crop_path)
+                    existing = read_info(info_path) if info_path.exists() else {}
+                    if self.config.overwrite or 'content_enjoyment' not in existing:
+                        to_process.append(crop_path)
+                
+                if to_process:
+                    logger.info(f"  Processing {len(to_process)} files...")
+                    for i, crop_path in enumerate(to_process, 1):
+                        try:
+                            results = analyze_audiobox_aesthetics(crop_path)
+                            if results:
+                                safe_update(get_crop_info_path(crop_path), results)
+                            if i % 5 == 0:
+                                logger.info(f"  {i}/{len(to_process)}")
+                        except Exception as e:
+                            logger.error(f"  AudioBox failed for {crop_path.name}: {e}")
+                else:
+                    logger.info("  All files already analyzed.")
+                    
+            except ImportError:
+                logger.warning("  AudioBox not available")
+
+        # =========================================================================
+        # PASS 3: Essentia
+        # =========================================================================
+        if not self.config.skip_classification:
+            logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
+            try:
+                from src.classification.essentia_features import analyze_essentia_features
+                
+                to_process = []
+                for crop_path in all_crops:
+                    info_path = get_crop_info_path(crop_path)
+                    existing = read_info(info_path) if info_path.exists() else {}
+                    if self.config.overwrite or 'danceability' not in existing:
+                        to_process.append(crop_path)
+                
+                if to_process:
+                    logger.info(f"  Processing {len(to_process)} files...")
+                    for i, crop_path in enumerate(to_process, 1):
+                        try:
+                            results = analyze_essentia_features(crop_path)
+                            if results:
+                                safe_update(get_crop_info_path(crop_path), results)
+                            if i % 10 == 0:
+                                logger.info(f"  {i}/{len(to_process)}")
+                        except Exception as e:
+                            logger.error(f"  Essentia failed for {crop_path.name}: {e}")
+                else:
+                    logger.info("  All files already analyzed.")
+
+            except ImportError:
+                logger.warning("  Essentia not available")
+
+        # =========================================================================
+        # PASS 4: Music Flamingo
+        # =========================================================================
+        if not self.config.skip_flamingo:
+            logger.info(f"\n[PASS 4/5] Music Flamingo ({self.config.flamingo_model}) - {len(all_crops)} files")
+            try:
+                from src.classification.music_flamingo import MusicFlamingoGGUF
+                
+                # Determine active prompts (default to all if none specified)
+                active_prompts = [p for p, enabled in self.config.flamingo_prompts.items() if enabled]
+                if not active_prompts and not self.config.flamingo_prompts:
+                    active_prompts = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+                
+                if not active_prompts:
+                    logger.warning("  No Flamingo prompts enabled in config.")
+                else:
+                    logger.info(f"  Active prompts: {', '.join(active_prompts)}")
+                    
+                    # Filter files needing processing (check if ALL active prompts are present)
+                    to_process = []
+                    for crop_path in all_crops:
+                        info_path = get_crop_info_path(crop_path)
+                        existing = read_info(info_path) if info_path.exists() else {}
+                        
+                        needs_run = False
+                        if self.config.overwrite:
+                            needs_run = True
+                        else:
+                            for p in active_prompts:
+                                if f'music_flamingo_{p}' not in existing:
+                                    needs_run = True
+                                    break
+                        
+                        if needs_run:
+                            to_process.append(crop_path)
+                    
+                    if to_process:
+                        logger.info(f"  Loading model...")
+                        flamingo = MusicFlamingoGGUF(
+                            model=self.config.flamingo_model,
+                            token_limits=self.config.flamingo_token_limits or None,
+                        )
+                        
+                        logger.info(f"  Processing {len(to_process)} files...")
+                        for i, crop_path in enumerate(to_process, 1):
+                            results = {}
+                            try:
+                                for prompt_type in active_prompts:
+                                    # specific check per prompt to avoid re-running if partial results exist
+                                    info_path = get_crop_info_path(crop_path)
+                                    existing = read_info(info_path) if info_path.exists() else {}
+                                    key = f'music_flamingo_{prompt_type}'
+                                    
+                                    if self.config.overwrite or key not in existing:
+                                        results[key] = flamingo.analyze(crop_path, prompt_type=prompt_type)
+                                
+                                if results:
+                                    results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
+                                    safe_update(get_crop_info_path(crop_path), results)
+                                
+                                logger.info(f"  [{i}/{len(to_process)}] {crop_path.name}")
+                                
+                            except Exception as e:
+                                logger.error(f"  Flamingo failed for {crop_path.name}: {e}")
+                        
+                        del flamingo
+                    else:
+                        logger.info("  All files already analyzed.")
+
+            except Exception as e:
+                logger.warning(f"  Music Flamingo failed: {e}")
+
+        # =========================================================================
+        # PASS 5: MIDI Transcription
+        # =========================================================================
+        if not self.config.skip_midi:
+            logger.info(f"\n[PASS 5/5] MIDI Transcription - {len(all_crops)} files")
+             # MIDI script handles its own batching/loading effectively usually, 
+             # but here we just call it. For now, skipping detailed implementation 
+             # as it's often a separate step.
+             # TODO: Call src/transcription/drums/adtof.py logic here if needed per crop
+            pass
+
+        self.stats["total_time"] = time.time() - start_time
+        self._print_crops_summary()
+        return self.stats["crops_failed"] == 0
 
 
 def main():
