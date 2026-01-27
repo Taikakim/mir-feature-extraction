@@ -161,6 +161,19 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         return {'path': crop_path, 'error': str(e), 'success': False}
 
 
+def _safe_analyze_essentia(crop_path: Path) -> Dict[str, Any]:
+    """
+    Worker function for parallel Essentia feature extraction.
+    Must be top-level for pickling.
+    """
+    try:
+        from src.classification.essentia_features import analyze_essentia_features
+        results = analyze_essentia_features(crop_path)
+        return {'path': crop_path, 'results': results, 'success': True}
+    except Exception as e:
+        return {'path': crop_path, 'error': str(e), 'success': False}
+
+
 class Pipeline:
     """MIR Feature Extraction Pipeline."""
 
@@ -752,31 +765,43 @@ class Pipeline:
                 logger.warning("  AudioBox not available")
 
         # =========================================================================
-        # PASS 3: Essentia
+        # PASS 3: Essentia (Parallel processing)
         # =========================================================================
         if not self.config.skip_classification:
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
+            logger.info(f"  Parallel workers: {self.config.feature_workers}")
             try:
                 from src.classification.essentia_features import analyze_essentia_features
-                
+
                 to_process = []
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
                     existing = read_info(info_path) if info_path.exists() else {}
                     if self.config.overwrite or 'danceability' not in existing:
                         to_process.append(crop_path)
-                
+
                 if to_process:
                     logger.info(f"  Processing {len(to_process)} files...")
-                    for i, crop_path in enumerate(to_process, 1):
-                        try:
-                            results = analyze_essentia_features(crop_path)
-                            if results:
-                                safe_update(get_crop_info_path(crop_path), results)
+
+                    with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
+                        futures = {
+                            executor.submit(_safe_analyze_essentia, crop_path): crop_path
+                            for crop_path in to_process
+                        }
+
+                        for i, future in enumerate(as_completed(futures), 1):
+                            crop_path = futures[future]
+                            try:
+                                result = future.result()
+                                if result['success'] and result['results']:
+                                    safe_update(get_crop_info_path(crop_path), result['results'])
+                                elif not result['success']:
+                                    logger.error(f"  Essentia failed for {crop_path.name}: {result.get('error')}")
+                            except Exception as e:
+                                logger.error(f"  Essentia worker exception for {crop_path.name}: {e}")
+
                             if i % 10 == 0:
                                 logger.info(f"  {i}/{len(to_process)}")
-                        except Exception as e:
-                            logger.error(f"  Essentia failed for {crop_path.name}: {e}")
                 else:
                     logger.info("  All files already analyzed.")
 
