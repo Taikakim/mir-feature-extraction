@@ -38,7 +38,7 @@ import logging
 import subprocess
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
