@@ -802,10 +802,13 @@ class Pipeline:
                                 result = future.result()
                                 if result['success'] and result['results']:
                                     safe_update(get_crop_info_path(crop_path), result['results'])
+                                    self.stats["crops_processed"] += 1
                                 elif not result['success']:
                                     logger.error(f"  Essentia failed for {crop_path.name}: {result.get('error')}")
+                                    self.stats["crops_failed"] += 1
                             except Exception as e:
                                 logger.error(f"  Essentia worker exception for {crop_path.name}: {e}")
+                                self.stats["crops_failed"] += 1
 
                             if i % 10 == 0:
                                 logger.info(f"  {i}/{len(to_process)}")
