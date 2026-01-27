@@ -66,6 +66,10 @@ models/
 backup/
 old_benchmarks/
 *.backup-*
+*_backup.py
+
+# Test/personal config files
+config/test*.yaml
 
 # Session notes (personal)
 SESSION_*.md
