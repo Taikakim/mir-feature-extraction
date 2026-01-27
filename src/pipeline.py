@@ -47,6 +47,7 @@ class PipelineConfig:
     device: str = "cuda"
     batch: bool = False
     batch_feature_extraction: bool = True  # New flag for batched feature extraction per module
+    feature_workers: int = 8  # Number of parallel workers for CPU features
     overwrite: bool = False
     verbose: bool = False
     crops: bool = False  # Process crop files instead of organized folders
@@ -67,7 +68,6 @@ class PipelineConfig:
 
     # Flamingo options
     flamingo_model: str = "Q8_0"
-    flamingo_model: str = "Q8_0"
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
     flamingo_prompts: Dict[str, bool] = field(default_factory=dict)
 
@@ -75,6 +75,86 @@ class PipelineConfig:
     def working_dir(self) -> Path:
         """Directory where processing happens."""
         return self.output_dir if self.output_dir else self.input_dir
+
+
+def _safe_analyze_cpu(args) -> Dict[str, Any]:
+    """
+    Worker function for parallel CPU feature extraction.
+    Must be top-level for pickling.
+    """
+    crop_path, config_dict = args
+    results = {}
+    
+    try:
+        # Re-import locally for worker process
+        from src.timbral.loudness import analyze_file_loudness
+        from src.spectral.spectral_features import analyze_spectral_features
+        from src.spectral.multiband_rms import analyze_multiband_rms
+        from src.harmonic.chroma import analyze_chroma
+        from src.core.file_utils import get_crop_stem_files
+        import librosa
+        import soundfile as sf
+        
+        # Optional imports
+        timbral_func = None
+        if not config_dict.get('skip_timbral'):
+            try:
+                from src.timbral.audio_commons import analyze_all_timbral_features
+                timbral_func = analyze_all_timbral_features
+            except ImportError: pass
+
+        # Load existing info to avoid re-computing if not overwrite
+        # Note: We can't easily check existing in worker without re-reading info file, 
+        # so we rely on passed config or check here.
+        # Ideally, main process should filter what needs to be run. 
+        # But for simplicity, we check skip flags here.
+        
+        stems = get_crop_stem_files(crop_path)
+        
+        # Loudness
+        if not config_dict.get('skip_loudness'):
+            try:
+                results.update(analyze_file_loudness(crop_path))
+                for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                    if stem_name in stems:
+                        stem_loud = analyze_file_loudness(stems[stem_name])
+                        results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+            except Exception: pass
+
+        # BPM
+        if not config_dict.get('skip_rhythm'):
+            try:
+                y, sr = sf.read(str(crop_path))
+                if y.ndim > 1: y = y.mean(axis=1)
+                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                # Handle both scalar and array returns from librosa
+                bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
+                results['bpm'] = round(bpm, 1)
+            except Exception: pass
+
+        # Spectral
+        if not config_dict.get('skip_spectral'):
+            try: results.update(analyze_spectral_features(crop_path))
+            except Exception: pass
+            try: results.update(analyze_multiband_rms(crop_path))
+            except Exception: pass
+
+        # Chroma
+        if not config_dict.get('skip_harmonic'):
+            try:
+                chroma_input = stems.get('other', crop_path)
+                results.update(analyze_chroma(chroma_input, use_stems=False))
+            except Exception: pass
+
+        # Timbral
+        if timbral_func and not config_dict.get('skip_timbral'):
+            try: results.update(timbral_func(crop_path))
+            except Exception: pass
+            
+        return {'path': crop_path, 'results': results, 'success': True}
+
+    except Exception as e:
+        return {'path': crop_path, 'error': str(e), 'success': False}
 
 
 class Pipeline:
@@ -547,76 +627,77 @@ class Pipeline:
             except ImportError: pass
             
         # =========================================================================
-        # PASS 1: CPU / Light Features
+        # PASS 1: CPU / Light Features (Parallel)
         # =========================================================================
         if not all([self.config.skip_loudness, self.config.skip_rhythm, 
                    self.config.skip_spectral, self.config.skip_harmonic, 
                    self.config.skip_timbral]):
             
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
+            logger.info(f"  Parallel workers: {self.config.feature_workers}")
             
-            for i, crop_path in enumerate(all_crops, 1):
-                try:
-                    info_path = get_crop_info_path(crop_path)
-                    existing = read_info(info_path) if info_path.exists() else {}
-                    results = {}
+            # Prepare tasks
+            # We construct a simple config dict to pass to workers (avoid passing full config object)
+            worker_config = {
+                'skip_loudness': self.config.skip_loudness,
+                'skip_rhythm': self.config.skip_rhythm,
+                'skip_spectral': self.config.skip_spectral,
+                'skip_harmonic': self.config.skip_harmonic,
+                'skip_timbral': self.config.skip_timbral,
+                'overwrite': self.config.overwrite,
+            }
+            
+            tasks = []
+            for crop_path in all_crops:
+                # Filter what needs running based on overwrite/existing
+                # Optimization: To avoid pickling too much, we could filter here.
+                # But checking .INFO file existence is fast enough.
+                info_path = get_crop_info_path(crop_path)
+                existing = read_info(info_path) if info_path.exists() else {}
+                
+                # Check if we really need to run anything for this file
+                needs_run = False
+                if self.config.overwrite:
+                    needs_run = True
+                else:
+                    # Rough check: if any main key missing, run it.
+                    # This might re-run some parts, but it's simpler than granular check in worker.
+                    if not self.config.skip_loudness and 'lufs' not in existing: needs_run = True
+                    elif not self.config.skip_rhythm and 'bpm' not in existing: needs_run = True
+                    elif not self.config.skip_spectral and 'spectral_centroid' not in existing: needs_run = True
+                    elif not self.config.skip_harmonic and 'chroma_mean' not in existing: needs_run = True
+                    elif not self.config.skip_timbral and 'brightness' not in existing: needs_run = True
+                
+                if needs_run:
+                    tasks.append((crop_path, worker_config))
+            
+            if tasks:
+                logger.info(f"  Processing {len(tasks)} files...")
+                from concurrent.futures import ProcessPoolExecutor, as_completed
+                
+                with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
+                    # Submit all tasks
+                    futures = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
                     
-                    if i % 10 == 0:
-                        logger.info(f"  Processing {i}/{len(all_crops)}...")
-                    
-                    stems = get_crop_stem_files(crop_path)
-                    
-                    # Loudness
-                    if not self.config.skip_loudness:
-                        if self.config.overwrite or 'lufs' not in existing:
-                            try:
-                                results.update(analyze_file_loudness(crop_path))
-                                for stem_name in ['drums', 'bass', 'other', 'vocals']:
-                                    if stem_name in stems:
-                                        stem_loud = analyze_file_loudness(stems[stem_name])
-                                        results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
-                            except Exception: pass
-
-                    # BPM
-                    if not self.config.skip_rhythm:
-                        if self.config.overwrite or 'bpm' not in existing:
-                            try:
-                                y, sr = sf.read(str(crop_path))
-                                if y.ndim > 1: y = y.mean(axis=1)
-                                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-                                bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
-                                results['bpm'] = round(bpm, 1)
-                            except Exception: pass
-
-                    # Spectral
-                    if not self.config.skip_spectral:
-                        if self.config.overwrite or 'spectral_centroid' not in existing:
-                            try: results.update(analyze_spectral_features(crop_path))
-                            except Exception: pass
-                        if self.config.overwrite or 'rms_bass' not in existing:
-                            try: results.update(analyze_multiband_rms(crop_path))
-                            except Exception: pass
-
-                    # Chroma
-                    if not self.config.skip_harmonic:
-                        if self.config.overwrite or 'chroma_mean' not in existing:
-                            try:
-                                chroma_input = stems.get('other', crop_path)
-                                results.update(analyze_chroma(chroma_input, use_stems=False))
-                            except Exception: pass
-
-                    # Timbral
-                    if timbral_func and (self.config.overwrite or 'brightness' not in existing):
-                        try: results.update(timbral_func(crop_path))
-                        except Exception: pass
-                        
-                    if results:
-                        safe_update(info_path, results)
-                        self.stats["crops_processed"] += 1
-                        
-                except Exception as e:
-                    logger.error(f"  Failed CPU pass for {crop_path.name}: {e}")
-                    self.stats["crops_failed"] += 1
+                    for i, future in enumerate(as_completed(futures), 1):
+                        crop_path = futures[future]
+                        try:
+                            result = future.result()
+                            if result['success']:
+                                if result['results']:
+                                    safe_update(get_crop_info_path(crop_path), result['results'])
+                                    self.stats["crops_processed"] += 1
+                            else:
+                                logger.error(f"  Failed CPU pass for {crop_path.name}: {result.get('error')}")
+                                self.stats["crops_failed"] += 1
+                        except Exception as e:
+                            logger.error(f"  Worker exception for {crop_path.name}: {e}")
+                            self.stats["crops_failed"] += 1
+                            
+                        if i % 10 == 0:
+                            logger.info(f"  {i}/{len(tasks)}")
+            else:
+                logger.info("  All files already analyzed.")
 
         # =========================================================================
         # PASS 2: AudioBox

@@ -1583,6 +1583,7 @@ class MasterPipeline:
                 batch=self.config.batch_feature_extraction,
                 crops=True,
                 overwrite=self.config.overwrite,
+                feature_workers=self.config.feature_workers,
                 skip_organize=True,
                 skip_demucs=True,  # Already done
                 skip_flamingo=self.config.skip_flamingo,

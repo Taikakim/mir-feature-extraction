@@ -4,14 +4,13 @@ JSON Handler for MIR Project
 This module provides safe JSON read/write operations for .INFO and .MIR files.
 It ensures that existing data is never accidentally destroyed when adding new features.
 
-Thread Safety:
-- Uses per-file threading.Lock() to prevent race conditions when multiple threads
-  write to the same file simultaneously
-- Safe for use with ThreadPoolExecutor and concurrent processing
+Process Safety:
+- Uses filelock.FileLock for cross-process locking (works with ProcessPoolExecutor)
+- Safe for use with both ThreadPoolExecutor and ProcessPoolExecutor
 - Uses atomic writes (temp file + rename) for crash safety
 
 Dependencies:
-- None (standard library only)
+- filelock (pip install filelock)
 
 Functions:
 - read_info(file_path): Read .INFO file, return dict or empty dict if not exists
@@ -23,33 +22,41 @@ Functions:
 
 import json
 import os
-import threading
-from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
+
+try:
+    from filelock import FileLock
+    FILELOCK_AVAILABLE = True
+except ImportError:
+    FILELOCK_AVAILABLE = False
+
+# Always import threading for fallback registry
+import threading
+from collections import defaultdict
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thread-safe lock registry: one lock per file path
-# Uses defaultdict so accessing a new path automatically creates a lock
-_file_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
-_registry_lock = threading.Lock()  # Protects the _file_locks dict itself
+# Thread-safe lock registry (fallback when filelock not available)
+_thread_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+_registry_lock = threading.Lock()
 
 
-def _get_file_lock(file_path: Path) -> threading.Lock:
-    """
-    Get or create a thread lock for a specific file path.
+def _get_lock_path(file_path: Path) -> Path:
+    """Get the lock file path for a given file."""
+    return file_path.with_suffix(file_path.suffix + '.lock')
 
-    Thread-safe: uses a registry lock to protect the lock dictionary.
-    """
+
+def _get_thread_lock(file_path: Path) -> threading.Lock:
+    """Get or create a thread lock for a file (fallback for single-process use)."""
     key = str(file_path.resolve())
     with _registry_lock:
-        if key not in _file_locks:
-            _file_locks[key] = threading.Lock()
-        return _file_locks[key]
+        if key not in _thread_locks:
+            _thread_locks[key] = threading.Lock()
+        return _thread_locks[key]
 
 
 def read_info(file_path: str | Path) -> Dict[str, Any]:
@@ -88,7 +95,7 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
     """
     Write data to a .INFO file. By default, merges with existing data.
 
-    Thread-safe: uses per-file locking to prevent race conditions.
+    Process-safe: uses filelock for cross-process locking (works with ProcessPoolExecutor).
 
     Args:
         file_path: Path to the .INFO file
@@ -104,9 +111,15 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Thread-safe: acquire per-file lock for the entire read-modify-write cycle
-    file_lock = _get_file_lock(file_path)
-    with file_lock:
+    # Process-safe: acquire file lock for the entire read-modify-write cycle
+    if FILELOCK_AVAILABLE:
+        lock_path = _get_lock_path(file_path)
+        lock = FileLock(lock_path, timeout=60)  # 60 second timeout
+    else:
+        # Fallback for single-process use (thread-safe only)
+        lock = _get_thread_lock(file_path)
+
+    with lock:
         # If merging, read existing data first
         if merge and file_path.exists():
             try:
@@ -126,7 +139,7 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
 
             # Atomic rename
             temp_path.replace(file_path)
-            logger.info(f"Successfully wrote {len(data)} keys to {file_path}")
+            logger.debug(f"Successfully wrote {len(data)} keys to {file_path}")
 
         except Exception as e:
             # Clean up temp file if it exists
@@ -172,7 +185,7 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
     """
     Write temporal data to a .MIR file. By default, merges with existing data.
 
-    Thread-safe: uses per-file locking to prevent race conditions.
+    Process-safe: uses filelock for cross-process locking (works with ProcessPoolExecutor).
 
     Args:
         file_path: Path to the .MIR file
@@ -188,9 +201,14 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Thread-safe: acquire per-file lock for the entire read-modify-write cycle
-    file_lock = _get_file_lock(file_path)
-    with file_lock:
+    # Process-safe: acquire file lock for the entire read-modify-write cycle
+    if FILELOCK_AVAILABLE:
+        lock_path = _get_lock_path(file_path)
+        lock = FileLock(lock_path, timeout=60)
+    else:
+        lock = _get_thread_lock(file_path)
+
+    with lock:
         # If merging, read existing data first
         if merge and file_path.exists():
             try:
@@ -210,7 +228,7 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
 
             # Atomic rename
             temp_path.replace(file_path)
-            logger.info(f"Successfully wrote temporal data to {file_path}")
+            logger.debug(f"Successfully wrote temporal data to {file_path}")
 
         except Exception as e:
             # Clean up temp file if it exists
