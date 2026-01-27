@@ -24,6 +24,7 @@ import logging
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -689,8 +690,6 @@ class Pipeline:
             
             if tasks:
                 logger.info(f"  Processing {len(tasks)} files...")
-                from concurrent.futures import ProcessPoolExecutor, as_completed
-                
                 with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
                     # Submit all tasks
                     futures = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
