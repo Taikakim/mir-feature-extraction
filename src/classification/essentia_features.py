@@ -22,12 +22,20 @@ Features extracted:
 - Genre, mood, instrumentation saved as text for prompts
 """
 
+import multiprocessing
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 import os
+
+# Use 'spawn' for multiprocessing - required for TensorFlow compatibility
+# 'fork' causes deadlocks with TensorFlow's thread pools
+try:
+    multiprocessing.set_start_method('spawn', force=False)
+except RuntimeError:
+    pass  # Already set
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))

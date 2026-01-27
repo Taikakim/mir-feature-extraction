@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import logging
+import multiprocessing
 import subprocess
 import sys
 import time
@@ -28,6 +29,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+
+# Use 'spawn' for multiprocessing - required for TensorFlow compatibility
+# 'fork' causes deadlocks with TensorFlow's thread pools
+try:
+    multiprocessing.set_start_method('spawn', force=False)
+except RuntimeError:
+    pass  # Already set
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
