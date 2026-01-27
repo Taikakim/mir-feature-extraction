@@ -2,6 +2,7 @@
 This module extracts subjective quality assessment features using Meta's Audiobox Aesthetics model on a 1-10 scale:
 
 **Performance**: ~100s for 7.5min track (4.5x realtime), uses GPU via WavLM encoder
+**Batch Mode**: Processes multiple files per GPU call for better utilization (--batch-size)
 
 Audiobox Aesthetics provides four key metrics on a 1-10 scale:
 - Content Enjoyment (CE): How enjoyable the audio content is
@@ -143,22 +144,89 @@ def analyze_audiobox_aesthetics(audio_path: str | Path) -> Dict[str, float]:
     return results
 
 
+def analyze_audiobox_aesthetics_batch(audio_paths: list) -> list:
+    """
+    Analyze audiobox aesthetics for multiple audio files in a single batch.
+
+    This is more efficient than calling analyze_audiobox_aesthetics() repeatedly
+    because the model processes all files together on the GPU.
+
+    Args:
+        audio_paths: List of paths to audio files
+
+    Returns:
+        List of dictionaries with aesthetics features for each file
+    """
+    if not audio_paths:
+        return []
+
+    if not AUDIOBOX_AVAILABLE:
+        logger.warning("Audiobox Aesthetics not available - returning placeholder values")
+        return [{
+            'content_enjoyment': 5.5,
+            'content_usefulness': 5.5,
+            'production_complexity': 5.5,
+            'production_quality': 5.5
+        } for _ in audio_paths]
+
+    predictor = get_predictor()
+    if predictor is None:
+        return [{
+            'content_enjoyment': 5.5,
+            'content_usefulness': 5.5,
+            'production_complexity': 5.5,
+            'production_quality': 5.5
+        } for _ in audio_paths]
+
+    # Build batch input
+    batch_input = [{"path": str(p)} for p in audio_paths]
+
+    logger.info(f"Processing batch of {len(audio_paths)} files...")
+
+    # Run inference on entire batch
+    predictions = predictor.forward(batch_input)
+
+    # Convert results
+    results = []
+    for pred in predictions:
+        result = {
+            'content_enjoyment': float(pred.get('CE', 5.5)),
+            'content_usefulness': float(pred.get('CU', 5.5)),
+            'production_complexity': float(pred.get('PC', 5.5)),
+            'production_quality': float(pred.get('PQ', 5.5))
+        }
+        # Clamp values
+        for key, value in result.items():
+            result[key] = clamp_feature_value(key, value)
+        results.append(result)
+
+    return results
+
+
 def batch_analyze_audiobox_aesthetics(root_directory: str | Path,
-                                       overwrite: bool = False) -> dict:
+                                       overwrite: bool = False,
+                                       batch_size: int = 8) -> dict:
     """
     Batch analyze Audiobox aesthetics for all organized folders.
+
+    Uses batched inference for better GPU utilization - processes multiple
+    files in a single forward pass.
 
     Args:
         root_directory: Root directory to search
         overwrite: Whether to overwrite existing aesthetics data
+        batch_size: Number of files to process in each batch (default: 8)
 
     Returns:
         Dictionary with statistics about the batch processing
     """
     from core.file_utils import find_organized_folders
+    from core.common import ProgressBar
+    import json
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch Audiobox aesthetics analysis: {root_directory}")
+    logger.info(f"Batch size: {batch_size}")
 
     folders = find_organized_folders(root_directory)
 
@@ -172,44 +240,75 @@ def batch_analyze_audiobox_aesthetics(root_directory: str | Path,
 
     logger.info(f"Found {stats['total']} organized folders")
 
-    for i, folder in enumerate(folders, 1):
-        logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
+    # Collect files that need processing
+    files_to_process = []  # List of (folder, full_mix_path, info_path)
 
-        # Find full_mix file
+    for folder in folders:
         stems = get_stem_files(folder, include_full_mix=True)
         if 'full_mix' not in stems:
-            logger.warning(f"No full_mix found in {folder.name}")
             stats['failed'] += 1
             continue
 
-        # Check if already processed
         info_path = get_info_path(stems['full_mix'])
+
+        # Check if already processed
         if info_path.exists() and not overwrite:
             try:
-                import json
                 with open(info_path, 'r') as f:
                     data = json.load(f)
                 if 'content_enjoyment' in data:
-                    logger.info("Audiobox aesthetics data already exists. Use --overwrite to regenerate.")
                     stats['skipped'] += 1
                     continue
             except Exception:
                 pass
 
+        files_to_process.append((folder, stems['full_mix'], info_path))
+
+    logger.info(f"Files to process: {len(files_to_process)} (skipped: {stats['skipped']})")
+
+    if not files_to_process:
+        logger.info("No files to process")
+        return stats
+
+    # Initialize predictor once before batch processing
+    if AUDIOBOX_AVAILABLE:
+        get_predictor()
+
+    # Process in batches
+    progress = ProgressBar(len(files_to_process), desc="AudioBox")
+
+    for batch_start in range(0, len(files_to_process), batch_size):
+        batch_end = min(batch_start + batch_size, len(files_to_process))
+        batch = files_to_process[batch_start:batch_end]
+
+        # Extract paths for this batch
+        audio_paths = [item[1] for item in batch]
 
         try:
-            results = analyze_audiobox_aesthetics(stems['full_mix'])
+            # Process entire batch at once
+            batch_results = analyze_audiobox_aesthetics_batch(audio_paths)
 
-            # Save to .INFO file
-            safe_update(info_path, results)
-
-            stats['success'] += 1
+            # Save results for each file
+            for (folder, full_mix, info_path), results in zip(batch, batch_results):
+                try:
+                    safe_update(info_path, results)
+                    stats['success'] += 1
+                except Exception as e:
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{folder.name}: {e}")
 
         except Exception as e:
-            stats['failed'] += 1
-            error_msg = f"{folder.name}: {str(e)}"
-            stats['errors'].append(error_msg)
-            logger.error(f"Failed to process {folder.name}: {e}")
+            # If batch fails, mark all as failed
+            for folder, _, _ in batch:
+                stats['failed'] += 1
+                stats['errors'].append(f"{folder.name}: {e}")
+            logger.error(f"Batch failed: {e}")
+
+        # Update progress
+        processed = min(batch_end, len(files_to_process))
+        logger.info(progress.update(processed, f"{stats['success']} ok"))
+
+    logger.info(progress.finish(f"{stats['success']} success, {stats['failed']} failed"))
 
     # Summary
     logger.info("=" * 60)
@@ -251,6 +350,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=8,
+        help='Number of files to process in each batch (default: 8)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -273,7 +379,8 @@ if __name__ == "__main__":
             # Batch processing
             stats = batch_analyze_audiobox_aesthetics(
                 path,
-                overwrite=args.overwrite
+                overwrite=args.overwrite,
+                batch_size=args.batch_size
             )
 
             if stats['failed'] > 0:
