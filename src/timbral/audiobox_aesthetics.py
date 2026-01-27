@@ -205,7 +205,7 @@ def analyze_audiobox_aesthetics_batch(audio_paths: list) -> list:
 
 def batch_analyze_audiobox_aesthetics(root_directory: str | Path,
                                        overwrite: bool = False,
-                                       batch_size: int = 8) -> dict:
+                                       batch_size: int = 16) -> dict:
     """
     Batch analyze Audiobox aesthetics for all organized folders.
 
@@ -215,7 +215,7 @@ def batch_analyze_audiobox_aesthetics(root_directory: str | Path,
     Args:
         root_directory: Root directory to search
         overwrite: Whether to overwrite existing aesthetics data
-        batch_size: Number of files to process in each batch (default: 8)
+        batch_size: Number of files to process in each batch (default: 16)
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -352,8 +352,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--batch-size',
         type=int,
-        default=8,
-        help='Number of files to process in each batch (default: 8)'
+        default=16,
+        help='Number of files to process in each batch (default: 16)'
     )
 
     parser.add_argument(
