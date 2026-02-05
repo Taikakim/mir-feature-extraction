@@ -99,6 +99,18 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     results = {}
     overwrite = config_dict.get('overwrite', False)
 
+    # Define all output keys for each feature type (check ALL, not just one)
+    LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+    SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+    MULTIBAND_KEYS = ['rms_energy_bass', 'rms_energy_body', 'rms_energy_mid', 'rms_energy_air']
+    CHROMA_KEYS = [f'chroma_{i}' for i in range(12)]
+    TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
+                   'booming', 'reverberation', 'sharpness', 'warmth']
+
+    def _needs_processing(keys):
+        """Check if ANY of the keys are missing (needs processing)."""
+        return overwrite or any(k not in existing_keys for k in keys)
+
     try:
         # Re-import locally for worker process
         from src.timbral.loudness import analyze_file_loudness
@@ -119,9 +131,9 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
         stems = get_crop_stem_files(crop_path)
 
-        # Loudness - check if already exists
+        # Loudness - check ALL output keys
         if not config_dict.get('skip_loudness'):
-            if overwrite or 'lufs' not in existing_keys:
+            if _needs_processing(LOUDNESS_KEYS):
                 try:
                     results.update(analyze_file_loudness(crop_path))
                     for stem_name in ['drums', 'bass', 'other', 'vocals']:
@@ -130,7 +142,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
                 except Exception: pass
 
-        # BPM - check if already exists
+        # BPM - single key is fine here
         if not config_dict.get('skip_rhythm'):
             if overwrite or 'bpm' not in existing_keys:
                 try:
@@ -142,26 +154,26 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     results['bpm'] = round(bpm, 1)
                 except Exception: pass
 
-        # Spectral - check if already exists
+        # Spectral - check ALL output keys
         if not config_dict.get('skip_spectral'):
-            if overwrite or 'spectral_flatness' not in existing_keys:
+            if _needs_processing(SPECTRAL_KEYS):
                 try: results.update(analyze_spectral_features(crop_path))
                 except Exception: pass
-            if overwrite or 'rms_energy_bass' not in existing_keys:
+            if _needs_processing(MULTIBAND_KEYS):
                 try: results.update(analyze_multiband_rms(crop_path))
                 except Exception: pass
 
-        # Chroma - check if already exists
+        # Chroma - check ALL output keys
         if not config_dict.get('skip_harmonic'):
-            if overwrite or 'chroma_0' not in existing_keys:
+            if _needs_processing(CHROMA_KEYS):
                 try:
                     chroma_input = stems.get('other', crop_path)
                     results.update(analyze_chroma(chroma_input, use_stems=False))
                 except Exception: pass
 
-        # Timbral - check if already exists
+        # Timbral - check ALL output keys
         if timbral_func and not config_dict.get('skip_timbral'):
-            if overwrite or 'brightness' not in existing_keys:
+            if _needs_processing(TIMBRAL_KEYS):
                 try: results.update(timbral_func(crop_path))
                 except Exception: pass
 
@@ -169,6 +181,41 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
     except Exception as e:
         return {'path': crop_path, 'error': str(e), 'success': False}
+
+
+# Global counter for staggered Essentia worker initialization
+_essentia_worker_id = None
+
+
+def _init_essentia_worker(worker_id: int, stagger_delay: float = 1.0):
+    """
+    Initializer for Essentia workers that staggers TensorFlow loading.
+
+    TensorFlow deadlocks when multiple processes try to load the same
+    graph file simultaneously. This initializer adds a staggered delay
+    to ensure orderly TensorFlow initialization.
+
+    Args:
+        worker_id: Unique ID for this worker (0, 1, 2, ...)
+        stagger_delay: Seconds to wait per worker_id
+    """
+    global _essentia_worker_id
+    _essentia_worker_id = worker_id
+
+    # Stagger TensorFlow initialization
+    delay = worker_id * stagger_delay
+    if delay > 0:
+        time.sleep(delay)
+
+    # Pre-load TensorFlow and Essentia to avoid concurrent loading in workers
+    try:
+        from src.classification.essentia_features import analyze_essentia_features
+        # Force TensorFlow initialization by importing the predictor
+        import essentia.standard as es
+        # This triggers TensorFlow loading for the danceability model
+        logger.debug(f"Essentia worker {worker_id} initialized after {delay:.1f}s delay")
+    except Exception as e:
+        logger.warning(f"Essentia worker {worker_id} init warning: {e}")
 
 
 def _safe_analyze_essentia(crop_path: Path) -> Dict[str, Any]:
@@ -773,48 +820,39 @@ class Pipeline:
                 logger.warning("  AudioBox not available")
 
         # =========================================================================
-        # PASS 3: Essentia (Parallel processing)
+        # PASS 3: Essentia (Sequential - TensorFlow deadlocks with multiprocessing)
         # =========================================================================
         if not self.config.skip_classification:
-            # Use separate essentia_workers limit - TensorFlow deadlocks with too many parallel processes
-            essentia_workers = min(self.config.essentia_workers, self.config.feature_workers)
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
-            logger.info(f"  Parallel workers: {essentia_workers} (TensorFlow-safe limit)")
+            logger.info(f"  Processing sequentially (TensorFlow is not multiprocess-safe)")
             try:
                 from src.classification.essentia_features import analyze_essentia_features
 
+                # Check which files need processing - use ALL Essentia output keys
+                ESSENTIA_KEYS = ['danceability', 'atonality']
                 to_process = []
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
                     existing = read_info(info_path) if info_path.exists() else {}
-                    if self.config.overwrite or 'danceability' not in existing:
+                    if self.config.overwrite or any(k not in existing for k in ESSENTIA_KEYS):
                         to_process.append(crop_path)
 
                 if to_process:
                     logger.info(f"  Processing {len(to_process)} files...")
 
-                    with ProcessPoolExecutor(max_workers=essentia_workers) as executor:
-                        futures = {
-                            executor.submit(_safe_analyze_essentia, crop_path): crop_path
-                            for crop_path in to_process
-                        }
+                    # Sequential processing - TensorFlow handles internal parallelism
+                    for i, crop_path in enumerate(to_process, 1):
+                        try:
+                            results = analyze_essentia_features(crop_path)
+                            if results:
+                                safe_update(get_crop_info_path(crop_path), results)
+                                self.stats["crops_processed"] += 1
+                        except Exception as e:
+                            logger.error(f"  Essentia failed for {crop_path.name}: {e}")
+                            self.stats["crops_failed"] += 1
 
-                        for i, future in enumerate(as_completed(futures), 1):
-                            crop_path = futures[future]
-                            try:
-                                result = future.result()
-                                if result['success'] and result['results']:
-                                    safe_update(get_crop_info_path(crop_path), result['results'])
-                                    self.stats["crops_processed"] += 1
-                                elif not result['success']:
-                                    logger.error(f"  Essentia failed for {crop_path.name}: {result.get('error')}")
-                                    self.stats["crops_failed"] += 1
-                            except Exception as e:
-                                logger.error(f"  Essentia worker exception for {crop_path.name}: {e}")
-                                self.stats["crops_failed"] += 1
-
-                            if i % 10 == 0:
-                                logger.info(f"  {i}/{len(to_process)}")
+                        if i % 10 == 0 or i == len(to_process):
+                            logger.info(f"  {i}/{len(to_process)}")
                 else:
                     logger.info("  All files already analyzed.")
 

@@ -9,7 +9,7 @@
 # PATHS
 # =============================================================================
 paths:
-  input: /run/media/kim/LostLands/ai-audio/test                    # Required: Input directory (raw audio or organized)
+  input: /run/media/kim/LostLands/ai-audio/00test                    # Required: Input directory (raw audio or organized)
   output: null                   # Output directory for organized files (null = in-place, uses input dir; use this if you alread have a folder with the separated stems and the beat info)
   stems_source: null             # Pre-existing stems directory (skips Demucs if set)
 
@@ -17,10 +17,10 @@ paths:
 # STAGE CONTROL
 # =============================================================================
 stages:
-  organize: null             # Stage 1: Organize raw files into project structure
-  track_analysis: null       # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: true            # Stage 3: Create training crops
-  crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
+  organize: true             # Stage 1: Organize raw files into project structure
+  track_analysis: true       # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: true             # Stage 3: Create training crops
+  crop_analysis: true        # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
 # DEMUCS STEM SEPARATION
@@ -78,7 +78,7 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: null                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 20                    # Parallel workers for cropping
+  workers: 16                    # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -192,6 +192,6 @@ filename_cleanup:
 processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
-  verbose: false                 # Verbose logging
-  feature_workers: 20            # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  verbose: true                  # Verbose logging
+  feature_workers: 10            # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
   essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

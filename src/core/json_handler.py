@@ -263,6 +263,74 @@ def safe_update(file_path: str | Path, updates: Dict[str, Any], file_type: str =
     logger.info(f"Safely updated {len(updates)} keys in {file_path}")
 
 
+def should_process(info_path: str | Path, output_keys: list, overwrite: bool = False) -> bool:
+    """
+    Universal check: Should we process this file?
+
+    This function encapsulates the standard "check before processing" pattern
+    that should be used consistently across all feature extraction operations.
+
+    Returns True (should process) if ANY of:
+    - overwrite is True
+    - info_path doesn't exist
+    - ANY of the output_keys are missing from the .INFO file
+
+    Returns False (skip) if:
+    - overwrite is False AND
+    - info_path exists AND
+    - ALL output_keys are present in the .INFO file
+
+    Args:
+        info_path: Path to the .INFO file to check
+        output_keys: List of keys that the operation will produce
+                     (e.g., ['lufs', 'lra'] for loudness analysis)
+        overwrite: If True, always returns True (force processing)
+
+    Returns:
+        True if processing should occur, False if it should be skipped
+
+    Example:
+        >>> info_path = get_info_path(audio_file)
+        >>> if should_process(info_path, ['spectral_flatness', 'spectral_flux'], overwrite=False):
+        ...     results = analyze_spectral_features(audio_file)
+        ...     safe_update(info_path, results)
+        ... else:
+        ...     logger.debug(f"Skipping {audio_file.name} - already processed")
+    """
+    if overwrite:
+        return True
+
+    info_path = Path(info_path)
+    if not info_path.exists():
+        return True
+
+    try:
+        existing = read_info(info_path)
+        # Process if ANY output key is missing
+        return any(key not in existing for key in output_keys)
+    except Exception:
+        # If we can't read the file, process it
+        return True
+
+
+def should_process_file(file_path: str | Path, output_keys: list, overwrite: bool = False) -> bool:
+    """
+    Convenience wrapper: Check if an audio file needs processing.
+
+    Automatically derives the .INFO path from the audio file path.
+
+    Args:
+        file_path: Path to audio file (full_mix.flac, crop.flac, etc.)
+        output_keys: List of keys that the operation will produce
+        overwrite: If True, always returns True (force processing)
+
+    Returns:
+        True if processing should occur, False if it should be skipped
+    """
+    info_path = get_info_path(file_path)
+    return should_process(info_path, output_keys, overwrite)
+
+
 def get_info_path(audio_file: str | Path) -> Path:
     """
     Get the corresponding .INFO file path for an audio file.

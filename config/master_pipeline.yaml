@@ -53,7 +53,7 @@ demucs:
   # Each worker runs a separate Demucs process for true parallel GPU utilization
   # 2 workers: ~10GB VRAM, ~1.7x speedup
   # 4 workers: ~20GB VRAM (requires high VRAM GPU)
-  workers: 2                     # Parallel workers for batch processing
+  workers: 4                     # Parallel workers for batch processing
 
 # =============================================================================
 # RHYTHM ANALYSIS
@@ -62,7 +62,7 @@ rhythm:
   # Beat detection uses madmom by default
   # These features are extracted for full tracks and migrated to crops
   enabled: true
-  workers: 4                     # Parallel workers for beat/downbeat detection
+  workers: 8                     # Parallel workers for beat/downbeat detection
 
 # =============================================================================
 # CROPPING
@@ -78,7 +78,7 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: true                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 6                     # Parallel workers for cropping
+  workers: 10                     # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -148,11 +148,11 @@ music_flamingo:
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:
-    full: 500
-    technical: 500
-    genre_mood: 500
-    instrumentation: 500
-    structure: 500
+    full: 384
+    technical: 256
+    genre_mood: 256
+    instrumentation: 256
+    structure: 256
 
 # =============================================================================
 # METADATA LOOKUP
@@ -193,5 +193,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 8             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
   essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

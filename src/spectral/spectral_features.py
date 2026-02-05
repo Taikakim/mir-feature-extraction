@@ -280,19 +280,14 @@ def batch_analyze_spectral_features(root_directory: str | Path,
             stats['failed'] += 1
             continue
 
-        # Check if already processed
+        # Check if already processed - must check ALL output keys
         info_path = get_info_path(stems['full_mix'])
-        if info_path.exists() and not overwrite:
-            try:
-                import json
-                with open(info_path, 'r') as f:
-                    data = json.load(f)
-                if 'spectral_flatness' in data:
-                    logger.info("Spectral data already exists. Use --overwrite to regenerate.")
-                    stats['skipped'] += 1
-                    continue
-            except Exception:
-                pass
+        from core.json_handler import should_process
+        SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+        if not should_process(info_path, SPECTRAL_KEYS, overwrite):
+            logger.info("Spectral data already exists. Use --overwrite to regenerate.")
+            stats['skipped'] += 1
+            continue
 
         try:
             results = analyze_spectral_features(

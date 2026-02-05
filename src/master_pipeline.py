@@ -363,23 +363,51 @@ class MasterPipeline:
 
         total_start = time.time()
 
+        # Smart skip: Check if crops already exist for all tracks
+        # If so, skip stages 1-3 and go directly to crop analysis
+        crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+        skip_to_crop_analysis = False
+
+        if crops_dir.exists() and not self.config.should_overwrite('crops'):
+            # Count tracks and existing crops
+            source_folders = list(find_organized_folders(self.working_dir))
+            if source_folders:
+                tracks_with_crops = sum(
+                    1 for f in source_folders
+                    if self._check_existing_crops(f, crops_dir)
+                )
+                if tracks_with_crops == len(source_folders):
+                    logger.info(fmt_success(f"\nAll {tracks_with_crops} tracks already have crops in {crops_dir.name}/"))
+                    logger.info(fmt_success("Skipping Stages 1-3, proceeding to Crop Analysis"))
+                    skip_to_crop_analysis = True
+                    self.crops_dir = crops_dir
+                elif tracks_with_crops > 0:
+                    logger.info(f"\nFound existing crops for {tracks_with_crops}/{len(source_folders)} tracks")
+
         # Stage 1: Organization
-        if not self.config.skip_organize:
+        if skip_to_crop_analysis:
+            logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED (crops exist)"))
+        elif not self.config.skip_organize:
             self._run_organization()
         else:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED"))
 
         # Stage 1c: Extract audio file metadata (MP3 tags, etc.)
-        self._run_metadata_extraction()
+        if not skip_to_crop_analysis:
+            self._run_metadata_extraction()
 
         # Stage 2: Full Track Analysis
-        if not self.config.skip_track_analysis:
+        if skip_to_crop_analysis:
+            logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
+        elif not self.config.skip_track_analysis:
             self._run_track_analysis()
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
         # Stage 3: Create Crops
-        if not self.config.skip_crops:
+        if skip_to_crop_analysis:
+            logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED (crops exist)"))
+        elif not self.config.skip_crops:
             self._run_cropping()
         else:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED"))
@@ -615,12 +643,19 @@ class MasterPipeline:
 
             full_mix = full_mix_files[0]
 
-            # Check if already done
+            # Check if already done - stems can be in folder directly OR in htdemucs/full_mix/
             if not self.config.should_overwrite('demucs'):
                 ext = '.mp3' if self.config.demucs_format == 'mp3' else '.flac'
-                existing_stems = [f for f in ['drums', 'bass', 'other', 'vocals']
-                                  if (folder / f"{f}{ext}").exists()]
-                if len(existing_stems) == 4:
+                stem_names = ['drums', 'bass', 'other', 'vocals']
+
+                # Check direct folder first (preferred location)
+                existing_direct = [f for f in stem_names if (folder / f"{f}{ext}").exists()]
+
+                # Also check htdemucs output folder (Demucs default output)
+                htdemucs_folder = folder / "htdemucs" / "full_mix"
+                existing_htdemucs = [f for f in stem_names if (htdemucs_folder / f"{f}{ext}").exists()]
+
+                if len(existing_direct) == 4 or len(existing_htdemucs) == 4:
                     skipped += 1
                     continue
 
@@ -1014,6 +1049,11 @@ class MasterPipeline:
         try:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
+            from core.json_handler import should_process
+
+            # Define output keys for each feature type
+            LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+            SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
 
             progress = ProgressBar(len(folders), desc="Features")
 
@@ -1025,18 +1065,17 @@ class MasterPipeline:
 
                 full_mix = stems['full_mix']
                 info_path = get_info_path(full_mix)
-                existing = read_info(info_path) if info_path.exists() else {}
                 results = {}
 
-                # Loudness
-                if self.config.should_overwrite('loudness') or 'lufs' not in existing:
+                # Loudness - check ALL output keys
+                if should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness')):
                     try:
                         results.update(analyze_file_loudness(full_mix))
                     except Exception as e:
                         logger.debug(f"Loudness failed: {e}")
 
-                # Spectral
-                if self.config.should_overwrite('spectral') or 'spectral_flatness' not in existing:
+                # Spectral - check ALL output keys
+                if should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral')):
                     try:
                         results.update(analyze_spectral_features(full_mix))
                     except Exception as e:
@@ -1052,6 +1091,65 @@ class MasterPipeline:
 
         except ImportError as e:
             logger.warning(f"First-stage features not available: {e}")
+
+    def _extract_track_title(self, folder_name: str) -> str:
+        """Extract track title from folder name, removing leading track numbers."""
+        import re
+        # Remove leading track numbers like "6. " or "03 - " or "3. "
+        cleaned = re.sub(r'^\d+[\.\-\s]+\s*', '', folder_name).strip()
+        return cleaned if cleaned else folder_name
+
+    def _normalize_for_matching(self, name: str) -> str:
+        """Normalize a name for fuzzy matching (lowercase, remove punctuation)."""
+        import re
+        # Lowercase, remove underscores/dashes/spaces, keep alphanumeric
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    def _check_existing_crops(self, folder: Path, crops_dir: Path) -> bool:
+        """Check if crops already exist for a track.
+
+        Returns True if crops exist and should be skipped.
+        Handles name mismatches between source folders and crop folders.
+        """
+        # If crops_dir doesn't exist, no crops exist
+        if not crops_dir.exists():
+            return False
+
+        def has_crop_files(crop_folder: Path) -> bool:
+            """Check if a folder contains crop files."""
+            for ext in ['.flac', '.mp3', '.wav', '.m4a']:
+                crops = list(crop_folder.glob(f"*_[0-9]{ext}"))
+                crops.extend(crop_folder.glob(f"*_[0-9][0-9]{ext}"))
+                if crops:
+                    return True
+            return False
+
+        # First try exact match
+        track_crops_dir = crops_dir / folder.name
+        if track_crops_dir.exists() and has_crop_files(track_crops_dir):
+            return True
+
+        # Try matching by track title (handles "6. Song" vs "Artist - Song" mismatches)
+        track_title = self._extract_track_title(folder.name)
+        normalized_title = self._normalize_for_matching(track_title)
+
+        # Search for crop folders containing this track title
+        for crop_folder in crops_dir.iterdir():
+            if not crop_folder.is_dir():
+                continue
+
+            # Check if title is contained in crop folder name
+            if track_title in crop_folder.name:
+                if has_crop_files(crop_folder):
+                    return True
+
+            # Try normalized matching (handles 01_41 vs 0141)
+            normalized_crop = self._normalize_for_matching(crop_folder.name)
+            if normalized_title and normalized_title in normalized_crop:
+                if has_crop_files(crop_folder):
+                    return True
+
+        return False
 
     def _run_cropping(self):
         """Stage 3: Create crops from full tracks (parallel processing)."""
@@ -1083,6 +1181,29 @@ class MasterPipeline:
                 f for f in folders
                 if not str(f.resolve()).startswith(str(crops_dir_resolved))
             ]
+
+            # Pre-check for existing crops (skip tracks that already have crops)
+            if not self.config.should_overwrite('crops'):
+                folders_needing_crops = []
+                skipped_count = 0
+                for folder in folders:
+                    if self._check_existing_crops(folder, crops_dir):
+                        skipped_count += 1
+                    else:
+                        folders_needing_crops.append(folder)
+
+                if skipped_count > 0:
+                    logger.info(f"Skipping {skipped_count} tracks with existing crops")
+
+                if not folders_needing_crops:
+                    logger.info(fmt_success("All tracks already have crops. Use overwrite.crops=true to regenerate."))
+                    self.stats.end_operation('cropping', items_skipped=len(folders))
+                    self.stats.time_cropping = time.time() - start_time
+                    self.crops_dir = crops_dir
+                    return
+
+                folders = folders_needing_crops
+                logger.info(f"Processing {len(folders)} tracks that need crops")
 
             crops_dir.mkdir(parents=True, exist_ok=True)
 

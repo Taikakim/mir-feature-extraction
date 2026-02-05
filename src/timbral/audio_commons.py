@@ -436,17 +436,17 @@ def batch_analyze_timbral_features(root_directory: str | Path,
     for i, folder in enumerate(folders, 1):
         logger.info(f"Processing {i}/{stats['total']}: {folder.name}")
 
-        # Check for existing data
-        if not overwrite:
-            stems = get_stem_files(folder, include_full_mix=True)
-            if 'full_mix' in stems:
-                info_path = get_info_path(stems['full_mix'])
-                if info_path.exists():
-                    existing = read_info(info_path)
-                    if 'brightness' in existing:
-                        logger.info(f"  Timbral data already exists. Use --overwrite to regenerate.")
-                        stats['skipped'] += 1
-                        continue
+        # Check for existing data - must check ALL output keys
+        stems = get_stem_files(folder, include_full_mix=True)
+        if 'full_mix' in stems:
+            info_path = get_info_path(stems['full_mix'])
+            from core.json_handler import should_process
+            TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
+                           'booming', 'reverberation', 'sharpness', 'warmth']
+            if not should_process(info_path, TIMBRAL_KEYS, overwrite):
+                logger.info(f"  Timbral data already exists. Use --overwrite to regenerate.")
+                stats['skipped'] += 1
+                continue
 
         try:
             analyze_folder_timbral_features(folder, features=features, save_to_info=save_to_info)

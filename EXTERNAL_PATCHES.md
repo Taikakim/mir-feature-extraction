@@ -1,9 +1,12 @@
 
-# External Patches for Demucs (RDNA4 Optimization)
+# External Patches (RDNA4/ROCm Optimization)
 
-This document tracks local modifications applied to the upstream Demucs repository to optimize performance on AMD RDNA4 hardware.
+This document tracks local modifications applied to upstream repositories to optimize performance on AMD RDNA4 hardware with ROCm.
+---
 
-## Repository Info
+## Demucs
+
+### Repository Info
 *   **Upstream URL**: `https://github.com/adefossez/demucs`
 *   **Local Clone**: `/home/kim/Projects/repos/demucs`
 *   **Management Script**: `src/scripts/manage_demucs_patches.py`
@@ -49,3 +52,89 @@ python src/scripts/manage_demucs_patches.py revert
 ```
 
 **Note**: The optimized execution script `src/preprocessing/demucs_sep_optimized.py` is configured to prioritize this local fork over the system-installed `demucs` package.
+
+---
+
+## BS-RoFormer
+
+### Repository Info
+*   **Upstream URL**: `https://github.com/lucidrains/BS-RoFormer`
+*   **Local Clone**: `/home/kim/Projects/mir/repos/BS-RoFormer`
+*   **Test Script**: `tests/test_bs_roformer_optimized.py`
+
+### Applied Patches
+
+#### 1. AMD ROCm Flash Attention Support
+*   **Purpose**: Enable Flash Attention for AMD ROCm GPUs (RDNA3/RDNA4) instead of falling back to slower math/mem_efficient attention
+*   **Status**: **IMPLEMENTED** (2026-02-05)
+*   **File**: `bs_roformer/attend.py` (lines 61-80)
+*   **Changes**:
+    - Added AMD ROCm detection via `torch.version.hip`
+    - Enabled Flash Attention via PyTorch SDPA for AMD GPUs
+    - Also enabled Flash Attention for all Ampere+ NVIDIA GPUs (SM 8.x+)
+    - Original code only enabled Flash Attention for A100 (SM 8.0 exactly)
+
+**Original code (lines 63-68):**
+```python
+if device_properties.major == 8 and device_properties.minor == 0:
+    print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
+    self.cuda_config = FlashAttentionConfig(True, False, False)
+else:
+    print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
+    self.cuda_config = FlashAttentionConfig(False, True, True)
+```
+
+**Patched code:**
+```python
+is_amd_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+
+if is_amd_rocm:
+    print_once('AMD ROCm GPU detected, using flash attention via PyTorch SDPA')
+    self.cuda_config = FlashAttentionConfig(True, False, False)
+elif device_properties.major == 8 and device_properties.minor == 0:
+    print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
+    self.cuda_config = FlashAttentionConfig(True, False, False)
+elif device_properties.major >= 8:
+    print_once(f'NVIDIA GPU (SM {device_properties.major}.{device_properties.minor}) detected, using flash attention')
+    self.cuda_config = FlashAttentionConfig(True, False, False)
+else:
+    print_once('Older GPU detected, using math or mem efficient attention if input tensor is on cuda')
+    self.cuda_config = FlashAttentionConfig(False, True, True)
+```
+
+### Installation
+
+To use the patched version:
+```bash
+cd /home/kim/Projects/mir/repos/BS-RoFormer
+pip install -e .
+```
+
+Or add to Python path before importing:
+```python
+import sys
+sys.path.insert(0, '/home/kim/Projects/mir/repos/BS-RoFormer')
+from bs_roformer import BSRoformer
+```
+
+#### 2. FP16 Dtype Fallback
+*   **Purpose**: Fall back to math attention for FP32 inputs (Flash Attention requires FP16/BF16)
+*   **Status**: **IMPLEMENTED** (2026-02-05)
+*   **File**: `bs_roformer/attend.py` (flash_attn function)
+*   **Changes**:
+    - Added dtype check in `flash_attn()` method
+    - Falls back to `FlashAttentionConfig(False, True, True)` for FP32 inputs
+
+```python
+# Added in flash_attn() after selecting config:
+if is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
+    config = FlashAttentionConfig(False, True, True)
+```
+
+### Performance Benchmarks (RX 9070 XT)
+
+| Mode | Speed | VRAM | Command |
+|------|-------|------|---------|
+| Batch=2 FP16 | 3.06x | 7.58 GB | `--batch-size 2` |
+| Fast mode FP32 | 2.78x | 6.08 GB | `--fast-mode --no-fp16` |
+| Fast mode FP16 | 2.67x | 6.08 GB | `--fast-mode` |

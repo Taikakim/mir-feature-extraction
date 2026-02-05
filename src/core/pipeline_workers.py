@@ -30,10 +30,14 @@ def process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
     folder, overwrite = args
     folder_name = folder.name
 
+    # Define output keys for each feature type (must check ALL, not just one)
+    LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+    SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+
     # Import here to avoid issues with multiprocessing
     from core.file_locks import FileLock
     from core.file_utils import get_stem_files
-    from core.json_handler import get_info_path, read_info, safe_update
+    from core.json_handler import get_info_path, safe_update, should_process
 
     # Use file lock to prevent race conditions
     with FileLock(folder) as lock:
@@ -50,18 +54,17 @@ def process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
 
             full_mix = stems['full_mix']
             info_path = get_info_path(full_mix)
-            existing = read_info(info_path) if info_path.exists() else {}
             results = {}
 
-            # Loudness
-            if overwrite or 'lufs' not in existing:
+            # Loudness - check ALL output keys
+            if should_process(info_path, LOUDNESS_KEYS, overwrite):
                 try:
                     results.update(analyze_file_loudness(full_mix))
                 except Exception:
                     pass  # Non-critical
 
-            # Spectral
-            if overwrite or 'spectral_flatness' not in existing:
+            # Spectral - check ALL output keys
+            if should_process(info_path, SPECTRAL_KEYS, overwrite):
                 try:
                     results.update(analyze_spectral_features(full_mix))
                 except Exception:

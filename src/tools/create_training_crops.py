@@ -49,9 +49,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
+# Check for mutagen (for ID3 tag writing)
+try:
+    from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER, TCON, TDRC
+    from mutagen.flac import FLAC
+    from mutagen.mp3 import MP3
+    MUTAGEN_AVAILABLE = True
+except ImportError:
+    MUTAGEN_AVAILABLE = False
+    logger.debug("mutagen not available - ID3 tags will not be written to crops")
+
 # Features to check for in source .INFO and transfer to crop .INFO
 TRANSFERRABLE_FEATURES = [
-    # Core Metadata (from track_metadata_lookup.py)
+    # ID3 Tag Metadata (extracted first, from audio file tags)
+    'track_metadata_artist',
+    'track_metadata_title',
+    'track_metadata_album',
+    'track_metadata_year',
+    'track_metadata_genre',
+
+    # Core Metadata (from track_metadata_lookup.py / Spotify / MusicBrainz)
     'release_year',
     'release_date',
     'artists',
@@ -60,14 +77,14 @@ TRANSFERRABLE_FEATURES = [
     'popularity',
     'spotify_id',
     'musicbrainz_id',
-    
+
     # Music Flamingo descriptions
     'music_flamingo_full',
     'music_flamingo_genre_mood',
     'music_flamingo_instrumentation',
     'music_flamingo_technical',
     'music_flamingo_structure',
-    
+
     # Optional Spotify audio features
     'spotify_acousticness',
     'spotify_energy',
@@ -130,38 +147,120 @@ def get_mp3_bitrate(file_path: Path) -> int:
     return get_audio_bitrate(file_path)
 
 
+def write_id3_tags(file_path: Path, metadata: Dict) -> bool:
+    """
+    Write ID3/metadata tags to an audio file.
+
+    Supports MP3 (ID3v2) and FLAC (Vorbis comments).
+
+    Args:
+        file_path: Path to audio file
+        metadata: Dict with keys like 'track_metadata_artist', 'track_metadata_title', etc.
+
+    Returns:
+        True if tags written successfully, False otherwise
+    """
+    if not MUTAGEN_AVAILABLE:
+        return False
+
+    if not metadata:
+        return False
+
+    ext = file_path.suffix.lower()
+
+    try:
+        if ext == '.mp3':
+            # Create ID3 tags for MP3
+            try:
+                audio = MP3(str(file_path))
+                if audio.tags is None:
+                    audio.add_tags()
+            except Exception:
+                audio = MP3(str(file_path))
+                audio.add_tags()
+
+            tags = audio.tags
+
+            # Map our metadata keys to ID3 frames
+            if metadata.get('track_metadata_title'):
+                tags.add(TIT2(encoding=3, text=metadata['track_metadata_title']))
+            if metadata.get('track_metadata_artist'):
+                tags.add(TPE1(encoding=3, text=metadata['track_metadata_artist']))
+            if metadata.get('track_metadata_album'):
+                tags.add(TALB(encoding=3, text=metadata['track_metadata_album']))
+            if metadata.get('track_metadata_year'):
+                year = str(metadata['track_metadata_year'])
+                tags.add(TYER(encoding=3, text=year))
+                tags.add(TDRC(encoding=3, text=year))
+            if metadata.get('track_metadata_genre'):
+                tags.add(TCON(encoding=3, text=metadata['track_metadata_genre']))
+
+            audio.save()
+            return True
+
+        elif ext == '.flac':
+            # Write Vorbis comments for FLAC
+            audio = FLAC(str(file_path))
+
+            if metadata.get('track_metadata_title'):
+                audio['TITLE'] = metadata['track_metadata_title']
+            if metadata.get('track_metadata_artist'):
+                audio['ARTIST'] = metadata['track_metadata_artist']
+            if metadata.get('track_metadata_album'):
+                audio['ALBUM'] = metadata['track_metadata_album']
+            if metadata.get('track_metadata_year'):
+                audio['DATE'] = str(metadata['track_metadata_year'])
+            if metadata.get('track_metadata_genre'):
+                audio['GENRE'] = metadata['track_metadata_genre']
+
+            audio.save()
+            return True
+
+    except Exception as e:
+        logger.debug(f"Failed to write tags to {file_path.name}: {e}")
+        return False
+
+    return False
+
+
 def write_audio_preserving_format(
-    audio: np.ndarray, 
-    sr: int, 
-    output_path: Path, 
+    audio: np.ndarray,
+    sr: int,
+    output_path: Path,
     source_path: Optional[Path] = None,
-    mp3_bitrate: Optional[int] = None
+    mp3_bitrate: Optional[int] = None,
+    metadata: Optional[Dict] = None
 ) -> bool:
     """
     Write audio to output_path, preserving the format indicated by the file extension.
-    
+
     For MP3/M4A output, uses pydub if available, otherwise falls back to FLAC.
     Bitrate is detected from source_path if provided, or uses mp3_bitrate parameter.
-    
+    If metadata is provided, writes ID3 tags (MP3) or Vorbis comments (FLAC).
+
     Args:
         audio: Audio array of shape (samples,) or (samples, channels)
         sr: Sample rate
         output_path: Output file path (extension determines format)
         source_path: Optional source file for bitrate detection
         mp3_bitrate: Optional explicit bitrate (kbps)
-    
+        metadata: Optional dict with track_metadata_* keys for ID3 tags
+
     Returns:
         True if written in requested format, False if fell back to different format
     """
     ext = output_path.suffix.lower()
-    
+
     # Ensure proper shape for soundfile
     if audio.ndim == 1:
         audio = audio[:, np.newaxis]
-    
+
     # Lossless formats - use soundfile directly
     if ext in LOSSLESS_FORMATS:
         sf.write(str(output_path), audio, sr)
+        # Write metadata tags if provided
+        if metadata:
+            write_id3_tags(output_path, metadata)
         return True
     
     # Lossy formats (MP3, M4A, AAC) - use pydub
@@ -209,12 +308,18 @@ def write_audio_preserving_format(
                 pydub_format = 'mp3'
             
             segment.export(str(output_path), format=pydub_format, bitrate=f'{bitrate}k')
+            # Write metadata tags if provided
+            if metadata:
+                write_id3_tags(output_path, metadata)
             return True
-            
+
         except Exception as e:
             # Fall back to FLAC
             fallback_path = output_path.with_suffix('.flac')
             sf.write(str(fallback_path), audio, sr)
+            # Write metadata tags if provided
+            if metadata:
+                write_id3_tags(fallback_path, metadata)
             logger.warning(f"Lossy export failed ({e}), wrote FLAC instead: {fallback_path.name}")
             return False
     
@@ -256,7 +361,7 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
 
 def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
                    start_sample: int, end_sample: int, sr: int,
-                   fade_len: int) -> Optional[Path]:
+                   fade_len: int, metadata: Optional[Dict] = None) -> Optional[Path]:
     """
     Crop a stem file at the same sample positions as the full mix crop.
     Preserves the source stem's format (MP3→MP3, FLAC→FLAC, etc.).
@@ -269,6 +374,7 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         end_sample: End sample index
         sr: Sample rate (target)
         fade_len: Fade length in samples
+        metadata: Optional dict with track_metadata_* keys for ID3 tags
 
     Returns:
         Path to cropped stem, or None if failed
@@ -306,9 +412,10 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         source_ext = stem_path.suffix.lower()
         crop_stem_name = f"{crop_base_path.stem}_{stem_name}{source_ext}"
         crop_stem_path = crop_base_path.parent / crop_stem_name
-        
-        # Write using format-aware function
-        write_audio_preserving_format(stem_crop, sr, crop_stem_path, source_path=stem_path)
+
+        # Write using format-aware function (with ID3 metadata if provided)
+        write_audio_preserving_format(stem_crop, sr, crop_stem_path, source_path=stem_path,
+                                      metadata=metadata)
 
         return crop_stem_path
 
@@ -319,9 +426,12 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
 
 def crop_all_stems(folder_path: Path, crop_base_path: Path,
                    start_sample: int, end_sample: int, sr: int,
-                   fade_len: int) -> Dict[str, Path]:
+                   fade_len: int, metadata: Optional[Dict] = None) -> Dict[str, Path]:
     """
     Crop all available stems at the same positions as the full mix.
+
+    Args:
+        metadata: Optional dict with track_metadata_* keys for ID3 tags
 
     Returns:
         Dict mapping stem names to cropped paths
@@ -342,7 +452,8 @@ def crop_all_stems(folder_path: Path, crop_base_path: Path,
 
         cropped = crop_stem_file(
             stem_path, crop_base_path, stem_name,
-            start_sample, end_sample, sr, fade_len
+            start_sample, end_sample, sr, fade_len,
+            metadata=metadata
         )
         if cropped:
             cropped_stems[stem_name] = cropped
@@ -526,9 +637,26 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     total_samples = audio.shape[0]
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
-    
+
     # Preserve source format
     source_ext = full_mix_path.suffix.lower()
+
+    # Load source .INFO for ID3 metadata (to write to crop files)
+    source_info = {}
+    source_info_path = get_info_path(full_mix_path)
+    if source_info_path.exists():
+        try:
+            source_info = read_info(source_info_path)
+        except Exception as e:
+            logger.debug(f"Failed to read source info for ID3 tags: {e}")
+
+    # Extract ID3 metadata for writing to crop audio files
+    id3_metadata = {
+        k: source_info.get(k) for k in [
+            'track_metadata_artist', 'track_metadata_title',
+            'track_metadata_album', 'track_metadata_year', 'track_metadata_genre'
+        ] if source_info.get(k)
+    }
 
     # Find start after silence (-72dB threshold)
     start_sample = get_start_offset_above_threshold(audio, threshold_db=-72.0)
@@ -556,16 +684,18 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         # Apply fades
         crop_audio = apply_fades(crop_audio, fade_len)
 
-        # Save with same format as source
+        # Save with same format as source (with ID3 metadata)
         track_name = full_mix_path.parent.name
         crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
-        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path)
+        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path,
+                                      metadata=id3_metadata)
 
-        # Crop stems at the same positions
+        # Crop stems at the same positions (also with ID3 metadata)
         cropped_stems = crop_all_stems(
             folder_path, crop_path,
-            current_sample, end_sample, sr, fade_len
+            current_sample, end_sample, sr, fade_len,
+            metadata=id3_metadata
         )
         if cropped_stems:
             logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")
@@ -714,6 +844,14 @@ def create_crops_for_file(folder_path: Path,
     info_data = read_info(info_path)
     bpm = info_data.get('bpm', 0)
 
+    # Extract ID3 metadata for writing to crop audio files
+    id3_metadata = {
+        k: info_data.get(k) for k in [
+            'track_metadata_artist', 'track_metadata_title',
+            'track_metadata_album', 'track_metadata_year', 'track_metadata_genre'
+        ] if info_data.get(k)
+    }
+
     # If BPM not in INFO, calculate from beat times
     if not bpm and beat_times is not None and len(beat_times) > 1:
         ibis = np.diff(beat_times)
@@ -828,16 +966,18 @@ def create_crops_for_file(folder_path: Path,
         # Apply fades
         crop_audio = apply_fades(crop_audio, fade_len)
 
-        # Save with same format as source
+        # Save with same format as source (with ID3 metadata)
         track_name = full_mix_path.parent.name
         crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
-        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path)
+        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path,
+                                      metadata=id3_metadata)
 
-        # Crop stems at the same positions
+        # Crop stems at the same positions (also with ID3 metadata)
         cropped_stems = crop_all_stems(
             folder_path, crop_path,
-            actual_start_sample, actual_end_sample, sr, fade_len
+            actual_start_sample, actual_end_sample, sr, fade_len,
+            metadata=id3_metadata
         )
         if cropped_stems:
             logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")

@@ -373,6 +373,54 @@ python src/preprocessing/demucs_sep.py audio/ --batch
 
 ---
 
+## BS Roformer Source Separation (Superior to Demucs)
+
+BS Roformer models provide state-of-the-art vocal/instrumental separation, outperforming Demucs.
+
+### Installation
+
+```bash
+# Install audio-separator (base)
+pip install audio-separator
+
+# For AMD ROCm GPUs - install ROCm-compatible ONNX Runtime:
+pip uninstall onnxruntime-gpu  # Remove CUDA version if present
+pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+
+# Note: BS Roformer models use PyTorch (your ROCm PyTorch works)
+# ONNX Runtime is only needed for MDX-Net models
+```
+
+### Usage
+
+```bash
+# Separate vocals with best model (SDR 12.97)
+audio-separator song.wav --model_filename model_bs_roformer_ep_317_sdr_12.9755.ckpt
+
+# List all available models
+audio-separator --list_models
+
+# Test script for all models (see tests/test_bs_roformer.py)
+python tests/test_bs_roformer.py song.wav --output out --models all
+```
+
+### ONNX Runtime for AMD ROCm
+
+> **⚠️ Important:** The default `onnxruntime-gpu` package is CUDA-only and won't work on AMD GPUs.
+
+| GPU | Package | Install Command |
+|-----|---------|-----------------|
+| AMD (ROCm 7.2+) | `onnxruntime-migraphx` | `pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/` |
+| AMD (fallback) | `onnxruntime` | `pip install onnxruntime` (CPU-only, PyTorch models still use GPU) |
+| NVIDIA | `onnxruntime-gpu` | `pip install onnxruntime-gpu` |
+
+**Note:** May require `numpy==1.26.4` (numpy 2.0 incompatible with ROCm ONNX wheels).
+
+**Docs:** https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
+
+
+---
+
 ## Known Issues & Solutions
 
 ### ✅ Audio Commons librosa API Errors (FIXED)

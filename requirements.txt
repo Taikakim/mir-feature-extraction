@@ -116,6 +116,30 @@ matplotlib>=3.8.0
 pillow>=10.0.0
 
 # =============================================================================
+# Audio Source Separation (BS Roformer / Mel-Band Roformer)
+# =============================================================================
+# Superior to Demucs for vocal/instrumental separation
+audio-separator  # pip install audio-separator (base install)
+# For GPU acceleration, also need ONNX Runtime - see section below
+
+# =============================================================================
+# ONNX Runtime for AMD ROCm (for audio-separator MDX-Net models)
+# =============================================================================
+# NOTE: pip install audio-separator[gpu] installs onnxruntime-gpu which is CUDA-only!
+# For AMD GPUs, install the ROCm-compatible version instead:
+#
+# Option 1: ROCm 7.2+ (Recommended for AMD)
+#   pip uninstall onnxruntime-gpu  # Remove CUDA version if installed
+#   pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+#   # May require: pip install numpy==1.26.4 (numpy 2.0 incompatible)
+#
+# Option 2: CPU-only fallback (BS Roformer still uses GPU via PyTorch)
+#   pip uninstall onnxruntime-gpu
+#   pip install onnxruntime
+#
+# Docs: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
+
+# =============================================================================
 # External Dependencies (installed separately)
 # =============================================================================
 # - timbral_models (Audio Commons) - bash scripts/setup_external_repos.sh

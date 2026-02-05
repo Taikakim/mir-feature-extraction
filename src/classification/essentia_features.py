@@ -24,6 +24,7 @@ Features extracted:
 
 import multiprocessing
 import numpy as np
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -962,15 +963,26 @@ def batch_analyze_essentia_features(root_directory: str | Path,
                 if error:
                     stats['errors'].append(f"{folder_name}: {error}")
     else:
-        # Parallel processing
+        # Parallel processing with staggered startup to avoid TensorFlow deadlock
         logger.info(f"Processing with {workers} parallel workers")
+        logger.info("Staggering initial worker startup to avoid TensorFlow deadlock...")
 
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            # Submit all tasks
-            futures = {
-                executor.submit(_process_folder_essentia, args): args[0]
-                for args in work_args
-            }
+            # Submit tasks with staggered startup for initial workers
+            # TensorFlow deadlocks when multiple processes load the same graph simultaneously
+            stagger_delay = 1.5  # seconds between initial worker startups
+            futures = {}
+
+            for idx, args in enumerate(work_args):
+                # Add delay for initial workers to allow TensorFlow initialization
+                if idx < workers and idx > 0:
+                    time.sleep(stagger_delay)
+                    logger.debug(f"Submitted worker {idx + 1}/{workers}")
+
+                future = executor.submit(_process_folder_essentia, args)
+                futures[future] = args[0]
+
+            logger.info(f"All {len(futures)} tasks submitted")
 
             # Process completed tasks
             completed = 0
