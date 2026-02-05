@@ -57,437 +57,9 @@ from core.file_utils import find_organized_folders, find_crop_folders, find_crop
 from core.json_handler import safe_update, read_info, get_info_path
 from core.file_locks import FileLock
 
-
-# =============================================================================
-# ANSI Color Codes for Terminal Output
-# =============================================================================
-class Colors:
-    """ANSI escape codes for colored terminal output."""
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-
-    # Standard colors
-    BLACK = '\033[30m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
-    CYAN = '\033[36m'
-    WHITE = '\033[37m'
-
-    # Bright/Light colors
-    LIGHT_RED = '\033[91m'
-    LIGHT_GREEN = '\033[92m'
-    LIGHT_YELLOW = '\033[93m'
-    LIGHT_BLUE = '\033[94m'
-    LIGHT_MAGENTA = '\033[95m'
-    LIGHT_CYAN = '\033[96m'
-
-    # Background colors
-    BG_RED = '\033[41m'
-    BG_GREEN = '\033[42m'
-    BG_YELLOW = '\033[43m'
-
-    # Semantic aliases
-    HEADER = LIGHT_GREEN + BOLD
-    FILENAME = YELLOW
-    STAGE = LIGHT_CYAN + BOLD
-    SUCCESS = GREEN
-    WARNING = YELLOW  # Orange not available, yellow is close
-    ERROR = LIGHT_RED
-    NOTIFICATION = LIGHT_YELLOW
-    PROGRESS = CYAN
-    DIM_TEXT = DIM
-
-
-def color(text: str, color_code: str) -> str:
-    """Wrap text with color code and reset."""
-    return f"{color_code}{text}{Colors.RESET}"
-
-
-def fmt_filename(name: str) -> str:
-    """Format a filename with yellow color."""
-    return color(name, Colors.FILENAME)
-
-
-def fmt_header(text: str) -> str:
-    """Format a header with light green bold."""
-    return color(text, Colors.HEADER)
-
-
-def fmt_stage(text: str) -> str:
-    """Format a stage name with cyan bold."""
-    return color(text, Colors.STAGE)
-
-
-def fmt_success(text: str) -> str:
-    """Format success message with green."""
-    return color(text, Colors.SUCCESS)
-
-
-def fmt_warning(text: str) -> str:
-    """Format warning with yellow/orange."""
-    return color(text, Colors.WARNING)
-
-
-def fmt_error(text: str) -> str:
-    """Format error with light red."""
-    return color(text, Colors.ERROR)
-
-
-def fmt_progress(text: str) -> str:
-    """Format progress info with cyan."""
-    return color(text, Colors.PROGRESS)
-
-
-def fmt_notification(text: str) -> str:
-    """Format notification with light yellow."""
-    return color(text, Colors.NOTIFICATION)
-
-
-def fmt_dim(text: str) -> str:
-    """Format text as dimmed."""
-    return color(text, Colors.DIM_TEXT)
-
-
-class ColoredFormatter(logging.Formatter):
-    """Custom formatter that adds colors based on log level and content."""
-
-    LEVEL_COLORS = {
-        logging.DEBUG: Colors.DIM,
-        logging.INFO: Colors.RESET,
-        logging.WARNING: Colors.YELLOW,
-        logging.ERROR: Colors.LIGHT_RED,
-        logging.CRITICAL: Colors.BG_RED + Colors.WHITE,
-    }
-
-    def format(self, record):
-        # Get base color for log level
-        level_color = self.LEVEL_COLORS.get(record.levelno, Colors.RESET)
-
-        # Format the message
-        msg = record.getMessage()
-
-        # Apply special formatting based on content
-        if record.levelno >= logging.ERROR:
-            msg = f"{Colors.LIGHT_RED}{msg}{Colors.RESET}"
-        elif record.levelno >= logging.WARNING:
-            msg = f"{Colors.YELLOW}{msg}{Colors.RESET}"
-        elif '=====' in msg or '-----' in msg:
-            # Headers/separators
-            msg = f"{Colors.LIGHT_GREEN}{Colors.BOLD}{msg}{Colors.RESET}"
-        elif msg.startswith('[STAGE') or msg.startswith('[1') or msg.startswith('[2'):
-            # Stage markers
-            msg = f"{Colors.LIGHT_CYAN}{Colors.BOLD}{msg}{Colors.RESET}"
-        elif 'Progress:' in msg or '%' in msg:
-            # Progress updates
-            msg = f"{Colors.CYAN}{msg}{Colors.RESET}"
-        elif 'complete' in msg.lower() or 'success' in msg.lower() or 'finished' in msg.lower():
-            # Success messages
-            msg = f"{Colors.GREEN}{msg}{Colors.RESET}"
-        elif 'skip' in msg.lower():
-            # Skipped items
-            msg = f"{Colors.DIM}{msg}{Colors.RESET}"
-
-        # Format timestamp and level
-        timestamp = self.formatTime(record, self.datefmt)
-        level = record.levelname
-
-        if record.levelno >= logging.WARNING:
-            level = f"{level_color}{level}{Colors.RESET}"
-
-        return f"{Colors.DIM}{timestamp}{Colors.RESET} {level}: {msg}"
-
-
-def setup_colored_logging(level=logging.INFO):
-    """Setup logging with colored output for the master pipeline."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(ColoredFormatter(datefmt='%H:%M:%S'))
-
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-
-    # Remove existing handlers and add colored one
-    for h in root_logger.handlers[:]:
-        root_logger.removeHandler(h)
-    root_logger.addHandler(handler)
-
-    # Also configure our module logger
-    logger = logging.getLogger(__name__)
-    logger.setLevel(level)
-
-    return logger
-
+# Logger setup (ColoredFormatter and colors imported from core.terminal)
 
 logger = logging.getLogger(__name__)
-
-# Try to import mutagen for MP3 metadata extraction
-try:
-    import mutagen
-    from mutagen.easyid3 import EasyID3
-    from mutagen.id3 import ID3
-    MUTAGEN_AVAILABLE = True
-except ImportError:
-    MUTAGEN_AVAILABLE = False
-    logger.debug("mutagen not available - MP3 metadata extraction disabled (pip install mutagen)")
-
-# Artists that should trigger metadata lookup for real artist
-VARIOUS_ARTISTS_ALIASES = {
-    'various artists',
-    'various',
-    'va',
-    'v/a',
-    'v.a.',
-    'compilation',
-    'various artist',
-    'unknown artist',
-    'unknown',
-    '',
-}
-
-
-def extract_audio_metadata(audio_path: Path) -> Dict[str, Any]:
-    """
-    Extract metadata from audio file (MP3 ID3 tags, FLAC tags, etc.).
-
-    Args:
-        audio_path: Path to audio file
-
-    Returns:
-        Dictionary with metadata keys:
-        - track_metadata_artist
-        - track_metadata_title
-        - track_metadata_album
-        - track_metadata_year
-        - track_metadata_genre
-    """
-    if not MUTAGEN_AVAILABLE:
-        return {}
-
-    metadata = {}
-
-    try:
-        # Try to load with mutagen (handles MP3, FLAC, OGG, etc.)
-        audio = mutagen.File(audio_path, easy=True)
-
-        if audio is None:
-            return {}
-
-        # Extract common tags
-        if 'artist' in audio:
-            metadata['track_metadata_artist'] = audio['artist'][0]
-        if 'title' in audio:
-            metadata['track_metadata_title'] = audio['title'][0]
-        if 'album' in audio:
-            metadata['track_metadata_album'] = audio['album'][0]
-        if 'date' in audio:
-            # Date can be YYYY or YYYY-MM-DD
-            date_str = audio['date'][0]
-            if date_str:
-                metadata['track_metadata_year'] = int(date_str[:4])
-        if 'genre' in audio:
-            metadata['track_metadata_genre'] = audio['genre'][0]
-
-        # For MP3, also try to get year from TDRC if date wasn't found
-        if 'track_metadata_year' not in metadata and audio_path.suffix.lower() == '.mp3':
-            try:
-                id3 = ID3(audio_path)
-                if 'TDRC' in id3:
-                    year_str = str(id3['TDRC'].text[0])
-                    if year_str:
-                        metadata['track_metadata_year'] = int(year_str[:4])
-                elif 'TYER' in id3:
-                    year_str = str(id3['TYER'].text[0])
-                    if year_str:
-                        metadata['track_metadata_year'] = int(year_str[:4])
-            except Exception:
-                pass
-
-    except Exception as e:
-        logger.debug(f"Failed to extract metadata from {audio_path.name}: {e}")
-
-    return metadata
-
-
-def build_folder_name_from_metadata(metadata: Dict[str, Any], original_name: str) -> Optional[str]:
-    """
-    Build a folder name from metadata.
-
-    Format: "Artist - Title" or "Artist - Album - Title"
-
-    Returns None if insufficient metadata.
-    """
-    artist = metadata.get('track_metadata_artist')
-    title = metadata.get('track_metadata_title')
-
-    if not artist or not title:
-        return None
-
-    # Clean up for filesystem
-    def clean(s):
-        return re.sub(r'[<>:"/\\|?*]', '', s).strip()
-
-    artist = clean(artist)
-    title = clean(title)
-
-    if not artist or not title:
-        return None
-
-    return f"{artist} - {title}"
-
-
-def _process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
-    """
-    Worker function for parallel feature extraction.
-
-    Args:
-        args: Tuple of (folder_path, overwrite)
-
-    Returns:
-        Tuple of (folder_name, success, message)
-    """
-    folder, overwrite = args
-    folder_name = folder.name
-
-    # Use file lock to prevent race conditions
-    with FileLock(folder) as lock:
-        if not lock.acquired:
-            return (folder_name, False, "Could not acquire lock")
-
-        try:
-            # Import here to avoid issues with multiprocessing
-            from timbral.loudness import analyze_file_loudness
-            from spectral.spectral_features import analyze_spectral_features
-
-            stems = get_stem_files(folder, include_full_mix=True)
-            if 'full_mix' not in stems:
-                return (folder_name, False, "No full_mix found")
-
-            full_mix = stems['full_mix']
-            info_path = get_info_path(full_mix)
-            existing = read_info(info_path) if info_path.exists() else {}
-            results = {}
-
-            # Loudness
-            if overwrite or 'lufs' not in existing:
-                try:
-                    results.update(analyze_file_loudness(full_mix))
-                except Exception as e:
-                    pass  # Non-critical
-
-            # Spectral
-            if overwrite or 'spectral_flatness' not in existing:
-                try:
-                    results.update(analyze_spectral_features(full_mix))
-                except Exception as e:
-                    pass  # Non-critical
-
-            if results:
-                safe_update(info_path, results)
-                return (folder_name, True, f"Extracted {len(results)} features")
-            else:
-                return (folder_name, True, "Already complete")
-
-        except Exception as e:
-            return (folder_name, False, str(e))
-
-
-def _process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool, bool]) -> Tuple[str, int, str]:
-    """
-    Worker function for parallel crop creation.
-
-    Args:
-        args: Tuple of (folder_path, crops_dir, length_samples, sequential, overlap, div4, overwrite)
-
-    Returns:
-        Tuple of (folder_name, crop_count, message)
-    """
-    folder, crops_dir, length_samples, sequential, overlap, div4, overwrite = args
-    folder_name = folder.name
-
-    # Use file lock to prevent race conditions
-    with FileLock(folder) as lock:
-        if not lock.acquired:
-            return (folder_name, 0, "Could not acquire lock")
-
-        try:
-            # Import here to avoid issues with multiprocessing
-            from tools.create_training_crops import create_crops_for_file
-
-            count = create_crops_for_file(
-                folder,
-                length_samples=length_samples,
-                output_dir=crops_dir,
-                sequential=sequential,
-                overlap=overlap,
-                div4=div4,
-                overwrite=overwrite,
-            )
-            return (folder_name, count, f"Created {count} crops")
-
-        except Exception as e:
-            return (folder_name, 0, str(e))
-
-
-def _process_demucs_subprocess(args: Tuple[Path, Path, str, int, str, int]) -> Tuple[str, bool, float, str]:
-    """
-    Worker function for parallel Demucs separation via subprocess.
-
-    Each subprocess gets its own GPU context, allowing true parallel processing.
-
-    Args:
-        args: Tuple of (audio_path, output_dir, model, shifts, format, bitrate)
-
-    Returns:
-        Tuple of (folder_name, success, elapsed_time, message)
-    """
-    audio_path, output_dir, model, shifts, output_format, bitrate = args
-    folder_name = audio_path.parent.name
-
-    start_time = time.time()
-
-    try:
-        # Build demucs command
-        cmd = [
-            'demucs',
-            '-n', model,
-            '--shifts', str(shifts),
-            '-j', '1',  # Single-threaded within each instance
-            '--out', str(output_dir),
-        ]
-
-        # Add format options
-        if output_format == 'mp3':
-            cmd.extend(['--mp3', '--mp3-bitrate', str(bitrate)])
-        elif output_format == 'flac':
-            cmd.append('--flac')
-
-        cmd.append(str(audio_path))
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 minute timeout per track
-        )
-
-        elapsed = time.time() - start_time
-
-        if result.returncode == 0:
-            return (folder_name, True, elapsed, f"Done in {elapsed:.1f}s")
-        else:
-            error_msg = result.stderr[:200] if result.stderr else "Unknown error"
-            return (folder_name, False, elapsed, error_msg)
-
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start_time
-        return (folder_name, False, elapsed, "Timeout (>10min)")
-    except Exception as e:
-        elapsed = time.time() - start_time
-        return (folder_name, False, elapsed, str(e))
 
 
 @dataclass
@@ -555,6 +127,7 @@ class MasterPipelineConfig:
     dry_run: bool = False
     verbose: bool = False
     feature_workers: int = 8  # Parallel workers for feature extraction
+    essentia_workers: int = 4  # Separate limit for Essentia (TensorFlow deadlocks with high parallelism)
     batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
     flamingo_prompts: Dict[str, bool] = field(default_factory=dict)  # Enabled prompts
 
@@ -654,6 +227,7 @@ class MasterPipelineConfig:
             per_feature_overwrite=data.get('overwrite', {}),  # Per-feature overwrite from 'overwrite' section
             verbose=processing.get('verbose', False),
             feature_workers=processing.get('feature_workers', 8),
+            essentia_workers=processing.get('essentia_workers', 4),  # TensorFlow-safe limit
             batch_feature_extraction=processing.get('batch_feature_extraction', True),
             flamingo_prompts=flamingo.get('prompts', {}),
         )
@@ -723,6 +297,7 @@ class MasterPipelineConfig:
                 'overwrite': self.overwrite,
                 'verbose': self.verbose,
                 'feature_workers': self.feature_workers,
+                'essentia_workers': self.essentia_workers,
                 'batch_feature_extraction': self.batch_feature_extraction,
             },
             'overwrite': self.per_feature_overwrite,  # Per-feature overwrite settings
@@ -736,32 +311,6 @@ class MasterPipelineConfig:
 
         with open(yaml_path, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-
-
-@dataclass
-class PipelineStats:
-    """Statistics for pipeline execution."""
-    # Organization
-    files_found: int = 0
-    files_organized: int = 0
-
-    # Track analysis
-    tracks_total: int = 0
-    tracks_separated: int = 0
-    tracks_analyzed: int = 0
-    tracks_metadata_found: int = 0
-
-    # Crops
-    crops_created: int = 0
-    crops_analyzed: int = 0
-
-    # Timing
-    time_organize: float = 0.0
-    time_track_analysis: float = 0.0
-    time_cropping: float = 0.0
-    time_crop_analysis: float = 0.0
-
-    errors: List[str] = field(default_factory=list)
 
 
 class MasterPipeline:
@@ -825,9 +374,15 @@ class MasterPipeline:
         else:
             logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
 
-        # Summary
-        total_time = time.time() - total_start
+        # Finalize timing
+        self.stats.run_end_time = time.time()
+        total_time = self.stats.total_time
+
+        # Print summary to console
         self._print_summary(total_time)
+        
+        # Write statistics to log file
+        self._write_stats_log()
 
         return self.stats
 
@@ -838,6 +393,7 @@ class MasterPipeline:
         logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
+        self.stats.start_operation('organize')
 
         from preprocessing.file_organizer import organize_directory
 
@@ -852,14 +408,20 @@ class MasterPipeline:
 
         self.stats.files_found = stats['total']
         self.stats.files_organized = stats['organized']
+        
+        organize_time = self.stats.end_operation('organize',
+            items_processed=stats['organized'],
+            items_skipped=stats['total'] - stats['organized'])
 
         # Cleanup filenames for T5 tokenizer compatibility
         if self.config.cleanup_filenames and not self.config.dry_run:
+            self.stats.start_operation('filename_cleanup')
             self._run_filename_cleanup()
+            self.stats.end_operation('filename_cleanup')
 
         self.stats.time_organize = time.time() - start_time
 
-        logger.info(f"Organization complete: {stats['organized']}/{stats['total']} files")
+        logger.info(f"Organization complete: {stats['organized']}/{stats['total']} files in {organize_time:.1f}s")
 
     def _run_filename_cleanup(self):
         """Clean up filenames for T5 tokenizer compatibility."""
@@ -879,9 +441,15 @@ class MasterPipeline:
             # Sort: files first, then directories
             items.sort(key=lambda x: (x['type'] == 'directory', str(x['old_path'])))
 
+            cleaned_count = 0
             for item in items:
                 if apply_rename(item):
+                    cleaned_count += 1
                     logger.debug(f"Renamed: {item['old_name']} → {item['new_name']}")
+            
+            # Update timing stats with actual count
+            if 'filename_cleanup' in self.stats.operation_timing:
+                self.stats.operation_timing['filename_cleanup'].items_processed = cleaned_count
 
         except Exception as e:
             logger.warning(f"Filename cleanup failed: {e}")
@@ -890,15 +458,19 @@ class MasterPipeline:
     def _run_metadata_extraction(self):
         """Extract metadata from audio files (MP3 ID3 tags, etc.) and optionally rename."""
         logger.info("\n[1c] Audio File Metadata Extraction")
+        
+        self.stats.start_operation('metadata_extraction')
 
         if not MUTAGEN_AVAILABLE:
             logger.warning("mutagen not installed - skipping metadata extraction (pip install mutagen)")
+            self.stats.end_operation('metadata_extraction')
             return
 
         folders = find_organized_folders(self.working_dir)
 
         if not folders:
             logger.info("No folders to process")
+            self.stats.end_operation('metadata_extraction')
             return
 
         extracted_count = 0
@@ -949,7 +521,9 @@ class MasterPipeline:
                             except Exception as e:
                                 logger.warning(f"Failed to rename {folder.name}: {e}")
 
-        logger.info(f"Metadata extraction: {extracted_count} files processed, {renamed_count} renamed")
+        extract_time = self.stats.end_operation('metadata_extraction', 
+            items_processed=extracted_count)
+        logger.info(f"Metadata extraction: {extracted_count} files processed, {renamed_count} renamed in {extract_time:.1f}s")
 
     def _run_track_analysis(self):
         """Stage 2: Analyze full tracks (Demucs, beats, metadata)."""
@@ -970,19 +544,35 @@ class MasterPipeline:
 
         # Sub-stage 2a: Demucs separation for all tracks
         logger.info("\n[2a] Stem Separation (Demucs)")
+        self.stats.start_operation('demucs')
         self._run_demucs_batch(folders)
+        demucs_time = self.stats.end_operation('demucs', 
+            items_processed=self.stats.tracks_separated,
+            items_skipped=len(folders) - self.stats.tracks_separated)
+        logger.info(fmt_dim(f"    Demucs completed in {demucs_time:.1f}s"))
 
         # Sub-stage 2b: Beat/onset/downbeat detection
         logger.info("\n[2b] Rhythm Analysis (beats, onsets, downbeats)")
+        self.stats.start_operation('rhythm')
         self._run_rhythm_analysis(folders)
+        rhythm_time = self.stats.end_operation('rhythm', items_processed=len(folders))
+        logger.info(fmt_dim(f"    Rhythm analysis completed in {rhythm_time:.1f}s"))
 
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
         logger.info("\n[2c] Metadata Lookup")
+        self.stats.start_operation('metadata')
         self._run_metadata_lookup(folders)
+        metadata_time = self.stats.end_operation('metadata', 
+            items_processed=self.stats.tracks_metadata_found)
+        logger.info(fmt_dim(f"    Metadata lookup completed in {metadata_time:.1f}s"))
 
         # Sub-stage 2d: First-stage features (migrated to crops)
         logger.info("\n[2d] First-Stage Features")
+        self.stats.start_operation('first_stage_features')
         self._run_first_stage_features(folders)
+        features_time = self.stats.end_operation('first_stage_features', 
+            items_processed=len(folders))
+        logger.info(fmt_dim(f"    First-stage features completed in {features_time:.1f}s"))
 
         self.stats.time_track_analysis = time.time() - start_time
 
@@ -1122,7 +712,12 @@ class MasterPipeline:
             self.stats.errors.append(f"Rhythm: {e}")
 
     def _run_metadata_lookup(self, folders: List[Path]):
-        """Look up metadata, with fingerprinting for Various Artists tracks."""
+        """
+        Look up metadata with priority:
+        1. ID3 tags (already extracted to .INFO by _run_metadata_extraction)
+        2. Folder name artist/track info
+        3. Fingerprinting (only as last resort, if use_fingerprinting is True)
+        """
         from core.file_utils import get_stem_files
 
         # Check which tracks need metadata lookup
@@ -1130,22 +725,62 @@ class MasterPipeline:
 
         for folder in folders:
             folder_name = folder.name
-            artist = self._extract_artist_from_name(folder_name)
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                continue
 
-            # Check if artist is a "Various Artists" alias
-            if artist.lower() in VARIOUS_ARTISTS_ALIASES:
-                tracks_needing_lookup.append((folder, 'various_artists'))
+            info_path = get_info_path(stems['full_mix'])
+            existing_info = read_info(info_path) if info_path.exists() else {}
+
+            # Priority 1: Check if we have valid artist from ID3 tags
+            id3_artist = existing_info.get('track_metadata_artist', '').strip()
+            id3_title = existing_info.get('track_metadata_title', '').strip()
+
+            # Check if ID3 artist is valid (not empty or a "Various Artists" alias)
+            has_valid_id3_artist = (
+                id3_artist and
+                id3_artist.lower() not in VARIOUS_ARTISTS_ALIASES
+            )
+
+            # Priority 2: Check folder name for artist/track
+            folder_artist = self._extract_artist_from_name(folder_name)
+            has_valid_folder_artist = (
+                folder_artist and
+                folder_artist.lower() not in VARIOUS_ARTISTS_ALIASES
+            )
+
+            # Determine the best artist and track to use for lookup
+            if has_valid_id3_artist and id3_title:
+                # ID3 tags have valid info - use them for lookup (skip fingerprinting)
+                best_artist = id3_artist
+                best_track = id3_title
+                source = 'id3'
+            elif has_valid_folder_artist:
+                # Folder name has valid artist - use it (skip fingerprinting)
+                _, _, track_name = self._parse_folder_name(folder_name)
+                best_artist = folder_artist
+                best_track = track_name
+                source = 'folder'
             else:
-                # Check if already has metadata
-                stems = get_stem_files(folder, include_full_mix=True)
-                if 'full_mix' in stems:
-                    info_path = get_info_path(stems['full_mix'])
-                    if info_path.exists():
-                        info = read_info(info_path)
-                        if 'release_year' not in info:
-                            tracks_needing_lookup.append((folder, 'missing_year'))
-                    else:
-                        tracks_needing_lookup.append((folder, 'no_info'))
+                # Neither ID3 nor folder name have valid artist - may need fingerprinting
+                _, _, track_name = self._parse_folder_name(folder_name)
+                best_artist = None
+                best_track = track_name or id3_title
+                source = 'unknown'
+
+            # Check if we already have release_year (main metadata indicator)
+            if 'release_year' in existing_info:
+                continue  # Already has full metadata
+
+            # Add to list with context
+            tracks_needing_lookup.append({
+                'folder': folder,
+                'artist': best_artist,
+                'track': best_track,
+                'source': source,
+                'has_valid_id3': has_valid_id3_artist,
+                'has_valid_folder': has_valid_folder_artist,
+            })
 
         if not tracks_needing_lookup:
             logger.info("All tracks have metadata")
@@ -1159,20 +794,45 @@ class MasterPipeline:
 
             sp = init_spotify()
 
-            for folder, reason in tracks_needing_lookup:
-                folder_name = folder.name
-                artist, _, track_name = self._parse_folder_name(folder_name)
+            for track_info in tracks_needing_lookup:
+                folder = track_info['folder']
+                artist = track_info['artist']
+                track_name = track_info['track']
+                source = track_info['source']
+                has_valid_id3 = track_info['has_valid_id3']
+                has_valid_folder = track_info['has_valid_folder']
 
-                if reason == 'various_artists':
-                    # Try fingerprinting first
-                    result = self._fingerprint_track(folder)
-                    if not result:
-                        # Fall back to text search
-                        result = lookup_track(track_name, artist_hint=None, sp=sp,
-                                              fetch_audio_features_flag=True)
-                else:
+                result = None
+
+                if source in ('id3', 'folder'):
+                    # We have valid artist/track - do text search (no fingerprinting needed)
                     result = lookup_track(track_name, artist_hint=artist, sp=sp,
                                           fetch_audio_features_flag=True)
+                    if result:
+                        logger.debug(f"  {folder.name}: Found via {source} tags")
+                else:
+                    # Unknown artist - try text search first, then fingerprinting as last resort
+                    if track_name:
+                        result = lookup_track(track_name, artist_hint=None, sp=sp,
+                                              fetch_audio_features_flag=True)
+
+                    # Only use fingerprinting if:
+                    # 1. Text search failed
+                    # 2. use_fingerprinting is enabled
+                    # 3. We have no valid artist from either ID3 or folder
+                    if not result and self.config.use_fingerprinting:
+                        logger.debug(f"  {folder.name}: Trying fingerprinting (last resort)...")
+                        fp_result = self._fingerprint_track(folder)
+                        if fp_result:
+                            # Fingerprinting found artist/track - now look up full metadata
+                            result = lookup_track(
+                                fp_result.get('track', ''),
+                                artist_hint=fp_result.get('artist'),
+                                sp=sp,
+                                fetch_audio_features_flag=True
+                            )
+                            if result:
+                                logger.debug(f"  {folder.name}: Found via fingerprinting")
 
                 if result:
                     self.stats.tracks_metadata_found += 1
@@ -1384,6 +1044,7 @@ class MasterPipeline:
         logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
+        self.stats.start_operation('cropping')
 
         # Determine crops output directory
         crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
@@ -1462,7 +1123,10 @@ class MasterPipeline:
             logger.error(f"Cropping failed: {e}")
             self.stats.errors.append(f"Cropping: {e}")
 
+        crop_time = self.stats.end_operation('cropping', 
+            items_processed=self.stats.crops_created)
         self.stats.time_cropping = time.time() - start_time
+        logger.info(fmt_dim(f"Cropping completed in {crop_time:.1f}s ({self.stats.crops_created} crops)"))
 
         # Update working dir for crop analysis
         self.crops_dir = crops_dir
@@ -1501,6 +1165,7 @@ class MasterPipeline:
         logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
+        self.stats.start_operation('crop_analysis')
 
         # Find crops directory
         crops_dir = getattr(self, 'crops_dir', None)
@@ -1538,17 +1203,31 @@ class MasterPipeline:
         if not has_stems and not self.config.stems_source:
             # Need to run Demucs on crops
             logger.info("\n[4a] Crop Stem Separation (Demucs)")
+            self.stats.start_operation('crop_demucs')
             self._run_crop_demucs(all_crops)
+            crop_demucs_time = self.stats.end_operation('crop_demucs', 
+                items_processed=len(all_crops))
+            logger.info(fmt_dim(f"    Crop Demucs completed in {crop_demucs_time:.1f}s"))
         elif self.config.stems_source:
             # Crop stems from source
             logger.info("\n[4a] Cropping stems from source")
+            self.stats.start_operation('crop_stems_copy')
             self._crop_stems_from_source(crops_dir)
+            stems_copy_time = self.stats.end_operation('crop_stems_copy')
+            logger.info(fmt_dim(f"    Stems copy completed in {stems_copy_time:.1f}s"))
 
         # Run feature extraction on crops
         logger.info("\n[4b] Crop Feature Extraction")
+        self.stats.start_operation('crop_features')
         self._run_crop_features(crops_dir)
+        crop_features_time = self.stats.end_operation('crop_features',
+            items_processed=self.stats.crops_analyzed)
+        logger.info(fmt_dim(f"    Crop features completed in {crop_features_time:.1f}s"))
 
+        total_crop_analysis_time = self.stats.end_operation('crop_analysis',
+            items_processed=len(all_crops))
         self.stats.time_crop_analysis = time.time() - start_time
+        logger.info(fmt_dim(f"Crop analysis completed in {total_crop_analysis_time:.1f}s"))
 
     def _run_crop_demucs(self, crops: List[Path]):
         """Run Demucs on all crops (batch mode for efficiency)."""
@@ -1625,6 +1304,7 @@ class MasterPipeline:
                 crops=True,
                 overwrite=self.config.overwrite,  # Global overwrite passed to sub-pipeline
                 feature_workers=self.config.feature_workers,
+                essentia_workers=self.config.essentia_workers,  # TensorFlow-safe limit
                 skip_organize=True,
                 skip_demucs=True,  # Already done
                 skip_flamingo=self.config.skip_flamingo,
@@ -1666,7 +1346,7 @@ class MasterPipeline:
             return '', '', name
 
     def _print_summary(self, total_time: float):
-        """Print pipeline summary."""
+        """Print pipeline summary with detailed timing statistics."""
         print("\n" + fmt_header("=" * 70))
         print(fmt_header("MASTER PIPELINE SUMMARY"))
         print(fmt_header("=" * 70))
@@ -1676,6 +1356,12 @@ class MasterPipeline:
             print(f"  Files found:     {self.stats.files_found}")
             print(f"  Files organized: {fmt_success(str(self.stats.files_organized))}")
             print(f"  Time:            {fmt_dim(f'{self.stats.time_organize:.1f}s')}")
+            
+            # Show sub-operation timing
+            if 'organize' in self.stats.operation_timing:
+                op = self.stats.operation_timing['organize']
+                if op.items_processed > 0:
+                    print(f"  Speed:           {fmt_dim(f'{op.items_per_second:.2f} files/s')}")
 
         if not self.config.skip_track_analysis:
             print(fmt_stage("\n[Stage 2] Track Analysis"))
@@ -1684,16 +1370,39 @@ class MasterPipeline:
             print(f"  Metadata found:  {self.stats.tracks_metadata_found}")
             print(f"  Analyzed:        {fmt_success(str(self.stats.tracks_analyzed))}")
             print(f"  Time:            {fmt_dim(f'{self.stats.time_track_analysis:.1f}s')}")
+            
+            # Show sub-stage timing details
+            sub_ops = ['demucs', 'rhythm', 'metadata', 'first_stage_features']
+            sub_labels = ['Demucs', 'Rhythm', 'Metadata', 'Features']
+            for op_name, label in zip(sub_ops, sub_labels):
+                if op_name in self.stats.operation_timing:
+                    op = self.stats.operation_timing[op_name]
+                    speed_str = f" ({op.seconds_per_item:.2f}s/track)" if op.items_processed > 0 else ""
+                    print(fmt_dim(f"    {label:12} {op.elapsed:6.1f}s{speed_str}"))
 
         if not self.config.skip_crops:
             print(fmt_stage("\n[Stage 3] Cropping"))
             print(f"  Crops created:   {fmt_success(str(self.stats.crops_created))}")
             print(f"  Time:            {fmt_dim(f'{self.stats.time_cropping:.1f}s')}")
+            
+            if 'cropping' in self.stats.operation_timing:
+                op = self.stats.operation_timing['cropping']
+                if op.items_processed > 0:
+                    print(f"  Speed:           {fmt_dim(f'{op.items_per_second:.2f} crops/s')}")
 
         if not self.config.skip_crop_analysis:
             print(fmt_stage("\n[Stage 4] Crop Analysis"))
             print(f"  Crops analyzed:  {fmt_success(str(self.stats.crops_analyzed))}")
             print(f"  Time:            {fmt_dim(f'{self.stats.time_crop_analysis:.1f}s')}")
+            
+            # Show sub-operation timing
+            crop_sub_ops = ['crop_demucs', 'crop_stems_copy', 'crop_features']
+            crop_labels = ['Crop Demucs', 'Stems Copy', 'Features']
+            for op_name, label in zip(crop_sub_ops, crop_labels):
+                if op_name in self.stats.operation_timing:
+                    op = self.stats.operation_timing[op_name]
+                    speed_str = f" ({op.items_per_second:.2f}/s)" if op.items_processed > 0 else ""
+                    print(fmt_dim(f"    {label:12} {op.elapsed:6.1f}s{speed_str}"))
 
         print(fmt_notification(f"\nTotal Time: {total_time:.1f}s ({total_time/60:.1f} min)"))
 
@@ -1705,6 +1414,65 @@ class MasterPipeline:
                 print(fmt_dim(f"  ... and {len(self.stats.errors) - 5} more"))
 
         print(fmt_header("=" * 70))
+
+    def _write_stats_log(self):
+        """Write detailed statistics to a JSON log file."""
+        from datetime import datetime
+        import json
+        
+        # Create log filename with timestamp
+        timestamp = datetime.fromtimestamp(self.stats.run_start_time).strftime('%Y%m%d_%H%M%S')
+        log_filename = f"pipeline_run_{timestamp}.json"
+        log_path = self.working_dir / log_filename
+        
+        # Get stats as dictionary
+        stats_dict = self.stats.to_dict()
+        
+        # Add config summary
+        stats_dict['config'] = {
+            'input_dir': str(self.config.input_dir),
+            'output_dir': str(self.config.output_dir) if self.config.output_dir else None,
+            'device': self.config.device,
+            'demucs_model': self.config.demucs_model,
+            'demucs_workers': self.config.demucs_workers,
+            'crop_mode': self.config.crop_mode,
+            'crop_length_samples': self.config.crop_length_samples,
+            'crop_workers': self.config.crop_workers,
+            'rhythm_workers': self.config.rhythm_workers,
+            'feature_workers': self.config.feature_workers,
+        }
+        
+        try:
+            with open(log_path, 'w') as f:
+                json.dump(stats_dict, f, indent=2)
+            logger.info(f"Statistics written to: {fmt_filename(str(log_path))}")
+        except Exception as e:
+            logger.warning(f"Failed to write stats log: {e}")
+        
+        # Also print a summary table of operation timing to console
+        if self.stats.operation_timing:
+            print("\n" + fmt_header("=== OPERATION TIMING DETAILS ==="))
+            print(f"{'Operation':<25} {'Time':>10} {'Items':>8} {'Speed':>15}")
+            print("-" * 60)
+            
+            for name, timing in sorted(self.stats.operation_timing.items(), 
+                                       key=lambda x: x[1].start_time):
+                time_str = f"{timing.elapsed:.1f}s"
+                items_str = str(timing.items_processed) if timing.items_processed > 0 else "-"
+                
+                if timing.items_processed > 0 and timing.elapsed > 0:
+                    if timing.items_per_second >= 1:
+                        speed_str = f"{timing.items_per_second:.2f}/s"
+                    else:
+                        speed_str = f"{timing.seconds_per_item:.2f}s/item"
+                else:
+                    speed_str = "-"
+                
+                print(f"{name:<25} {time_str:>10} {items_str:>8} {speed_str:>15}")
+            
+            print("-" * 60)
+            print(f"{'Total':<25} {self.stats.total_time:>9.1f}s")
+            print()
 
 
 def main():

@@ -9,17 +9,17 @@
 # PATHS
 # =============================================================================
 paths:
-  input: null                    # Required: Input directory (raw audio or organized)
-  output: null                   # Output directory for organized files (null = in-place)
+  input: /run/media/kim/LostLands/ai-audio/test                    # Required: Input directory (raw audio or organized)
+  output: null                   # Output directory for organized files (null = in-place, uses input dir; use this if you alread have a folder with the separated stems and the beat info)
   stems_source: null             # Pre-existing stems directory (skips Demucs if set)
 
 # =============================================================================
 # STAGE CONTROL
 # =============================================================================
 stages:
-  organize: true                 # Stage 1: Organize raw files into project structure
-  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: true                 # Stage 3: Create training crops
+  organize: null             # Stage 1: Organize raw files into project structure
+  track_analysis: null       # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: true            # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -53,7 +53,7 @@ demucs:
   # Each worker runs a separate Demucs process for true parallel GPU utilization
   # 2 workers: ~10GB VRAM, ~1.7x speedup
   # 4 workers: ~20GB VRAM (requires high VRAM GPU)
-  workers: 2                     # Parallel workers for batch processing
+  workers: 4                  # Parallel workers for batch processing
 
 # =============================================================================
 # RHYTHM ANALYSIS
@@ -62,13 +62,13 @@ rhythm:
   # Beat detection uses madmom by default
   # These features are extracted for full tracks and migrated to crops
   enabled: true
-  workers: 4                     # Parallel workers for beat/downbeat detection
+  workers: 10                   # Parallel workers for beat/downbeat detection
 
 # =============================================================================
 # CROPPING
 # =============================================================================
 cropping:
-  length_samples: 2097152        # Crop length in SAMPLES (2097152 = ~47.5s at 44.1kHz)
+  length_samples: 524288        # Crop length in SAMPLES (2097152 = ~47.5s at 44.1kHz)
                                  # Common values:
                                  #   1323000  = ~30.0s at 44.1kHz
                                  #   2097152  = ~47.5s at 44.1kHz (default)
@@ -76,9 +76,9 @@ cropping:
 
   mode: beat-aligned               # sequential or beat-aligned
   overlap: false                 # 50% overlap between crops
-  div4: true                    # Ensure downbeats divisible by 4 (beat-aligned mode)
+  div4: null                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 6                     # Parallel workers for cropping
+  workers: 20                    # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -148,11 +148,11 @@ music_flamingo:
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:
-    full: 500
-    technical: 500
-    genre_mood: 500
-    instrumentation: 500
-    structure: 500
+    full: 384
+    technical: 128
+    genre_mood: 128
+    instrumentation: 128
+    structure: 128
 
 # =============================================================================
 # METADATA LOOKUP
@@ -193,5 +193,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 8             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  feature_workers: 20            # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
   essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

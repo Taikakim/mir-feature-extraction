@@ -57,6 +57,7 @@ class PipelineConfig:
     batch: bool = False
     batch_feature_extraction: bool = True  # New flag for batched feature extraction per module
     feature_workers: int = 8  # Number of parallel workers for CPU features
+    essentia_workers: int = 4  # Separate limit for Essentia (TensorFlow can't handle high parallelism)
     overwrite: bool = False
     verbose: bool = False
     crops: bool = False  # Process crop files instead of organized folders
@@ -775,8 +776,10 @@ class Pipeline:
         # PASS 3: Essentia (Parallel processing)
         # =========================================================================
         if not self.config.skip_classification:
+            # Use separate essentia_workers limit - TensorFlow deadlocks with too many parallel processes
+            essentia_workers = min(self.config.essentia_workers, self.config.feature_workers)
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
-            logger.info(f"  Parallel workers: {self.config.feature_workers}")
+            logger.info(f"  Parallel workers: {essentia_workers} (TensorFlow-safe limit)")
             try:
                 from src.classification.essentia_features import analyze_essentia_features
 
@@ -790,7 +793,7 @@ class Pipeline:
                 if to_process:
                     logger.info(f"  Processing {len(to_process)} files...")
 
-                    with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
+                    with ProcessPoolExecutor(max_workers=essentia_workers) as executor:
                         futures = {
                             executor.submit(_safe_analyze_essentia, crop_path): crop_path
                             for crop_path in to_process

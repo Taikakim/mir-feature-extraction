@@ -91,6 +91,139 @@ OPTIONAL_TRANSFERRABLE = [
 # Demucs stem names to crop along with full_mix
 STEM_NAMES = ['drums', 'bass', 'other', 'vocals']
 
+# Supported lossless formats (use soundfile)
+LOSSLESS_FORMATS = {'.flac', '.wav', '.aiff', '.ogg'}
+
+# Lossy formats that need pydub/ffmpeg
+LOSSY_FORMATS = {'.mp3', '.m4a', '.aac'}
+
+# MP3 writing support
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
+
+def get_audio_bitrate(file_path: Path) -> int:
+    """
+    Detect audio bitrate using mutagen or default to 128kbps.
+    Supports MP3, M4A, and AAC formats.
+    """
+    ext = file_path.suffix.lower()
+    try:
+        if ext == '.mp3':
+            from mutagen.mp3 import MP3
+            audio = MP3(str(file_path))
+            return audio.info.bitrate // 1000
+        elif ext in ('.m4a', '.aac'):
+            from mutagen.mp4 import MP4
+            audio = MP4(str(file_path))
+            return audio.info.bitrate // 1000
+    except Exception:
+        pass
+    return 128  # Default fallback
+
+
+def get_mp3_bitrate(file_path: Path) -> int:
+    """Legacy wrapper for get_audio_bitrate."""
+    return get_audio_bitrate(file_path)
+
+
+def write_audio_preserving_format(
+    audio: np.ndarray, 
+    sr: int, 
+    output_path: Path, 
+    source_path: Optional[Path] = None,
+    mp3_bitrate: Optional[int] = None
+) -> bool:
+    """
+    Write audio to output_path, preserving the format indicated by the file extension.
+    
+    For MP3/M4A output, uses pydub if available, otherwise falls back to FLAC.
+    Bitrate is detected from source_path if provided, or uses mp3_bitrate parameter.
+    
+    Args:
+        audio: Audio array of shape (samples,) or (samples, channels)
+        sr: Sample rate
+        output_path: Output file path (extension determines format)
+        source_path: Optional source file for bitrate detection
+        mp3_bitrate: Optional explicit bitrate (kbps)
+    
+    Returns:
+        True if written in requested format, False if fell back to different format
+    """
+    ext = output_path.suffix.lower()
+    
+    # Ensure proper shape for soundfile
+    if audio.ndim == 1:
+        audio = audio[:, np.newaxis]
+    
+    # Lossless formats - use soundfile directly
+    if ext in LOSSLESS_FORMATS:
+        sf.write(str(output_path), audio, sr)
+        return True
+    
+    # Lossy formats (MP3, M4A, AAC) - use pydub
+    if ext in LOSSY_FORMATS:
+        if not PYDUB_AVAILABLE:
+            # Fall back to FLAC
+            fallback_path = output_path.with_suffix('.flac')
+            sf.write(str(fallback_path), audio, sr)
+            logger.warning(f"pydub not available, wrote FLAC instead: {fallback_path.name}")
+            return False
+        
+        try:
+            # Determine bitrate
+            bitrate = mp3_bitrate
+            if bitrate is None and source_path is not None:
+                bitrate = get_audio_bitrate(source_path)
+            if bitrate is None:
+                bitrate = 128
+            
+            # Convert numpy array to pydub AudioSegment
+            # pydub expects int16 samples
+            audio_int16 = (audio * 32767).astype(np.int16)
+            
+            # Flatten if stereo for raw data
+            if audio_int16.shape[1] == 1:
+                channels = 1
+                raw_data = audio_int16.flatten().tobytes()
+            else:
+                channels = audio_int16.shape[1]
+                raw_data = audio_int16.tobytes()
+            
+            segment = AudioSegment(
+                data=raw_data,
+                sample_width=2,  # 16-bit = 2 bytes
+                frame_rate=sr,
+                channels=channels
+            )
+            
+            # Determine output format for pydub
+            if ext == '.mp3':
+                pydub_format = 'mp3'
+            elif ext in ('.m4a', '.aac'):
+                pydub_format = 'ipod'  # pydub uses 'ipod' for M4A/AAC
+            else:
+                pydub_format = 'mp3'
+            
+            segment.export(str(output_path), format=pydub_format, bitrate=f'{bitrate}k')
+            return True
+            
+        except Exception as e:
+            # Fall back to FLAC
+            fallback_path = output_path.with_suffix('.flac')
+            sf.write(str(fallback_path), audio, sr)
+            logger.warning(f"Lossy export failed ({e}), wrote FLAC instead: {fallback_path.name}")
+            return False
+    
+    # Unknown format - default to FLAC
+    fallback_path = output_path.with_suffix('.flac')
+    sf.write(str(fallback_path), audio, sr)
+    logger.warning(f"Unknown format {ext}, wrote FLAC instead: {fallback_path.name}")
+    return False
+
 
 def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     """
@@ -126,9 +259,10 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
                    fade_len: int) -> Optional[Path]:
     """
     Crop a stem file at the same sample positions as the full mix crop.
+    Preserves the source stem's format (MP3→MP3, FLAC→FLAC, etc.).
 
     Args:
-        stem_path: Path to source stem (e.g., drums.flac)
+        stem_path: Path to source stem (e.g., drums.mp3 or drums.flac)
         crop_base_path: Base path for output (e.g., TrackName_0.flac)
         stem_name: Name of stem (drums, bass, other, vocals)
         start_sample: Start sample index
@@ -168,10 +302,13 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         # Apply fades
         stem_crop = apply_fades(stem_crop, fade_len)
 
-        # Save with prefixed name: TrackName_0_drums.flac
-        crop_stem_name = f"{crop_base_path.stem}_{stem_name}{crop_base_path.suffix}"
+        # Preserve source stem format (e.g., drums.mp3 → crop_drums.mp3)
+        source_ext = stem_path.suffix.lower()
+        crop_stem_name = f"{crop_base_path.stem}_{stem_name}{source_ext}"
         crop_stem_path = crop_base_path.parent / crop_stem_name
-        sf.write(str(crop_stem_path), stem_crop, sr)
+        
+        # Write using format-aware function
+        write_audio_preserving_format(stem_crop, sr, crop_stem_path, source_path=stem_path)
 
         return crop_stem_path
 
@@ -194,7 +331,7 @@ def crop_all_stems(folder_path: Path, crop_base_path: Path,
     for stem_name in STEM_NAMES:
         # Find stem file (check multiple extensions)
         stem_path = None
-        for ext in ['.flac', '.wav', '.mp3']:
+        for ext in ['.flac', '.wav', '.mp3', '.m4a']:
             potential = folder_path / f"{stem_name}{ext}"
             if potential.exists():
                 stem_path = potential
@@ -384,10 +521,14 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     """
     Create simple sequential crops at fixed sample length.
     No beat alignment, just exact sample boundaries with fades.
+    Preserves input file format (FLAC→FLAC, MP3→MP3, etc.).
     """
     total_samples = audio.shape[0]
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
+    
+    # Preserve source format
+    source_ext = full_mix_path.suffix.lower()
 
     # Find start after silence (-72dB threshold)
     start_sample = get_start_offset_above_threshold(audio, threshold_db=-72.0)
@@ -415,12 +556,11 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         # Apply fades
         crop_audio = apply_fades(crop_audio, fade_len)
 
-        # Save
-        # Use parent folder name (Track Name) for consistent naming
+        # Save with same format as source
         track_name = full_mix_path.parent.name
-        crop_name = f"{track_name}_{crop_count}.flac"
+        crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
-        sf.write(str(crop_path), crop_audio, sr)
+        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path)
 
         # Crop stems at the same positions
         cropped_stems = crop_all_stems(
@@ -504,7 +644,11 @@ def create_crops_for_file(folder_path: Path,
 
     # Check if crops already exist (skip if not overwriting)
     if not overwrite and crops_dir.exists():
-        existing_crops = list(crops_dir.glob("*_[0-9].flac")) + list(crops_dir.glob("*_[0-9][0-9].flac"))
+        # Check for crops in any format
+        existing_crops = []
+        for ext in ['.flac', '.mp3', '.wav', '.m4a']:
+            existing_crops.extend(crops_dir.glob(f"*_[0-9]{ext}"))
+            existing_crops.extend(crops_dir.glob(f"*_[0-9][0-9]{ext}"))
         if existing_crops:
             logger.info(f"Crops already exist ({len(existing_crops)} files): {folder_path.name}. Use --overwrite to regenerate.")
             return 0
@@ -527,6 +671,9 @@ def create_crops_for_file(folder_path: Path,
     total_samples = audio.shape[0]
     duration_sec = total_samples / sr
     length_sec = length_samples / sr
+    
+    # Preserve source format
+    source_ext = full_mix_path.suffix.lower()
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")
 
@@ -681,12 +828,11 @@ def create_crops_for_file(folder_path: Path,
         # Apply fades
         crop_audio = apply_fades(crop_audio, fade_len)
 
-        # Save
-        # Use parent folder name (Track Name) for consistent naming
+        # Save with same format as source
         track_name = full_mix_path.parent.name
-        crop_name = f"{track_name}_{crop_count}.flac"
+        crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
-        sf.write(str(crop_path), crop_audio, sr)
+        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path)
 
         # Crop stems at the same positions
         cropped_stems = crop_all_stems(
@@ -864,8 +1010,11 @@ def main():
                     except ValueError:
                         pass  # Not inside output_dir, keep it
 
-                # Skip folders that look like crop folders (contain _N.flac files)
-                crop_files = list(folder.glob("*_[0-9].flac")) + list(folder.glob("*_[0-9][0-9].flac"))
+                # Skip folders that look like crop folders (contain _N.<ext> files)
+                crop_files = []
+                for ext in ['.flac', '.mp3', '.wav', '.m4a']:
+                    crop_files.extend(folder.glob(f"*_[0-9]{ext}"))
+                    crop_files.extend(folder.glob(f"*_[0-9][0-9]{ext}"))
                 if crop_files and not any(folder.glob("full_mix.*")):
                     logger.debug(f"Skipping (looks like crop folder): {folder.name}")
                     continue
