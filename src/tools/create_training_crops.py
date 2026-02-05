@@ -575,8 +575,8 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         end_sec = end_sample / sr
         position = start_sec / duration_sec
 
-        # Slice rhythm files (beats, downbeats, onsets)
-        rhythm_suffixes = ['.BEATS_GRID', '.ONSETS', '.DOWNBEATS']
+        # Slice rhythm files (beats, downbeats) - NOT onsets, which are unused by crop analysis
+        rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
         for suffix in rhythm_suffixes:
             candidates = list(folder_path.glob(f"*{suffix}"))
             if candidates:
@@ -846,8 +846,8 @@ def create_crops_for_file(folder_path: Path,
         actual_start_sec = float(actual_start_sample / sr)
         actual_end_sec = float(actual_end_sample / sr)
 
-        # Slice Rhythm Files
-        rhythm_suffixes = ['.BEATS_GRID', '.ONSETS', '.DOWNBEATS']
+        # Slice Rhythm Files (NOT onsets - unused by crop analysis, would need re-detection)
+        rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
         folder = full_mix_path.parent
         
         for suffix in rhythm_suffixes:
