@@ -57,9 +57,25 @@ from core.file_utils import find_organized_folders, find_crop_folders, find_crop
 from core.json_handler import safe_update, read_info, get_info_path
 from core.file_locks import FileLock
 
-# Logger setup (ColoredFormatter and colors imported from core.terminal)
+# Extracted modules (refactoring)
+from core.terminal import (
+    Colors, ColoredFormatter, setup_colored_logging,
+    color, fmt_filename, fmt_header, fmt_stage, fmt_success,
+    fmt_warning, fmt_error, fmt_progress, fmt_notification, fmt_dim
+)
+from core.metadata_utils import (
+    MUTAGEN_AVAILABLE, VARIOUS_ARTISTS_ALIASES,
+    extract_audio_metadata, build_folder_name_from_metadata
+)
+from core.pipeline_stats import TimingStats, PipelineStats
+from core.pipeline_workers import (
+    process_folder_features as _process_folder_features,
+    process_folder_crops as _process_folder_crops,
+    process_demucs_subprocess as _process_demucs_subprocess
+)
 
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
