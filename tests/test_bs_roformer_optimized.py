@@ -115,12 +115,15 @@ except ImportError:
         return iterable
 
 # Import BS-RoFormer
+# Import BS-RoFormer from audio-separator (ensure compatibility)
 try:
-    from bs_roformer import BSRoformer, MelBandRoformer
+    from audio_separator.separator.uvr_lib_v5.roformer.bs_roformer import BSRoformer
     BS_ROFORMER_AVAILABLE = True
 except ImportError:
     BS_ROFORMER_AVAILABLE = False
-    print("WARNING: BS-RoFormer not available. Install with: pip install BS-RoFormer")
+    print("WARNING: audio-separator BSRoformer not available. Install audio-separator.")
+
+MelBandRoformer = BSRoformer # Alias as they share implementation in this lib
 
 
 # =============================================================================
@@ -396,6 +399,16 @@ def load_audio(audio_path: Path, sample_rate: int = 44100) -> Tuple[np.ndarray, 
         audio = audio[:, :2]
     
     return audio, sr
+
+
+def normalize_audio(audio: np.ndarray, max_peak: float = 0.9, min_peak: float = 1e-8) -> np.ndarray:
+    """Normalize audio to max_peak."""
+    # Audio is (time, channels) or (channels, time) - check shape
+    # Based on load_audio, output is (time, channels)
+    peak = np.max(np.abs(audio))
+    if peak > min_peak:
+        audio = audio * (max_peak / peak)
+    return audio
 
 
 def save_audio(audio: np.ndarray, output_path: Path, sample_rate: int = 44100):
@@ -874,6 +887,11 @@ Examples:
     # Load audio
     print(f"\nLoading audio: {input_path}")
     audio, sr = load_audio(input_path, audio_cfg.sample_rate)
+    
+    # Normalize audio (crucial for accurate model inference)
+    print("Normalizing input audio...")
+    audio = normalize_audio(audio)
+    
     duration = len(audio) / sr
     print(f"  Duration: {duration:.1f}s ({duration/60:.1f} min)")
     print(f"  Sample rate: {sr} Hz")
@@ -914,6 +932,8 @@ Examples:
                 inst_name = f"stem_{i}"
             
             out_path = output_dir / f"{stem_name}_{inst_name}.wav"
+            # Normalize stem
+            separated[i] = normalize_audio(separated[i])
             save_audio(separated[i], out_path, sr)
             print(f"  {inst_name.capitalize()}: {out_path}")
             
@@ -921,6 +941,8 @@ Examples:
         # Single stem output
         target_name = model_cfg.target_instrument or "vocals"
         target_path = output_dir / f"{stem_name}_{target_name}.wav"
+        # Normalize target
+        separated[0] = normalize_audio(separated[0])
         save_audio(separated[0], target_path, sr)
         print(f"  {target_name.capitalize()}: {target_path}")
         
@@ -932,6 +954,8 @@ Examples:
         residual_name = "residual" if target_name == "other" else residual_name
         
         residual_path = output_dir / f"{stem_name}_{residual_name}.wav"
+        # Normalize residual
+        residual = normalize_audio(residual)
         save_audio(residual, residual_path, sr)
         print(f"  {residual_name.capitalize()}: {residual_path}")
     
