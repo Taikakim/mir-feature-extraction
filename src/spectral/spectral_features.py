@@ -66,8 +66,8 @@ def calculate_spectral_flatness(audio: np.ndarray,
         hop_length=hop_length
     )
 
-    # Return mean across time
-    return float(np.mean(flatness))
+    # Return median across time (more robust to outlier frames)
+    return float(np.median(flatness))
 
 
 def calculate_spectral_flux(audio: np.ndarray,
@@ -95,8 +95,8 @@ def calculate_spectral_flux(audio: np.ndarray,
     # Calculate flux as sum of squared differences between consecutive frames
     flux = np.sqrt(np.sum(np.diff(S, axis=1) ** 2, axis=0))
 
-    # Return mean flux
-    return float(np.mean(flux))
+    # Return median flux (more robust to outlier frames during transitions)
+    return float(np.median(flux))
 
 
 def calculate_spectral_moments(audio: np.ndarray,
@@ -148,11 +148,11 @@ def calculate_spectral_moments(audio: np.ndarray,
                 skewness_list.append(skewness)
                 kurtosis_list.append(kurtosis)
 
-    # Return mean values
-    mean_skewness = float(np.mean(skewness_list)) if len(skewness_list) > 0 else 0.0
-    mean_kurtosis = float(np.mean(kurtosis_list)) if len(kurtosis_list) > 0 else 0.0
+    # Return median values (more robust to outlier frames during transitions)
+    median_skewness = float(np.median(skewness_list)) if len(skewness_list) > 0 else 0.0
+    median_kurtosis = float(np.median(kurtosis_list)) if len(kurtosis_list) > 0 else 0.0
 
-    return mean_skewness, mean_kurtosis
+    return median_skewness, median_kurtosis
 
 
 def analyze_spectral_features(audio_path: str | Path,
