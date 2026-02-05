@@ -1,116 +1,95 @@
-# Session Summary - 2026-01-26 (Latest Updates)
+# Session Summary - 2026-02-05 (Latest Updates)
 
 ## What We Accomplished
 
-### 1. Major Pipeline Improvements
+### 1. Critical Bug Fixes
 
-**Parallel Processing:**
-- Feature extraction now uses `ProcessPoolExecutor` with 8 workers (configurable)
-- Cropping now uses `ProcessPoolExecutor` with 6 workers (configurable)
-- Rhythm/beat detection now uses `ProcessPoolExecutor` with 4 workers (configurable)
-- Demucs now uses subprocess-based parallel processing with 2 workers (configurable)
-- All use `FileLock` to prevent race conditions
+**Essentia TensorFlow Deadlock:**
+- Running Essentia with 20 parallel workers caused TensorFlow to deadlock
+- Added separate `essentia_workers` config (default: 4, TensorFlow-safe)
+- Other CPU features can still use higher parallelism
 
-**Bug Fixes:**
-- Fixed duplicate file creation on resume (cleaned filename check)
-- Fixed cropping import error (`process_folder` -> `create_crops_for_file`)
-- Fixed MP3 stem sample rate (96kbps->128kbps, added resampling)
-- Removed unnecessary BPM requirement for beat-aligned cropping
-- Added rhythm file slicing to sequential mode
+**Skip Logic Key Mismatches:**
+- Sequential mode was checking wrong feature keys, causing re-processing
+- Fixed: `spectral_centroid` → `spectral_flatness`, `rms_bass` → `rms_energy_bass`, `chroma_mean` → `chroma_0`
 
-**New Features:**
-- Audio file metadata extraction (MP3 ID3 tags) via mutagen
-- Infinite loop prevention for cropping
-- Colored terminal output for better readability
-- Batch feature extraction mode (GPU model persistence)
+**Crop BPM/Beat Count Bug:**
+- Crop-specific values were being overwritten by source track values
+- Fixed: Removed `bpm` and `beat_count` from `OPTIONAL_TRANSFERRABLE`
 
-### 2. Configuration Changes
+### 2. Performance Improvements
 
-**New CLI Arguments:**
-```bash
---feature-workers N   # Parallel workers for feature extraction (default: 8)
---crop-workers N      # Parallel workers for cropping (default: 6)
---rhythm-workers N    # Parallel workers for rhythm/beat detection (default: 4)
---demucs-workers N    # Parallel Demucs processes (default: 2, ~5GB VRAM each)
-```
+**Spectral Features - Essentia Migration:**
+- Rewrote `spectral_features.py` to use Essentia (faster C++ backend)
+- Changed aggregation from mean to median (more robust to outliers)
+- Kept librosa as fallback if Essentia not available
 
-**YAML Config (master_pipeline.yaml):**
+### 3. Pipeline Cleanup
+
+**Removed Unused .ONSETS Slicing:**
+- Analysis found `.ONSETS` files were sliced for crops but never used
+- Crop analysis only calculates BPM via librosa (doesn't read .ONSETS)
+- Syncopation/complexity (which use .ONSETS) not run on crops
+- Keeps `.BEATS_GRID` and `.DOWNBEATS` slicing (these ARE used)
+
+### 4. Code Refactoring
+
+**New Core Modules Extracted:**
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/core/terminal.py` | 179 | ANSI colors, ColoredFormatter |
+| `src/core/metadata_utils.py` | 149 | Audio metadata extraction |
+| `src/core/pipeline_stats.py` | 148 | TimingStats, PipelineStats |
+| `src/core/pipeline_workers.py` | 180 | Parallel processing workers |
+
+`master_pipeline.py` reduced from 2218 to 1673 lines (-545)
+
+## Configuration Changes
+
+**New Option:**
 ```yaml
-demucs:
-  workers: 2                     # Subprocess-based parallel processing
-
-rhythm:
-  workers: 4                     # Parallel beat/downbeat detection
-
-cropping:
-  workers: 6                     # Parallel cropping
-
 processing:
-  feature_workers: 8             # Parallel feature extraction
-
-music_flamingo:
-  model: Q8_0
-  prompts:                       # Select which prompts to generate
-    full: true
-    technical: true
-    genre_mood: true
-    instrumentation: true
-    structure: true
-  max_tokens:                    # Max tokens per prompt type
-    full: 500
-    technical: 500
-    genre_mood: 500
-    instrumentation: 500
-    structure: 500
+  feature_workers: 20    # For CPU features (loudness, spectral, timbral)
+  essentia_workers: 4    # Separate limit for Essentia (TensorFlow-safe)
 ```
 
-### 3. Batch Feature Extraction Mode
+## Commits This Session
 
-New "hybrid batch" approach for crop analysis:
-- **Pass 1:** Light CPU features (Loudness, Spectral, Rhythm, Chroma) - one pass per file
-- **Pass 2:** AudioBox Aesthetics - load model once, process all
-- **Pass 3:** Essentia Classification - load model once, process all
-- **Pass 4:** Music Flamingo - load model once, process all
-- **Pass 5:** MIDI Transcription
+| Hash | Description |
+|------|-------------|
+| `6cb866f` | Refactor pipeline with modular utilities and fix Essentia deadlock |
+| `d9092a9` | Add imports for extracted core modules in master_pipeline |
+| `3a63fa2` | Fix skip logic key mismatches in sequential processing mode |
+| `7e802d9` | Use median instead of mean for spectral feature aggregation |
+| `60cb85c` | Rewrite spectral features to use Essentia instead of librosa |
+| `750e96a` | Fix crop INFO overwriting crop-specific bpm/beat_count with source values |
+| `edf1d07` | Remove unused .ONSETS slicing from crop creation |
 
-Controlled by `batch_feature_extraction: true` in config.
+## Verified Pipeline Flow
 
-### 4. Music Flamingo Config Fixes
-
-- Prompts now respect config settings (was ignoring and running all 5)
-- Token limits per prompt type are now configurable
-- Model selection (IQ3_M, Q6_K, Q8_0) via config
-
-### 5. Metadata Extraction (Stage 1c)
-
-Extracts MP3/FLAC metadata at pipeline start:
-- `track_metadata_artist`
-- `track_metadata_title`
-- `track_metadata_album`
-- `track_metadata_year`
-- `track_metadata_genre`
-
-Optionally renames "Various Artists" folders using extracted metadata.
+1. **Stage 2a:** Demucs separates full tracks into stems
+2. **Stage 2b:** Rhythm analysis (beats, onsets, downbeats) on full_mix only
+3. **Stage 2c:** Metadata lookup
+4. **Stage 2d:** Per-stem features stored on full_mix .INFO
+5. **Stage 3:** Crops created with stems at identical positions (perfect sync)
+   - `.BEATS_GRID` and `.DOWNBEATS` sliced (NOT `.ONSETS`)
+   - Crop-specific bpm/beat_count calculated fresh
+6. **Stage 4:** Only full_mix crops analyzed (stem crops excluded)
+   - Per-stem loudness extracted from stem crops
+   - Existing features skipped when overwrite=false
 
 ## Key Files Modified
 
-- `src/master_pipeline.py` (parallel processing, batch mode, config parsing)
-- `src/pipeline.py` (batch feature extraction, flamingo config)
-- `src/classification/music_flamingo.py` (token limits, prompt filtering)
-- `src/rhythm/beat_grid.py` (parallel processing with workers)
-- `src/tools/create_training_crops.py` (resampling, BPM fix, rhythm slicing)
-- `src/preprocessing/file_organizer.py` (cleaned filename check)
-- `src/preprocessing/demucs_sep.py` (128kbps default)
-- `src/preprocessing/demucs_sep_optimized.py` (128kbps default)
-- `config/master_pipeline.yaml` (all new parallel/flamingo settings)
-- `requirements.txt` (added mutagen)
-
-## Dependencies Added
-```bash
-pip install mutagen  # MP3/FLAC metadata extraction (optional)
-```
+- `src/pipeline.py` - essentia_workers, skip logic fixes
+- `src/master_pipeline.py` - refactored to use core modules
+- `src/spectral/spectral_features.py` - Essentia + median aggregation
+- `src/tools/create_training_crops.py` - bpm fix, removed .ONSETS slicing
+- `config/master_pipeline.yaml` - essentia_workers option
+- `config/small.yaml` - test config with high parallelism
 
 ## Previous Sessions
-- See `SESSION_SUMMARY_2026-01-26.md` for full details
-- See `SESSION_SUMMARY_2026-01-23.md` for crop generation upgrades
-- See `SESSION_SUMMARY_2026-01-22.md` for earlier work
+
+- See `project.log` for full session history
+- 2026-01-26: Parallel processing, batch feature extraction
+- 2026-01-25: Demucs parallel processing, file organizer improvements
+- 2026-01-21: ADTOF drum transcription integration

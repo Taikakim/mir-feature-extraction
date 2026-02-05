@@ -1478,3 +1478,112 @@ CUDA available: True (ROCm compatibility layer)
 **Status:** All major optimizations complete. System ready for production use.
 
 ---
+
+## Session: 2026-02-05 - Pipeline Fixes and Optimizations
+
+### Issues Addressed
+
+**1. Essentia TensorFlow Deadlock (Critical)**
+- **Problem:** Running Essentia with 20 parallel workers caused TensorFlow to deadlock
+- **Cause:** Each worker process loaded TensorFlow models simultaneously
+- **Fix:** Added separate `essentia_workers` config option (default: 4)
+- **Files:** `src/pipeline.py`, `src/master_pipeline.py`, `config/*.yaml`
+
+**2. Skip Logic Key Mismatches**
+- **Problem:** Sequential mode checked wrong keys, causing unnecessary re-processing
+- **Fixes:**
+  - `spectral_centroid` → `spectral_flatness`
+  - `rms_bass` → `rms_energy_bass`
+  - `chroma_mean` → `chroma_0`
+- **File:** `src/pipeline.py`
+
+**3. Spectral Features - Essentia Migration**
+- **Problem:** Using librosa (slower), mean aggregation (less robust)
+- **Fixes:**
+  - Rewrote to use Essentia (Flatness, Flux, CentralMoments, DistributionShape)
+  - Changed aggregation from mean to median (robust to outlier frames)
+  - Kept librosa as fallback
+- **File:** `src/spectral/spectral_features.py`
+
+**4. Crop BPM/Beat Count Overwrite Bug**
+- **Problem:** Crop-specific bpm/beat_count were overwritten by source track values
+- **Cause:** `OPTIONAL_TRANSFERRABLE` included `bpm` and `beat_count`
+- **Fix:** Removed these from transfer list - they're calculated fresh per crop
+- **File:** `src/tools/create_training_crops.py`
+
+**5. Unused .ONSETS Slicing**
+- **Problem:** `.ONSETS` files were sliced for crops but never used
+- **Analysis:**
+  - Crop analysis only calculates BPM via librosa.beat.beat_track()
+  - Syncopation/complexity (which use .ONSETS) not run on crops
+  - Per-stem rhythm detects onsets fresh, doesn't read file
+- **Fix:** Removed `.ONSETS` from crop slicing, keeping `.BEATS_GRID` and `.DOWNBEATS`
+- **File:** `src/tools/create_training_crops.py`
+
+### Commits Made
+
+| Hash | Description |
+|------|-------------|
+| `6cb866f` | Refactor pipeline with modular utilities and fix Essentia deadlock |
+| `d9092a9` | Add imports for extracted core modules in master_pipeline |
+| `3a63fa2` | Fix skip logic key mismatches in sequential processing mode |
+| `7e802d9` | Use median instead of mean for spectral feature aggregation |
+| `60cb85c` | Rewrite spectral features to use Essentia instead of librosa |
+| `750e96a` | Fix crop INFO overwriting crop-specific bpm/beat_count with source values |
+| `edf1d07` | Remove unused .ONSETS slicing from crop creation |
+
+### Pipeline Flow Verification
+
+**Verified Correct:**
+1. ✅ Demucs separates full tracks into stems
+2. ✅ Rhythm analysis (beats, onsets, downbeats) runs on full_mix only
+3. ✅ Per-stem features stored on full_mix .INFO (not separate files)
+4. ✅ Crops created with stems at identical sample positions (perfect sync)
+5. ✅ Only full_mix crops analyzed (stem crops excluded by find_crop_files())
+6. ✅ Crop-specific bpm/beat_count calculated fresh, not inherited
+7. ✅ Existing features skipped when overwrite=false
+
+### New Configuration Options
+
+```yaml
+processing:
+  feature_workers: 20    # For CPU features (loudness, spectral, timbral)
+  essentia_workers: 4    # Separate limit for Essentia (TensorFlow-safe)
+```
+
+### Files Created This Session
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/core/terminal.py` | 179 | ANSI colors, ColoredFormatter, fmt_* helpers |
+| `src/core/metadata_utils.py` | 149 | Audio metadata extraction (mutagen) |
+| `src/core/pipeline_stats.py` | 148 | TimingStats, PipelineStats dataclasses |
+| `src/core/pipeline_workers.py` | 180 | Parallel processing worker functions |
+| `config/small.yaml` | 197 | Test configuration with high parallelism |
+| `tests/poc_lmm_revise.py` | 281 | Proof of concept test |
+
+### Files Modified
+
+| File | Change Summary |
+|------|----------------|
+| `src/pipeline.py` | +essentia_workers, fixed skip logic keys |
+| `src/master_pipeline.py` | Refactored to use core modules, +timing stats |
+| `src/spectral/spectral_features.py` | Rewrote with Essentia, median aggregation |
+| `src/tools/create_training_crops.py` | Fixed bpm transfer, removed .ONSETS slicing |
+| `config/master_pipeline.yaml` | +essentia_workers option |
+
+### Key Learnings
+
+1. **TensorFlow + multiprocessing**: Even with `spawn`, too many concurrent TF initializations cause deadlock
+2. **Feature key consistency**: Skip logic must use exact keys that features write
+3. **Onset files**: Only used by syncopation/complexity, not general crop analysis
+4. **Median vs Mean**: More robust for spectral aggregation per original design spec
+
+### Next Steps
+
+1. Run full pipeline on test dataset to verify fixes
+2. Monitor Essentia pass with 4 workers for stability
+3. Consider adding syncopation/complexity to crop analysis if needed
+4. Update CLAUDE.md with new essentia_workers config
+
+---
