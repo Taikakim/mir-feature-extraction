@@ -83,9 +83,9 @@ TRANSFERRABLE_FEATURES = [
 ]
 
 # Features that are good to have but don't warn if missing
+# NOTE: bpm, beat_count, downbeats are NOT transferred - they're calculated fresh per crop
 OPTIONAL_TRANSFERRABLE = [
-    'bpm',
-    'beat_count',
+    # Currently empty - crop-specific rhythm features are calculated, not transferred
 ]
 
 # Demucs stem names to crop along with full_mix
