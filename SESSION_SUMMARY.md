@@ -74,7 +74,7 @@ processing:
 
 | Hash | Description |
 |------|-------------|
-| `pending` | Universal should_process() pattern and Essentia sequential fix |
+| `68a5c3f` | Universal should_process() pattern and Essentia sequential fix |
 | `d3b7132` | Update session documentation for 2026-02-05 |
 | `edf1d07` | Remove unused .ONSETS slicing from crop creation |
 | `750e96a` | Fix crop INFO overwriting crop-specific bpm/beat_count with source values |
