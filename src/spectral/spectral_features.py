@@ -1,16 +1,15 @@
 """
 Spectral Features Analysis for MIR Project
 
-This module extracts spectral features from audio signals:
+This module extracts spectral features from audio signals using Essentia:
 - Spectral flatness: Measure of noisiness vs tonality
 - Spectral flux: Rate of spectral change over time
 - Spectral skewness: Asymmetry of the spectral distribution
 - Spectral kurtosis: Peakedness of the spectral distribution
 
 Dependencies:
-- librosa
+- essentia
 - numpy
-- scipy
 - soundfile
 - src.core.file_utils
 - src.core.common
@@ -23,11 +22,9 @@ Output:
 """
 
 import numpy as np
-import librosa
 import soundfile as sf
-from scipy import stats
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List
 import logging
 
 import sys
@@ -39,46 +36,98 @@ from core.json_handler import safe_update, get_info_path
 
 logger = logging.getLogger(__name__)
 
+# Try to import Essentia
+try:
+    import essentia
+    import essentia.standard as es
+    ESSENTIA_AVAILABLE = True
+except ImportError:
+    ESSENTIA_AVAILABLE = False
+    logger.warning("Essentia not available - spectral features will use fallback")
 
-def calculate_spectral_flatness(audio: np.ndarray,
-                                sample_rate: int,
-                                n_fft: int = 2048,
-                                hop_length: int = 512) -> float:
+
+def analyze_spectral_features_essentia(audio: np.ndarray,
+                                       sample_rate: int,
+                                       frame_size: int = 2048,
+                                       hop_size: int = 512) -> Dict[str, float]:
     """
-    Calculate spectral flatness (Wiener entropy).
-
-    Flatness measures how noise-like (flat spectrum) vs tonal (peaked spectrum)
-    the audio is. Values near 1 indicate noise, near 0 indicate tones.
+    Calculate spectral features using Essentia (faster than librosa).
 
     Args:
-        audio: Audio signal (mono)
+        audio: Audio signal (mono, float32)
         sample_rate: Sample rate in Hz
-        n_fft: FFT window size
-        hop_length: Hop length in samples
+        frame_size: FFT window size
+        hop_size: Hop size in samples
 
     Returns:
-        Mean spectral flatness (0.0-1.0)
+        Dictionary with spectral features
     """
-    # Calculate spectral flatness
-    flatness = librosa.feature.spectral_flatness(
-        y=audio,
-        n_fft=n_fft,
-        hop_length=hop_length
+    if not ESSENTIA_AVAILABLE:
+        raise ImportError("Essentia is required for spectral feature extraction")
+
+    # Ensure float32 for Essentia
+    audio = audio.astype(np.float32)
+
+    # Create Essentia algorithms
+    windowing = es.Windowing(type='hann', size=frame_size)
+    spectrum_algo = es.Spectrum(size=frame_size)
+    flatness_algo = es.Flatness()
+    flux_algo = es.Flux(norm='L2')  # Essentia Flux maintains internal state
+    central_moments = es.CentralMoments(range=frame_size // 2 + 1)
+    dist_shape = es.DistributionShape()
+
+    # Frame the audio
+    frame_generator = es.FrameGenerator(
+        audio,
+        frameSize=frame_size,
+        hopSize=hop_size,
+        startFromZero=True
     )
 
-    # Return median across time (more robust to outlier frames)
-    return float(np.median(flatness))
+    # Collect per-frame values
+    flatness_values: List[float] = []
+    flux_values: List[float] = []
+    skewness_values: List[float] = []
+    kurtosis_values: List[float] = []
+
+    for frame in frame_generator:
+        # Apply windowing
+        windowed = windowing(frame)
+
+        # Compute spectrum
+        spectrum = spectrum_algo(windowed)
+
+        # Flatness
+        flatness = flatness_algo(spectrum)
+        flatness_values.append(flatness)
+
+        # Flux (Essentia maintains internal state for previous spectrum)
+        flux = flux_algo(spectrum)
+        flux_values.append(flux)
+
+        # Central moments for skewness and kurtosis
+        moments = central_moments(spectrum)
+        spread, skewness, kurtosis = dist_shape(moments)
+        skewness_values.append(skewness)
+        kurtosis_values.append(kurtosis)
+
+    # Aggregate using median (more robust to outlier frames)
+    results = {
+        'spectral_flatness': float(np.median(flatness_values)) if flatness_values else 0.0,
+        'spectral_flux': float(np.median(flux_values)) if flux_values else 0.0,
+        'spectral_skewness': float(np.median(skewness_values)) if skewness_values else 0.0,
+        'spectral_kurtosis': float(np.median(kurtosis_values)) if kurtosis_values else 0.0,
+    }
+
+    return results
 
 
-def calculate_spectral_flux(audio: np.ndarray,
-                            sample_rate: int,
-                            n_fft: int = 2048,
-                            hop_length: int = 512) -> float:
+def analyze_spectral_features_librosa(audio: np.ndarray,
+                                      sample_rate: int,
+                                      n_fft: int = 2048,
+                                      hop_length: int = 512) -> Dict[str, float]:
     """
-    Calculate spectral flux.
-
-    Flux measures the rate of change in the spectrum over time.
-    Higher values indicate more rapid spectral changes.
+    Fallback: Calculate spectral features using librosa.
 
     Args:
         audio: Audio signal (mono)
@@ -87,56 +136,30 @@ def calculate_spectral_flux(audio: np.ndarray,
         hop_length: Hop length in samples
 
     Returns:
-        Mean spectral flux
+        Dictionary with spectral features
     """
-    # Compute spectrogram
-    S = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
+    import librosa
 
-    # Calculate flux as sum of squared differences between consecutive frames
+    # Spectral flatness
+    flatness = librosa.feature.spectral_flatness(
+        y=audio, n_fft=n_fft, hop_length=hop_length
+    )
+    median_flatness = float(np.median(flatness))
+
+    # Spectral flux
+    S = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
     flux = np.sqrt(np.sum(np.diff(S, axis=1) ** 2, axis=0))
+    median_flux = float(np.median(flux))
 
-    # Return median flux (more robust to outlier frames during transitions)
-    return float(np.median(flux))
-
-
-def calculate_spectral_moments(audio: np.ndarray,
-                               sample_rate: int,
-                               n_fft: int = 2048,
-                               hop_length: int = 512) -> Tuple[float, float]:
-    """
-    Calculate spectral skewness and kurtosis.
-
-    Skewness measures the asymmetry of the spectral distribution.
-    Kurtosis measures the peakedness/tailedness of the spectral distribution.
-
-    Args:
-        audio: Audio signal (mono)
-        sample_rate: Sample rate in Hz
-        n_fft: FFT window size
-        hop_length: Hop length in samples
-
-    Returns:
-        Tuple of (skewness, kurtosis)
-    """
-    # Compute spectrogram
-    S = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
-
-    # For each time frame, treat the spectrum as a distribution
+    # Spectral moments (skewness, kurtosis)
     skewness_list = []
     kurtosis_list = []
 
     for frame_idx in range(S.shape[1]):
         spectrum = S[:, frame_idx]
-
-        # Normalize spectrum to be a probability distribution
         if np.sum(spectrum) > 0:
             spectrum = spectrum / np.sum(spectrum)
-
-            # Calculate moments
-            # Create frequency bins
             freq_bins = np.arange(len(spectrum))
-
-            # Calculate skewness and kurtosis
             mean = np.sum(freq_bins * spectrum)
             variance = np.sum(((freq_bins - mean) ** 2) * spectrum)
             std = np.sqrt(variance)
@@ -144,27 +167,32 @@ def calculate_spectral_moments(audio: np.ndarray,
             if std > 0:
                 skewness = np.sum(((freq_bins - mean) ** 3) * spectrum) / (std ** 3)
                 kurtosis = np.sum(((freq_bins - mean) ** 4) * spectrum) / (variance ** 2)
-
                 skewness_list.append(skewness)
                 kurtosis_list.append(kurtosis)
 
-    # Return median values (more robust to outlier frames during transitions)
-    median_skewness = float(np.median(skewness_list)) if len(skewness_list) > 0 else 0.0
-    median_kurtosis = float(np.median(kurtosis_list)) if len(kurtosis_list) > 0 else 0.0
+    median_skewness = float(np.median(skewness_list)) if skewness_list else 0.0
+    median_kurtosis = float(np.median(kurtosis_list)) if kurtosis_list else 0.0
 
-    return median_skewness, median_kurtosis
+    return {
+        'spectral_flatness': median_flatness,
+        'spectral_flux': median_flux,
+        'spectral_skewness': median_skewness,
+        'spectral_kurtosis': median_kurtosis,
+    }
 
 
 def analyze_spectral_features(audio_path: str | Path,
-                              n_fft: int = 2048,
-                              hop_length: int = 512) -> Dict[str, float]:
+                              frame_size: int = 2048,
+                              hop_size: int = 512) -> Dict[str, float]:
     """
     Analyze spectral features for an audio file.
 
+    Uses Essentia if available (faster), falls back to librosa.
+
     Args:
         audio_path: Path to audio file
-        n_fft: FFT window size
-        hop_length: Hop length in samples
+        frame_size: FFT window size (default: 2048)
+        hop_size: Hop size in samples (default: 512)
 
     Returns:
         Dictionary with spectral features:
@@ -181,22 +209,20 @@ def analyze_spectral_features(audio_path: str | Path,
     logger.info(f"Analyzing spectral features: {audio_path.name}")
 
     # Load audio
-    audio, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    audio, sr = sf.read(str(audio_path))
+
+    # Convert to mono if stereo
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
 
     # Calculate spectral features
-    flatness = calculate_spectral_flatness(audio, sr, n_fft, hop_length)
-    flux = calculate_spectral_flux(audio, sr, n_fft, hop_length)
-    skewness, kurtosis = calculate_spectral_moments(audio, sr, n_fft, hop_length)
-
-    # Compile results
-    results = {
-        'spectral_flatness': float(flatness),
-        'spectral_flux': float(flux),
-        'spectral_skewness': float(skewness),
-        'spectral_kurtosis': float(kurtosis)
-    }
+    if ESSENTIA_AVAILABLE:
+        results = analyze_spectral_features_essentia(audio, sr, frame_size, hop_size)
+    else:
+        logger.warning("Using librosa fallback (Essentia not available)")
+        results = analyze_spectral_features_librosa(audio, sr, frame_size, hop_size)
 
     # Clamp values to valid ranges
     for key, value in results.items():
@@ -212,16 +238,16 @@ def analyze_spectral_features(audio_path: str | Path,
 
 def batch_analyze_spectral_features(root_directory: str | Path,
                                     overwrite: bool = False,
-                                    n_fft: int = 2048,
-                                    hop_length: int = 512) -> dict:
+                                    frame_size: int = 2048,
+                                    hop_size: int = 512) -> dict:
     """
     Batch analyze spectral features for all organized folders.
 
     Args:
         root_directory: Root directory to search
         overwrite: Whether to overwrite existing spectral data
-        n_fft: FFT window size
-        hop_length: Hop length in samples
+        frame_size: FFT window size
+        hop_size: Hop size in samples
 
     Returns:
         Dictionary with statistics about the batch processing
@@ -230,6 +256,7 @@ def batch_analyze_spectral_features(root_directory: str | Path,
 
     root_directory = Path(root_directory)
     logger.info(f"Starting batch spectral features analysis: {root_directory}")
+    logger.info(f"Using {'Essentia' if ESSENTIA_AVAILABLE else 'librosa (fallback)'}")
 
     folders = find_organized_folders(root_directory)
 
@@ -267,12 +294,11 @@ def batch_analyze_spectral_features(root_directory: str | Path,
             except Exception:
                 pass
 
-
         try:
             results = analyze_spectral_features(
                 stems['full_mix'],
-                n_fft=n_fft,
-                hop_length=hop_length
+                frame_size=frame_size,
+                hop_size=hop_size
             )
 
             # Save to .INFO file
@@ -322,17 +348,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--n-fft',
+        '--frame-size',
         type=int,
         default=2048,
         help='FFT window size (default: 2048)'
     )
 
     parser.add_argument(
-        '--hop-length',
+        '--hop-size',
         type=int,
         default=512,
-        help='Hop length in samples (default: 512)'
+        help='Hop size in samples (default: 512)'
     )
 
     parser.add_argument(
@@ -365,8 +391,8 @@ if __name__ == "__main__":
             stats = batch_analyze_spectral_features(
                 path,
                 overwrite=args.overwrite,
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
             if stats['failed'] > 0:
@@ -382,15 +408,15 @@ if __name__ == "__main__":
 
             results = analyze_spectral_features(
                 stems['full_mix'],
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
             # Save to .INFO
             info_path = get_info_path(path)
             safe_update(info_path, results)
 
-            print(f"\nSpectral Features Results:")
+            print(f"\nSpectral Features Results (using {'Essentia' if ESSENTIA_AVAILABLE else 'librosa'}):")
             print(f"  Flatness:       {results['spectral_flatness']:.3f}")
             print(f"  Flux:           {results['spectral_flux']:.3f}")
             print(f"  Skewness:       {results['spectral_skewness']:.3f}")
@@ -400,11 +426,11 @@ if __name__ == "__main__":
             # Single file
             results = analyze_spectral_features(
                 path,
-                n_fft=args.n_fft,
-                hop_length=args.hop_length
+                frame_size=args.frame_size,
+                hop_size=args.hop_size
             )
 
-            print(f"\nSpectral Features Results:")
+            print(f"\nSpectral Features Results (using {'Essentia' if ESSENTIA_AVAILABLE else 'librosa'}):")
             print(f"  Flatness:       {results['spectral_flatness']:.3f}")
             print(f"  Flux:           {results['spectral_flux']:.3f}")
             print(f"  Skewness:       {results['spectral_skewness']:.3f}")
