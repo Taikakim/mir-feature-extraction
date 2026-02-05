@@ -131,10 +131,13 @@ if is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
     config = FlashAttentionConfig(False, True, True)
 ```
 
-### Performance Benchmarks (RX 9070 XT)
+### Performance Benchmarks (RX 9070 XT, ROCm 7.2)
 
-| Mode | Speed | VRAM | Command |
-|------|-------|------|---------|
-| Batch=2 FP16 | 3.06x | 7.58 GB | `--batch-size 2` |
-| Fast mode FP32 | 2.78x | 6.08 GB | `--fast-mode --no-fp16` |
-| Fast mode FP16 | 2.67x | 6.08 GB | `--fast-mode` |
+| Mode | Speed | VRAM | Notes |
+|------|-------|------|-------|
+| **Batch=1** (Optimized) | **5.64x** | **3.09 GB** | 👑 Best efficiency |
+| Batch=2 | 5.60x | 5.41 GB | Excellent speed |
+| Batch=4 | 5.29x | 10.07 GB | High GPU utilization |
+| Low VRAM Mode | 1.29x | 4.60 GB | Legacy (CPU bottlenecked) |
+
+**Conclusion**: Regular batching (even batch_size=1) is significantly faster than the legacy "low vram" mode on modern GPUs because it avoids CPU-GPU pipeline stalls.
