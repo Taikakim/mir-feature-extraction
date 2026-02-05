@@ -510,14 +510,14 @@ class Pipeline:
 
                 # Spectral
                 if not self.config.skip_spectral:
-                    if self.config.overwrite or 'spectral_centroid' not in existing:
+                    if self.config.overwrite or 'spectral_flatness' not in existing:
                         try:
                             results.update(analyze_spectral_features(crop_path))
                             logger.info("  ✓ Spectral")
                         except Exception as e:
                             logger.warning(f"  Spectral failed: {e}")
 
-                    if self.config.overwrite or 'rms_bass' not in existing:
+                    if self.config.overwrite or 'rms_energy_bass' not in existing:
                         try:
                             results.update(analyze_multiband_rms(crop_path))
                             logger.info("  ✓ Multiband RMS")
@@ -526,7 +526,7 @@ class Pipeline:
 
                 # Chroma
                 if not self.config.skip_harmonic:
-                    if self.config.overwrite or 'chroma_mean' not in existing:
+                    if self.config.overwrite or 'chroma_0' not in existing:
                         try:
                             # Use 'other' stem for melodic content if available
                             # Pass use_stems=False since we're already providing the specific file
