@@ -700,7 +700,7 @@ def separate_organized_folder(
     def save_stem(audio_data, file_name_base):
         # Normalize stem
         normalized = normalize_audio(audio_data)
-        out_path = audio_folder / f"{file_name_base}{target_ext}"
+        out_path = folder_path / f"{file_name_base}{target_ext}"
         
         # Submit to background thread
         saver.save_async(normalized, out_path, sr, source_path=full_mix)
