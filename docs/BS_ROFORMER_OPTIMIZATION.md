@@ -13,6 +13,37 @@
 
 > **Note:** The "Custom Model (small)" result used a dimension-384 model (`SYH99999`) compared to the standard dimension-512 model (`bs_roformer_viperx_1297`), explaining the massive speed delta.
 
+## Master Pipeline Integration
+
+The optimized BS-Roformer is now integrated into the main pipeline (`src/master_pipeline.py`) as a drop-in replacement for Demucs.
+
+### Configuration
+
+Edit `config/master_pipeline.yaml` to switch backends:
+
+```yaml
+source_separation:
+  # Choose backend: 'demucs' or 'bs_roformer'
+  backend: bs_roformer
+  bs_roformer:
+    model_name: jarredou-BS-ROFO-SW-Fixed-drums
+    model_dir: /home/kim/Projects/mir/models/bs-roformer
+    batch_size: 1  # 1 is recommended for consumer GPUs
+    device: cuda
+```
+
+### Features
+
+- **Drop-in Replacement:** Produces drums, bass, other, vocals stems (compatible with Demucs)
+- **Auto-Discovery:** Automatically finds models (config.yaml + checkpoint) even if filenames vary
+- **Normalization:** Applies peak normalization (0.9) to input and outputs for consistent quality
+- **Smart Formatting:**
+  - Uncompressed inputs (WAV, FLAC) -> Saved as FLAC (lossless compression)
+  - Lossy inputs (MP3, M4A) -> Saved in original format and bitrate (minimizes re-compression loss)
+- **Extra Stems:** Models with >4 stems (e.g. piano, guitar) save extra stems individually and mix them into `other` for pipeline compatibility
+- **Async I/O:** Background thread saves audio files without blocking GPU inference
+- **Model Persistence:** Model loaded once per batch, not per-file
+
 ## Optimizations Applied
 
 ### 1. Vectorized Overlap-Add
@@ -27,6 +58,12 @@ Added pinned memory buffers to overlap CPU-GPU data transfers with computation.
 Discovered that the legacy mode (formerly "fast mode") is **obsolete** on modern hardware. It forces CPU-GPU synchronization after every chunk, causing pipeline stalls.
 - **Action:** Marked `--low-vram` as deprecated/legacy.
 - **Result:** Regular inference path (batch_size=1) is **4.4x faster** AND uses **less VRAM** (3.09 GB vs 4.60 GB).
+
+### 4. Model Persistence Optimizations
+
+**Essentia:** Implemented LRU-style caching for TensorFlow models (`_MODEL_CACHE` in `essentia_features.py`), eliminating reload overhead that was occurring once per file.
+
+**Music Flamingo:** Switched to `llama-cpp-python` persistent analyzer (`MusicFlamingoAnalyzer`), avoiding 5x model reloads per track (one per prompt type).
 
 ## Recommended Usage
 For AMD RX 9070 XT (16GB VRAM):
