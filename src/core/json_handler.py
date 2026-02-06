@@ -317,12 +317,11 @@ def batch_write_info(writes: list, merge: bool = True) -> int:
     """
     Batch write multiple .INFO files efficiently.
 
-    Optimized for HDD by minimizing lock overhead and grouping writes.
-    For new files (merge=False), skips locking entirely.
+    Optimized for HDD by grouping writes. Still uses atomic writes for safety.
 
     Args:
         writes: List of (file_path, data_dict) tuples
-        merge: If True, merge with existing data. If False, overwrite (faster for new files)
+        merge: If True, merge with existing data. If False, overwrite.
 
     Returns:
         Number of files successfully written
@@ -346,14 +345,24 @@ def batch_write_info(writes: list, merge: bool = True) -> int:
                 # Need to read-modify-write with locking
                 safe_update(file_path, data)
             else:
-                # New file - direct write, no locking needed
-                with open(file_path, 'w', encoding='utf-8') as f:
+                # New file or overwrite mode - use atomic write for safety
+                # This avoids leaving partial files if interrupted
+                temp_path = file_path.with_suffix('.INFO.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
+                temp_path.replace(file_path)  # Atomic rename
 
             success_count += 1
 
         except Exception as e:
             logger.warning(f"Failed to write {file_path}: {e}")
+            # Clean up temp file if it exists
+            temp_path = file_path.with_suffix('.INFO.tmp')
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
 
     if success_count > 0:
         logger.debug(f"Batch wrote {success_count}/{len(writes)} .INFO files")
