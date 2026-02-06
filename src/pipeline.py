@@ -503,13 +503,21 @@ class Pipeline:
         flamingo_analyzer = None
         if not self.config.skip_flamingo:
             try:
-        if not self.config.skip_flamingo:
-            try:
-                from src.classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
+                from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
                 logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.config.flamingo_model}...")
-                # Auto-detect path
+
+                # Auto-detect model paths
+                model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
+                gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
+                mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
+
+                if not gguf_files or not mmproj_files:
+                    raise FileNotFoundError(f"Music Flamingo model files not found in {model_dir}")
+
                 flamingo_analyzer = MusicFlamingoAnalyzer(
-                    model_path=None, mmproj_path=None
+                    model_path=gguf_files[0],
+                    mmproj_path=mmproj_files[0],
+                    n_gpu_layers=-1
                 )
             except Exception as e:
                 logger.warning(f"Music Flamingo not available: {e}")
