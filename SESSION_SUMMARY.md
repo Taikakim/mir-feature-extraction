@@ -80,6 +80,7 @@
 | `e2ceab9` | Fix BS-RoFormer model variable and exclude .venv from folder scan |
 | `950f4b7` | Update BS-RoFormer docs with pipeline integration details |
 | `e3ba4f3` | Integrate BS-RoFormer into master pipeline with bug fixes |
+| `79248de` | Update documentation for 2026-02-06 session |
 
 ## New Files
 
