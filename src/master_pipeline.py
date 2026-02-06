@@ -799,17 +799,28 @@ class MasterPipeline:
             full_mix = full_mix_files[0]
 
             # Check if already done - stems can be in folder directly OR in htdemucs/full_mix/
+            # Check all formats (wav, flac, mp3) regardless of configured output format
+            # This allows skipping if stems were created by a different backend/config
             if not self.config.should_overwrite('source_separation') and \
                not self.config.should_overwrite('demucs'):
-                ext = '.mp3' if self.config.demucs_format == 'mp3' else '.flac'
                 stem_names = ['drums', 'bass', 'other', 'vocals']
 
-                # Check direct folder first (preferred location)
-                existing_direct = [f for f in stem_names if (folder / f"{f}{ext}").exists()]
+                # Check direct folder first (preferred location) - any format
+                existing_direct = []
+                for f in stem_names:
+                    for ext in ['.wav', '.flac', '.mp3']:
+                        if (folder / f"{f}{ext}").exists():
+                            existing_direct.append(f)
+                            break
 
                 # Also check htdemucs output folder (Demucs default output)
                 htdemucs_folder = folder / "htdemucs" / "full_mix"
-                existing_htdemucs = [f for f in stem_names if (htdemucs_folder / f"{f}{ext}").exists()]
+                existing_htdemucs = []
+                for f in stem_names:
+                    for ext in ['.wav', '.flac', '.mp3']:
+                        if (htdemucs_folder / f"{f}{ext}").exists():
+                            existing_htdemucs.append(f)
+                            break
 
                 if len(existing_direct) == 4 or len(existing_htdemucs) == 4:
                     skipped += 1
