@@ -659,7 +659,7 @@ def separate_organized_folder(
     audio = normalize_audio(audio)
     
     start_t = time.time()
-    stems = separate_audio(model, audio, audio_cfg, model_cfg, inf_cfg, device_obj)
+    stems = separate_audio(separator, audio, audio_cfg, model_cfg, inf_cfg, device_obj)
     duration = time.time() - start_t
     logger.info(f"Separation finished in {duration:.1f}s")
     

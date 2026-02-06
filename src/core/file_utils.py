@@ -295,11 +295,22 @@ def get_crops_folder(audio_folder: str | Path) -> Path:
     return audio_folder / "crops"
 
 
+# Directories to skip when searching for organized folders
+SKIP_DIRECTORIES = {
+    '.venv', 'venv', '.env', 'env',
+    'node_modules', '__pycache__', '.git',
+    '.tox', '.pytest_cache', '.mypy_cache',
+    'site-packages', 'dist-packages',
+    '.cache', 'build', 'dist', 'eggs',
+}
+
+
 def find_organized_folders(root_directory: str | Path) -> List[Path]:
     """
     Find all organized audio folders in a directory tree.
 
     An organized folder contains a full_mix.* file.
+    Skips common non-audio directories (.venv, node_modules, etc.)
 
     Args:
         root_directory: Root directory to search
@@ -310,12 +321,19 @@ def find_organized_folders(root_directory: str | Path) -> List[Path]:
     root_directory = Path(root_directory)
     organized_folders = []
 
+    def should_skip(path: Path) -> bool:
+        """Check if any parent directory should be skipped."""
+        for part in path.parts:
+            if part in SKIP_DIRECTORIES:
+                return True
+        return False
+
     # Search for all folders containing full_mix files
     for ext in AUDIO_EXTENSIONS:
         full_mix_files = root_directory.glob(f'**/full_mix{ext}')
         for full_mix_file in full_mix_files:
             folder = full_mix_file.parent
-            if folder not in organized_folders:
+            if folder not in organized_folders and not should_skip(folder):
                 organized_folders.append(folder)
 
     logger.info(f"Found {len(organized_folders)} organized folders in {root_directory}")
