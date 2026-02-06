@@ -508,14 +508,19 @@ class Pipeline:
 
                 # Auto-detect model paths
                 model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
-                gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
+                # Exclude mmproj and imatrix files, pick largest model file
+                gguf_files = [f for f in model_dir.glob('*.gguf')
+                              if 'mmproj' not in f.name and 'imatrix' not in f.name]
                 mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
 
                 if not gguf_files or not mmproj_files:
                     raise FileNotFoundError(f"Music Flamingo model files not found in {model_dir}")
 
+                # Sort by size (largest = highest quality quantization)
+                model_path = max(gguf_files, key=lambda f: f.stat().st_size)
+
                 flamingo_analyzer = MusicFlamingoAnalyzer(
-                    model_path=gguf_files[0],
+                    model_path=model_path,
                     mmproj_path=mmproj_files[0],
                     n_gpu_layers=-1
                 )

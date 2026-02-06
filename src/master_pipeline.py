@@ -369,6 +369,32 @@ class MasterPipeline:
         else:
             self.working_dir = config.input_dir
 
+    def _calculate_total_audio_duration(self, folders: List[Path]) -> float:
+        """Calculate total audio duration for all tracks.
+
+        Args:
+            folders: List of organized folder paths
+
+        Returns:
+            Total duration in seconds
+        """
+        import soundfile as sf
+
+        total_duration = 0.0
+
+        for folder in folders:
+            full_mix_files = list(folder.glob('full_mix.*'))
+            if not full_mix_files:
+                continue
+
+            try:
+                info = sf.info(str(full_mix_files[0]))
+                total_duration += info.duration
+            except Exception as e:
+                logger.debug(f"Could not get duration for {folder.name}: {e}")
+
+        return total_duration
+
     def run(self) -> PipelineStats:
         """Run the complete pipeline."""
         logger.info(fmt_header("=" * 70))
@@ -393,9 +419,16 @@ class MasterPipeline:
         crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
         skip_to_crop_analysis = False
 
+        # Pre-calculate total audio duration for speed metrics
+        source_folders = list(find_organized_folders(self.working_dir))
+        if source_folders:
+            logger.info(f"Calculating total audio duration for {len(source_folders)} tracks...")
+            self.stats.total_audio_duration = self._calculate_total_audio_duration(source_folders)
+            duration_mins = self.stats.total_audio_duration / 60
+            logger.info(f"Total audio: {fmt_notification(f'{duration_mins:.1f} minutes')} ({self.stats.total_audio_duration:.0f}s)")
+
         if crops_dir.exists() and not self.config.should_overwrite('crops'):
             # Count tracks and existing crops
-            source_folders = list(find_organized_folders(self.working_dir))
             if source_folders:
                 tracks_with_crops = sum(
                     1 for f in source_folders
@@ -1665,6 +1698,18 @@ class MasterPipeline:
                     print(fmt_dim(f"    {label:12} {op.elapsed:6.1f}s{speed_str}"))
 
         print(fmt_notification(f"\nTotal Time: {total_time:.1f}s ({total_time/60:.1f} min)"))
+
+        # Show realtime factor (processing speed relative to audio duration)
+        if self.stats.total_audio_duration > 0:
+            audio_mins = self.stats.total_audio_duration / 60
+            realtime = self.stats.realtime_factor
+            print(f"Audio processed: {fmt_success(f'{audio_mins:.1f} min')} ({self.stats.total_audio_duration:.0f}s)")
+            print(f"Processing speed: {fmt_success(f'{realtime:.2f}x realtime')}")
+            if realtime >= 1.0:
+                print(fmt_dim(f"  (Processed {realtime:.1f} seconds of audio per second of wall time)"))
+            else:
+                inv_realtime = 1.0 / realtime if realtime > 0 else 0
+                print(fmt_dim(f"  (Took {inv_realtime:.1f} seconds of wall time per second of audio)"))
 
         if self.stats.errors:
             print(fmt_error(f"\nErrors ({len(self.stats.errors)}):"))

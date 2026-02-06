@@ -74,6 +74,9 @@ class PipelineStats:
     crops_created: int = 0
     crops_analyzed: int = 0
 
+    # Audio duration tracking
+    total_audio_duration: float = 0.0  # Total duration of all input audio in seconds
+
     # Legacy timing (for backward compatibility)
     time_organize: float = 0.0
     time_track_analysis: float = 0.0
@@ -82,12 +85,19 @@ class PipelineStats:
 
     # Detailed per-operation timing
     operation_timing: Dict[str, TimingStats] = field(default_factory=dict)
-    
+
     # Run metadata
     run_start_time: float = field(default_factory=time.time)
     run_end_time: float = 0.0
 
     errors: List[str] = field(default_factory=list)
+
+    @property
+    def realtime_factor(self) -> float:
+        """Processing speed relative to realtime (seconds of audio per second of processing)."""
+        if self.total_time > 0 and self.total_audio_duration > 0:
+            return self.total_audio_duration / self.total_time
+        return 0.0
     
     def start_operation(self, name: str) -> TimingStats:
         """Start timing an operation."""
@@ -119,11 +129,14 @@ class PipelineStats:
     def to_dict(self) -> Dict[str, Any]:
         """Convert all stats to dictionary for JSON serialization."""
         from datetime import datetime
-        
+
         return {
             'run_timestamp': datetime.fromtimestamp(self.run_start_time).isoformat(),
             'total_runtime_seconds': round(self.total_time, 2),
             'total_runtime_minutes': round(self.total_time / 60, 2),
+            'total_audio_duration_seconds': round(self.total_audio_duration, 2),
+            'total_audio_duration_minutes': round(self.total_audio_duration / 60, 2),
+            'realtime_factor': round(self.realtime_factor, 2),
             'summary': {
                 'files_found': self.files_found,
                 'files_organized': self.files_organized,
@@ -141,7 +154,7 @@ class PipelineStats:
                 'crop_analysis': round(self.time_crop_analysis, 2),
             },
             'operation_timing': {
-                name: timing.to_dict() 
+                name: timing.to_dict()
                 for name, timing in self.operation_timing.items()
             },
             'errors': self.errors,

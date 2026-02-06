@@ -93,11 +93,13 @@ class CropFeatureExtractor:
             # Auto-detect model paths
             model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
 
-            # Find main GGUF model (not mmproj)
-            gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
+            # Find main GGUF model (exclude mmproj and imatrix files)
+            gguf_files = [f for f in model_dir.glob('*.gguf')
+                          if 'mmproj' not in f.name and 'imatrix' not in f.name]
             if not gguf_files:
                 raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-            model_path = gguf_files[0]
+            # Pick largest file (highest quality quantization)
+            model_path = max(gguf_files, key=lambda f: f.stat().st_size)
 
             # Find mmproj file
             mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
