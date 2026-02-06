@@ -103,10 +103,13 @@ class MusicFlamingoAnalyzer:
             
             if self.model_path is None:
                 gguf_files = list(model_dir.glob('*.gguf'))
-                gguf_files = [f for f in gguf_files if 'mmproj' not in f.name]
+                # Exclude mmproj and imatrix files
+                gguf_files = [f for f in gguf_files
+                              if 'mmproj' not in f.name and 'imatrix' not in f.name]
                 if not gguf_files:
                     raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-                self.model_path = gguf_files[0]
+                # Pick largest file (highest quality quantization)
+                self.model_path = max(gguf_files, key=lambda f: f.stat().st_size)
                 logger.info(f"Auto-detected model: {self.model_path.name}")
                 
             if self.mmproj_path is None:
@@ -409,10 +412,13 @@ def batch_analyze_music_flamingo(
     if model_path is None:
         model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
         gguf_files = list(model_dir.glob('*.gguf'))
-        gguf_files = [f for f in gguf_files if 'mmproj' not in f.name]
+        # Exclude mmproj and imatrix files
+        gguf_files = [f for f in gguf_files
+                      if 'mmproj' not in f.name and 'imatrix' not in f.name]
         if not gguf_files:
             raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-        model_path = gguf_files[0]
+        # Pick largest file (highest quality quantization)
+        model_path = max(gguf_files, key=lambda f: f.stat().st_size)
         logger.info(f"Auto-detected model: {model_path.name}")
 
     if mmproj_path is None:
@@ -602,9 +608,12 @@ if __name__ == "__main__":
             if model_path is None or mmproj_path is None:
                 model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
                 if model_path is None:
-                    gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
+                    # Exclude mmproj and imatrix files
+                    gguf_files = [f for f in model_dir.glob('*.gguf')
+                                  if 'mmproj' not in f.name and 'imatrix' not in f.name]
                     if gguf_files:
-                        model_path = gguf_files[0]
+                        # Pick largest file (highest quality quantization)
+                        model_path = max(gguf_files, key=lambda f: f.stat().st_size)
                 if mmproj_path is None:
                     mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
                     if mmproj_files:
