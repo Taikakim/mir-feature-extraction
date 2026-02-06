@@ -64,6 +64,35 @@ except ImportError:
     ESSENTIA_TF_AVAILABLE = False
     logger.warning("Essentia-TensorFlow not available - high-level features will not work")
 
+# Model Cache (LRU-style)
+_MODEL_CACHE = {}
+
+def get_cached_model(model_class, **kwargs):
+    """
+    Get a cached model instance or create a new one.
+    
+    Args:
+        model_class: Class of the model (e.g. TensorflowPredictVGGish)
+        **kwargs: Arguments for model initialization (must be hashable or stringified)
+        
+    Returns:
+        Model instance
+    """
+    # Create a cache key from class name and sorted kwargs
+    key_parts = [model_class.__name__]
+    for k, v in sorted(kwargs.items()):
+        key_parts.append(f"{k}={v}")
+    cache_key = "|".join(key_parts)
+    
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+        
+    # Create new instance
+    logger.info(f"Loading new model instance: {model_class.__name__}")
+    instance = model_class(**kwargs)
+    _MODEL_CACHE[cache_key] = instance
+    return instance
+
 
 def get_model_path(model_filename: str) -> str:
     """
@@ -172,7 +201,8 @@ def analyze_danceability(audio_path: str | Path) -> float:
 
         # Use VGGish-based danceability model
         model_path = get_model_path("danceability-vggish-audioset-1.pb")
-        model = TensorflowPredictVGGish(
+        model = get_cached_model(
+            TensorflowPredictVGGish,
             graphFilename=model_path
         )
 
@@ -273,7 +303,8 @@ def analyze_atonality(audio_path: str | Path) -> float:
 
         # Use VGGish-based tonality model
         model_path = get_model_path("tonal_atonal-vggish-audioset-1.pb")
-        model = TensorflowPredictVGGish(
+        model = get_cached_model(
+            TensorflowPredictVGGish,
             graphFilename=model_path,
             output="model/Sigmoid"
         )
@@ -370,7 +401,8 @@ def analyze_voice_instrumental(audio_path: str | Path) -> Dict[str, float]:
 
         # Use VGGish-based voice/instrumental model
         model_path = get_model_path("voice_instrumental-vggish-audioset-1.pb")
-        model = TensorflowPredictVGGish(
+        model = get_cached_model(
+            TensorflowPredictVGGish,
             graphFilename=model_path,
             output="model/Sigmoid"
         )
@@ -427,7 +459,8 @@ def analyze_vocal_gender(audio_path: str | Path) -> Dict[str, float]:
 
         # Use VGGish-based gender model
         model_path = get_model_path("gender-vggish-audioset-1.pb")
-        model = TensorflowPredictVGGish(
+        model = get_cached_model(
+            TensorflowPredictVGGish,
             graphFilename=model_path,
             output="model/Sigmoid"
         )
@@ -546,7 +579,8 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
 
         # Get embeddings using Discogs-EffNet
         embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
-        embedding_model = TensorflowPredictEffnetDiscogs(
+        embedding_model = get_cached_model(
+            TensorflowPredictEffnetDiscogs,
             graphFilename=embedding_model_path,
             output="PartitionedCall:1"
         )
@@ -557,13 +591,14 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
         mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
         instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
 
-        genre_model = TensorflowPredict2D(
+        genre_model = get_cached_model(
+            TensorflowPredict2D,
             graphFilename=genre_model_path,
             input="serving_default_model_Placeholder",
             output="PartitionedCall:0"
         )
-        mood_model = TensorflowPredict2D(graphFilename=mood_model_path)
-        instrument_model = TensorflowPredict2D(graphFilename=instrument_model_path)
+        mood_model = get_cached_model(TensorflowPredict2D, graphFilename=mood_model_path)
+        instrument_model = get_cached_model(TensorflowPredict2D, graphFilename=instrument_model_path)
 
         # Get predictions
         genre_predictions = genre_model(embeddings)

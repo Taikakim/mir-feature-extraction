@@ -94,8 +94,30 @@ class MusicFlamingoAnalyzer:
             n_ctx: Context window size
             verbose: Enable verbose logging
         """
-        self.model_path = Path(model_path)
-        self.mmproj_path = Path(mmproj_path)
+        self.model_path = model_path
+        self.mmproj_path = mmproj_path
+        
+        # Auto-detect path if None
+        if self.model_path is None or self.mmproj_path is None:
+            model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
+            
+            if self.model_path is None:
+                gguf_files = list(model_dir.glob('*.gguf'))
+                gguf_files = [f for f in gguf_files if 'mmproj' not in f.name]
+                if not gguf_files:
+                    raise FileNotFoundError(f"No GGUF model found in {model_dir}")
+                self.model_path = gguf_files[0]
+                logger.info(f"Auto-detected model: {self.model_path.name}")
+                
+            if self.mmproj_path is None:
+                mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
+                if not mmproj_files:
+                    raise FileNotFoundError(f"No mmproj file found in {model_dir}")
+                self.mmproj_path = mmproj_files[0]
+                logger.info(f"Auto-detected mmproj: {self.mmproj_path.name}")
+        
+        self.model_path = Path(self.model_path)
+        self.mmproj_path = Path(self.mmproj_path)
 
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found: {self.model_path}")
@@ -180,37 +202,49 @@ class MusicFlamingoAnalyzer:
         logger.debug(f"Prompt type: {prompt_type}")
 
         try:
-            # Build conversation with audio
-            # Note: llama-cpp-python's multimodal support uses special syntax
-            # We'll pass audio via the mmproj system
-
-            # For llama.cpp with mmproj, we need to create a prompt that
-            # references the audio file
-            conversation = f"""<|im_start|>system
+            # Retry loop for encoding errors or random failures
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Build conversation with audio
+                    # Note: llama-cpp-python's multimodal support uses special syntax
+                    # We'll pass audio via the mmproj system
+        
+                    # For llama.cpp with mmproj, we need to create a prompt that
+                    # references the audio file
+                    conversation = f"""<|im_start|>system
 You are Music Flamingo, a multimodal assistant for language and music. On each turn you receive an audio clip which contains music and optional text, you will receive at least one or both; use your world knowledge and reasoning to help the user with any task. Interpret the entirety of the content any input music--regardless of whether the user calls it audio, music, or sound.<|im_end|>
 <|im_start|>user
 <sound>{prompt}<|im_end|>
 <|im_start|>assistant
 """
-
-            # Generate response
-            # Note: llama-cpp-python with mmproj requires special handling
-            # We'll use the standard completion API with audio embedding
-            output = self.llm.create_completion(
-                prompt=conversation,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stop=["<|im_end|>"],
-            )
-
-            response = output['choices'][0]['text'].strip()
-
-            logger.info(f"✓ Generated {len(response)} characters")
-            logger.debug(f"Response preview: {response[:100]}...")
-
-            return response
-
+        
+                    # Generate response
+                    # Note: llama-cpp-python with mmproj requires special handling
+                    # We'll use the standard completion API with audio embedding
+                    output = self.llm.create_completion(
+                        prompt=conversation,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        stop=["<|im_end|>"],
+                    )
+        
+                    response = output['choices'][0]['text'].strip()
+        
+                    logger.info(f"✓ Generated {len(response)} characters")
+                    logger.debug(f"Response preview: {response[:100]}...")
+        
+                    return response
+                    
+                except UnicodeDecodeError as e:
+                    logger.warning(f"Encoding error on attempt {attempt+1}/{max_retries}: {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    # Retry with slightly different parameters to avoid same bad token
+                    temperature += 0.05
+                    continue
+                    
         except Exception as e:
             logger.error(f"Error analyzing {audio_path.name}: {e}")
             raise

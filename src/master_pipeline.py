@@ -94,6 +94,15 @@ class MasterPipelineConfig:
     skip_crops: bool = False
     skip_crop_analysis: bool = False
 
+    # Source Separation
+    separation_backend: str = 'demucs'  # 'demucs' or 'bs_roformer'
+
+    # BS-Roformer settings
+    bs_roformer_model: str = 'jarredou-BS-ROFO-SW-Fixed-drums'
+    bs_roformer_dir: Path = Path('/home/kim/Projects/mir/models/bs-roformer')
+    bs_roformer_batch_size: int = 1
+    bs_roformer_device: str = 'cuda'
+
     # Demucs settings
     demucs_model: str = 'htdemucs'  # htdemucs (fast), htdemucs_ft (4x slower, better)
     demucs_shifts: int = 0  # 0 for MIR analysis (faster), 1+ for hifi
@@ -174,7 +183,13 @@ class MasterPipelineConfig:
         # Map YAML structure to flat config
         paths = data.get('paths', {})
         stages = data.get('stages', {})
-        demucs = data.get('demucs', {})
+        
+        # Support new and legacy config structure
+        source_separation = data.get('source_separation', {})
+        bs_roformer = source_separation.get('bs_roformer', {})
+        demucs_cfg = source_separation.get('demucs', {})
+        demucs_legacy = data.get('demucs', {}) # Fallback
+        
         rhythm = data.get('rhythm', {})
         cropping = data.get('cropping', {})
         features = data.get('features', {})
@@ -195,14 +210,24 @@ class MasterPipelineConfig:
             skip_crop_analysis=not stages.get('crop_analysis', True),
 
             # Demucs
-            demucs_model=demucs.get('model', 'htdemucs'),
-            demucs_shifts=demucs.get('shifts', 0),
-            demucs_segment=demucs.get('segment', 45),
-            demucs_format=demucs.get('output_format', 'mp3'),
-            demucs_workers=demucs.get('workers', 2),
-            demucs_compile=demucs.get('compile', False),
-            demucs_compile_mode=demucs.get('compile_mode', 'reduce-overhead'),
-            device=demucs.get('device', processing.get('device', 'cuda')),
+            # Source Separation
+            separation_backend=source_separation.get('backend', 'demucs'),
+            
+            # BS-Roformer
+            bs_roformer_model=bs_roformer.get('model_name', 'jarredou-BS-ROFO-SW-Fixed-drums'),
+            bs_roformer_dir=Path(bs_roformer.get('model_dir', '/home/kim/Projects/mir/models/bs-roformer')),
+            bs_roformer_batch_size=bs_roformer.get('batch_size', 1),
+            bs_roformer_device=bs_roformer.get('device', 'cuda'),
+
+            # Demucs (support both new 'demucs' sub-block and legacy top-level 'demucs')
+            demucs_model=demucs_cfg.get('model', demucs_legacy.get('model', 'htdemucs')),
+            demucs_shifts=demucs_cfg.get('shifts', demucs_legacy.get('shifts', 0)),
+            demucs_segment=demucs_cfg.get('segment', demucs_legacy.get('segment', 45)),
+            demucs_format=demucs_cfg.get('output_format', demucs_legacy.get('output_format', 'mp3')),
+            demucs_workers=demucs_cfg.get('workers', demucs_legacy.get('workers', 2)),
+            demucs_compile=demucs_cfg.get('compile', demucs_legacy.get('compile', False)),
+            demucs_compile_mode=demucs_cfg.get('compile_mode', demucs_legacy.get('compile_mode', 'reduce-overhead')),
+            device=demucs_cfg.get('device', demucs_legacy.get('device', processing.get('device', 'cuda'))),
 
             # Cropping
             crop_length_samples=cropping.get('length_samples', 2097152),
@@ -586,14 +611,21 @@ class MasterPipeline:
 
         logger.info(f"Found {len(folders)} tracks to analyze")
 
-        # Sub-stage 2a: Demucs separation for all tracks
-        logger.info("\n[2a] Stem Separation (Demucs)")
+        # Sub-stage 2a: Stem Separation
+        logger.info("\n[2a] Stem Separation")
         self.stats.start_operation('demucs')
-        self._run_demucs_batch(folders)
-        demucs_time = self.stats.end_operation('demucs', 
+        
+        if self.config.separation_backend == 'bs_roformer':
+            logger.info(f"Using backend: {fmt_notification('BS-RoFormer')}")
+            self._run_bs_roformer_batch(folders)
+        else:
+            logger.info(f"Using backend: {fmt_notification('Demucs')}")
+            self._run_demucs_batch(folders)
+            
+        sep_time = self.stats.end_operation('demucs', 
             items_processed=self.stats.tracks_separated,
             items_skipped=len(folders) - self.stats.tracks_separated)
-        logger.info(fmt_dim(f"    Demucs completed in {demucs_time:.1f}s"))
+        logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
 
         # Sub-stage 2b: Beat/onset/downbeat detection
         logger.info("\n[2b] Rhythm Analysis (beats, onsets, downbeats)")
@@ -620,6 +652,96 @@ class MasterPipeline:
 
         self.stats.time_track_analysis = time.time() - start_time
 
+    def _run_bs_roformer_batch(self, folders: List[Path]):
+        """Run BS-RoFormer separation on all tracks."""
+        from preprocessing.bs_roformer_sep import separate_organized_folder, load_bs_roformer
+
+        # Check if using pre-existing stems
+        if self.config.stems_source:
+            logger.info(f"Using pre-existing stems from: {fmt_filename(str(self.config.stems_source))}")
+            self._link_existing_stems(folders)
+            return
+
+        model_name = self.config.bs_roformer_model
+        model_dir = self.config.bs_roformer_dir
+        batch_size = self.config.bs_roformer_batch_size
+        device = self.config.bs_roformer_device
+
+        logger.info(f"Separating stems (model={fmt_notification(model_name)}, "
+                    f"batch={batch_size}, device={device})")
+
+        # Find tracks to process
+        tracks_to_process = []
+        skipped = 0
+        stem_names = ['drums', 'bass', 'other', 'vocals']
+
+        for folder in folders:
+            # Check for existing stems
+            if not self.config.should_overwrite('source_separation') and \
+               not self.config.should_overwrite('demucs'): # Backwards compat
+                
+                # Check for stems in any format (WAV, FLAC, MP3)
+                existing = []
+                for f in stem_names:
+                    for ext in ['.wav', '.flac', '.mp3']:
+                        if (folder / f"{f}{ext}").exists():
+                            existing.append(f)
+                            break
+                            
+                if len(existing) == 4:
+                    skipped += 1
+                    continue
+            
+            tracks_to_process.append(folder)
+
+        if skipped > 0:
+            logger.info(fmt_dim(f"Skipping {skipped} tracks (already have stems)"))
+
+        if not tracks_to_process:
+            logger.info("No tracks need stem separation")
+            return
+
+        logger.info(f"Processing {fmt_notification(str(len(tracks_to_process)))} tracks...")
+
+        # Pre-load BS-Roformer model (Optimization)
+        separator = None
+        try:
+            from preprocessing.bs_roformer_sep import load_bs_roformer
+            logger.info("Pre-loading BS-RoFormer model for batch processing...")
+            # Note: initialization returns (model, model_cfg, audio_cfg, inf_cfg) which we pass as 'separator'
+            # The updated bs_roformer_sep expects the model object itself which has configs attached
+            separator_tuple = load_bs_roformer(model_name, model_dir, device=device)
+            separator = separator_tuple[0] # The model instance
+            logger.info("✓ Model pre-loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to pre-load BS-RoFormer: {e}")
+            logger.warning("Will fall back to per-folder loading (slower)")
+
+        success_count = 0
+        fail_count = 0
+        
+        # Sequential processing (GPU bound, not parallel for now)
+        for i, folder in enumerate(tracks_to_process, 1):
+            logger.info(f"[{i}/{len(tracks_to_process)}] Processing: {folder.name}")
+            try:
+                separate_organized_folder(
+                    folder,
+                    model_name=model_name,
+                    model_dir=model_dir,
+                    batch_size=batch_size,
+                    overwrite=True,  # We already filtered above
+                    device=device,
+                    separator=separator
+                )
+                success_count += 1
+                logger.info(fmt_success(f"  Success: {folder.name}"))
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"  Failed: {folder.name} - {e}")
+                
+        self.stats.tracks_separated = success_count
+
+
     def _run_demucs_batch(self, folders: List[Path]):
         """Run Demucs separation on all tracks (parallel subprocess-based)."""
         # Check if we should use existing stems
@@ -644,7 +766,8 @@ class MasterPipeline:
             full_mix = full_mix_files[0]
 
             # Check if already done - stems can be in folder directly OR in htdemucs/full_mix/
-            if not self.config.should_overwrite('demucs'):
+            if not self.config.should_overwrite('source_separation') and \
+               not self.config.should_overwrite('demucs'):
                 ext = '.mp3' if self.config.demucs_format == 'mp3' else '.flac'
                 stem_names = ['drums', 'bass', 'other', 'vocals']
 

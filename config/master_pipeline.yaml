@@ -23,37 +23,50 @@ stages:
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
-# DEMUCS STEM SEPARATION
+# SOURCE SEPARATION
 # =============================================================================
-demucs:
-  # Available models:
-  #   htdemucs      - Hybrid Transformer Demucs (default, fast)
-  #   htdemucs_ft   - Fine-tuned htdemucs (4x slower, slightly better quality)
-  #   htdemucs_6s   - 6-source model (adds piano + guitar stems)
-  #   mdx_extra     - MDX-Net based model
-  #   mdx_extra_q   - Quantized MDX-Net (smaller, faster)
-  model: htdemucs                # Default: htdemucs (good balance of speed/quality)
+source_separation:
+  # Selected backend: 'demucs' or 'bs_roformer'
+  # 'demucs' = fast, good general quality
+  # 'bs_roformer' = slower but often cleaner vocals/instrumentals
+  backend: bs_roformer
 
-  shifts: 0                      # Random shifts (0=fast for MIR, 1+=hifi quality)
-  device: cuda                   # cuda, cpu, mps
+  # ---------------------------------------------------------------------------
+  # BS-ROFORMER CONFIGURATION
+  # ---------------------------------------------------------------------------
+  bs_roformer:
+    # Model name (directory name in models/)
+    # Recommended: 'jarredou-BS-ROFO-SW-Fixed-drums' or 'SYH99999-bs_roformer_4stems_ft'
+    model_name: jarredou-BS-ROFO-SW-Fixed-drums
 
-  # Segment length in seconds - controls GPU memory usage
-  # NOTE: Maximum segment depends on model! htdemucs max is ~7.8s
-  #   htdemucs:    max 7.8s (trained segment length)
-  #   htdemucs_ft: max 7.8s
-  #   mdx_extra:   longer segments supported
-  # Set to null to use model's default (recommended)
-  segment: null                  # Segment length in seconds (null = model default, recommended)
+    # Base directory for models
+    model_dir: /home/kim/Projects/mir/models/bs-roformer
 
-  output_format: mp3             # mp3 (default, VBR), flac, wav, wav24, wav32, ogg
-  mp3_bitrate: 128               # MP3 bitrate (64-320) if format=mp3
-  clip_mode: rescale             # rescale or clamp
+    # Batch size (1 is most memory efficient and often fastest on consumer GPUs)
+    batch_size: 1
 
-  # Parallel processing (subprocess-based, each worker ~5GB VRAM)
-  # Each worker runs a separate Demucs process for true parallel GPU utilization
-  # 2 workers: ~10GB VRAM, ~1.7x speedup
-  # 4 workers: ~20GB VRAM (requires high VRAM GPU)
-  workers: 4                     # Parallel workers for batch processing
+    device: cuda
+
+  # ---------------------------------------------------------------------------
+  # DEMUCS CONFIGURATION
+  # ---------------------------------------------------------------------------
+  demucs:
+    # Available users: htdemucs, htdemucs_ft, htdemucs_6s, mdx_extra
+    model: htdemucs                # Default: htdemucs (good balance of speed/quality)
+
+    shifts: 0                      # Random shifts (0=fast for MIR, 1+=hifi quality)
+    device: cuda                   # cuda, cpu, mps
+
+    # Segment length in seconds - controls GPU memory usage
+    # Set to null to use model's default (recommended)
+    segment: null
+
+    output_format: mp3             # mp3 (default, VBR), flac, wav, wav24, wav32, ogg
+    mp3_bitrate: 128               # MP3 bitrate (64-320) if format=mp3
+    clip_mode: rescale             # rescale or clamp
+
+    # Parallel processing (subprocess-based, each worker ~5GB VRAM)
+    workers: 4                     # Parallel workers for batch processing
 
 # =============================================================================
 # RHYTHM ANALYSIS
@@ -68,7 +81,7 @@ rhythm:
 # CROPPING
 # =============================================================================
 cropping:
-  length_samples: 2097152        # Crop length in SAMPLES (2097152 = ~47.5s at 44.1kHz)
+  length_samples: 524288         # Crop length in SAMPLES (2097152 = ~47.5s at 44.1kHz)
                                  # Common values:
                                  #   1323000  = ~30.0s at 44.1kHz
                                  #   2097152  = ~47.5s at 44.1kHz (default)
@@ -115,7 +128,8 @@ features:
 # to force regeneration of specific features even if they already exist.
 # These override the global processing.overwrite setting.
 overwrite:
-  demucs: false                  # Overwrite existing stem separations
+  demucs: false                  # Overwrite existing stem separations (legacy key)
+  source_separation: false       # Overwrite existing stem separations
   beats: false                   # Overwrite existing beat grids
   bpm: false                     # Overwrite existing BPM data
   crops: false                   # Overwrite existing training crops
@@ -194,4 +208,4 @@ processing:
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
   feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
-  essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
+  essentia_workers: 3            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

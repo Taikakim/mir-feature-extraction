@@ -87,9 +87,32 @@ class CropFeatureExtractor:
             return
 
         try:
-            from classification.music_flamingo import MusicFlamingoGGUF
-            logger.info(f"Loading Music Flamingo GGUF ({self.flamingo_model})...")
-            self._flamingo = MusicFlamingoGGUF(model=self.flamingo_model)
+            from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
+            logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.flamingo_model}...")
+
+            # Auto-detect model paths
+            model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
+
+            # Find main GGUF model (not mmproj)
+            gguf_files = [f for f in model_dir.glob('*.gguf') if 'mmproj' not in f.name]
+            if not gguf_files:
+                raise FileNotFoundError(f"No GGUF model found in {model_dir}")
+            model_path = gguf_files[0]
+
+            # Find mmproj file
+            mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
+            if not mmproj_files:
+                raise FileNotFoundError(f"No mmproj file found in {model_dir}")
+            mmproj_path = mmproj_files[0]
+
+            logger.info(f"  Model: {model_path.name}")
+            logger.info(f"  MMProj: {mmproj_path.name}")
+
+            self._flamingo = MusicFlamingoAnalyzer(
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                n_gpu_layers=-1,  # All layers on GPU
+            )
             logger.info("Music Flamingo loaded successfully")
         except Exception as e:
             logger.warning(f"Failed to load Music Flamingo: {e}")
@@ -375,16 +398,40 @@ class CropFeatureExtractor:
         try:
             start = time.time()
 
-            for prompt_type in prompt_types:
-                key = f'music_flamingo_{prompt_type}'
-                if key in existing and not overwrite:
-                    continue
+            # Use structured analysis which runs multiple prompts efficiently
+            try:
+                # Map prompt types to boolean flags for analyzer
+                results_struct = self._flamingo.analyze_structured(
+                    crop_path,
+                    include_genre=True,
+                    include_mood=True,
+                    include_instrumentation=True,
+                    include_technical=True
+                )
+                
+                # Map back to result keys
+                if 'genre_mood_description' in results_struct:
+                    results['music_flamingo_genre_mood'] = results_struct['genre_mood_description']
+                    
+                if 'instrumentation_description' in results_struct:
+                    results['music_flamingo_instrumentation'] = results_struct['instrumentation_description']
+                    
+                if 'technical_description' in results_struct:
+                    results['music_flamingo_technical'] = results_struct['technical_description']
+                    
+                if 'full_description' in results_struct:
+                    results['music_flamingo_full'] = results_struct['full_description']
+                    
+                # Structure prompt is not in analyze_structured by default, run manually if needed
+                if 'music_flamingo_structure' not in existing or overwrite:
+                     results['music_flamingo_structure'] = self._flamingo.analyze(
+                        crop_path, prompt_type='structure', max_tokens=300
+                     )
 
-                description = self._flamingo.analyze(crop_path, prompt_type=prompt_type)
-                if description:
-                    results[key] = description
+            except Exception as e:
+                logger.error(f"Music Flamingo structured analysis failed: {e}")
 
-            results['music_flamingo_model'] = f'gguf_{self.flamingo_model}'
+            results['music_flamingo_model'] = f'gguf_{self.flamingo_model}_persistent'
 
             timings['flamingo'] = time.time() - start
             logger.info(f"  Music Flamingo: {timings['flamingo']:.2f}s ({len(prompt_types)} prompts)")
