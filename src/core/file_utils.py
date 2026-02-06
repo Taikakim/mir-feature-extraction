@@ -302,7 +302,13 @@ SKIP_DIRECTORIES = {
     '.tox', '.pytest_cache', '.mypy_cache',
     'site-packages', 'dist-packages',
     '.cache', 'build', 'dist', 'eggs',
+    'repos', 'crops', '_crops', 'test data',
+    'bs roformer output', 'bs roformer optimized output',
 }
+
+# Pattern to detect crop folders (end with _0, _1, _2, etc.)
+import re
+CROP_FOLDER_PATTERN = re.compile(r'_\d+$')
 
 
 def find_organized_folders(root_directory: str | Path) -> List[Path]:
@@ -322,10 +328,13 @@ def find_organized_folders(root_directory: str | Path) -> List[Path]:
     organized_folders = []
 
     def should_skip(path: Path) -> bool:
-        """Check if any parent directory should be skipped."""
+        """Check if any parent directory should be skipped or if folder is a crop."""
         for part in path.parts:
             if part in SKIP_DIRECTORIES:
                 return True
+        # Skip crop folders (end with _0, _1, etc.)
+        if CROP_FOLDER_PATTERN.search(path.name):
+            return True
         return False
 
     # Search for all folders containing full_mix files
