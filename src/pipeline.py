@@ -506,22 +506,9 @@ class Pipeline:
                 from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
                 logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.config.flamingo_model}...")
 
-                # Auto-detect model paths
-                model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
-                # Exclude mmproj and imatrix files, pick largest model file
-                gguf_files = [f for f in model_dir.glob('*.gguf')
-                              if 'mmproj' not in f.name and 'imatrix' not in f.name]
-                mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
-
-                if not gguf_files or not mmproj_files:
-                    raise FileNotFoundError(f"Music Flamingo model files not found in {model_dir}")
-
-                # Sort by size (largest = highest quality quantization)
-                model_path = max(gguf_files, key=lambda f: f.stat().st_size)
-
+                # Use auto-detection with configured model name
                 flamingo_analyzer = MusicFlamingoAnalyzer(
-                    model_path=model_path,
-                    mmproj_path=mmproj_files[0],
+                    model_name=self.config.flamingo_model,
                     n_gpu_layers=-1
                 )
             except Exception as e:
@@ -915,9 +902,9 @@ class Pipeline:
                             to_process.append(crop_path)
                     
                     if to_process:
-                        logger.info(f"  Loading model...")
-                        # Initialized once here
-                        flamingo = MusicFlamingoAnalyzer(model_path=None, mmproj_path=None)
+                        logger.info(f"  Loading model ({self.config.flamingo_model})...")
+                        # Initialized once here with configured model
+                        flamingo = MusicFlamingoAnalyzer(model_name=self.config.flamingo_model)
 
                         # Start background prefetcher to warm disk cache
                         # This helps hide HDD I/O latency while GPU processes

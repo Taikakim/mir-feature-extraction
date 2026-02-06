@@ -78,8 +78,9 @@ class MusicFlamingoAnalyzer:
 
     def __init__(
         self,
-        model_path: str | Path,
-        mmproj_path: str | Path,
+        model_path: str | Path = None,
+        mmproj_path: str | Path = None,
+        model_name: str = None,  # e.g., "Q6_K", "Q8_0", "IQ3_M"
         n_gpu_layers: int = -1,  # -1 = all layers on GPU
         n_ctx: int = 8192,  # Context window
         verbose: bool = False
@@ -88,19 +89,21 @@ class MusicFlamingoAnalyzer:
         Initialize Music Flamingo analyzer.
 
         Args:
-            model_path: Path to GGUF model file
-            mmproj_path: Path to mmproj file (for audio input)
+            model_path: Path to GGUF model file (auto-detected if None)
+            mmproj_path: Path to mmproj file (auto-detected if None)
+            model_name: Model quantization name to select (e.g., "Q6_K", "Q8_0", "IQ3_M")
+                       Only used when model_path is None. If not specified, picks largest.
             n_gpu_layers: Number of layers to offload to GPU (-1 = all)
             n_ctx: Context window size
             verbose: Enable verbose logging
         """
         self.model_path = model_path
         self.mmproj_path = mmproj_path
-        
+
         # Auto-detect path if None
         if self.model_path is None or self.mmproj_path is None:
             model_dir = Path(__file__).parent.parent.parent / 'models' / 'music_flamingo'
-            
+
             if self.model_path is None:
                 gguf_files = list(model_dir.glob('*.gguf'))
                 # Exclude mmproj and imatrix files
@@ -108,9 +111,21 @@ class MusicFlamingoAnalyzer:
                               if 'mmproj' not in f.name and 'imatrix' not in f.name]
                 if not gguf_files:
                     raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-                # Pick largest file (highest quality quantization)
-                self.model_path = max(gguf_files, key=lambda f: f.stat().st_size)
-                logger.info(f"Auto-detected model: {self.model_path.name}")
+
+                # Filter by model_name if specified
+                if model_name:
+                    matching = [f for f in gguf_files if model_name in f.name]
+                    if matching:
+                        self.model_path = matching[0]
+                        logger.info(f"Selected model by name '{model_name}': {self.model_path.name}")
+                    else:
+                        # Fall back to largest if no match
+                        self.model_path = max(gguf_files, key=lambda f: f.stat().st_size)
+                        logger.warning(f"Model '{model_name}' not found, using largest: {self.model_path.name}")
+                else:
+                    # Pick largest file (highest quality quantization)
+                    self.model_path = max(gguf_files, key=lambda f: f.stat().st_size)
+                    logger.info(f"Auto-detected model: {self.model_path.name}")
                 
             if self.mmproj_path is None:
                 mmproj_files = list(model_dir.glob('*mmproj*.gguf'))

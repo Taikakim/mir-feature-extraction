@@ -90,29 +90,9 @@ class CropFeatureExtractor:
             from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
             logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.flamingo_model}...")
 
-            # Auto-detect model paths
-            model_dir = Path(__file__).parent.parent / 'models' / 'music_flamingo'
-
-            # Find main GGUF model (exclude mmproj and imatrix files)
-            gguf_files = [f for f in model_dir.glob('*.gguf')
-                          if 'mmproj' not in f.name and 'imatrix' not in f.name]
-            if not gguf_files:
-                raise FileNotFoundError(f"No GGUF model found in {model_dir}")
-            # Pick largest file (highest quality quantization)
-            model_path = max(gguf_files, key=lambda f: f.stat().st_size)
-
-            # Find mmproj file
-            mmproj_files = list(model_dir.glob('*mmproj*.gguf'))
-            if not mmproj_files:
-                raise FileNotFoundError(f"No mmproj file found in {model_dir}")
-            mmproj_path = mmproj_files[0]
-
-            logger.info(f"  Model: {model_path.name}")
-            logger.info(f"  MMProj: {mmproj_path.name}")
-
+            # Use auto-detection with configured model name
             self._flamingo = MusicFlamingoAnalyzer(
-                model_path=model_path,
-                mmproj_path=mmproj_path,
+                model_name=self.flamingo_model,
                 n_gpu_layers=-1,  # All layers on GPU
             )
             logger.info("Music Flamingo loaded successfully")
