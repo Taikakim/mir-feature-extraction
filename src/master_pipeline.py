@@ -199,7 +199,7 @@ class MasterPipelineConfig:
 
         # Build config
         config = cls(
-            input_dir=Path(paths['input']) if paths.get('input') else Path('.'),
+            input_dir=Path(paths['input']) if paths.get('input') else None,
             output_dir=Path(paths['output']) if paths.get('output') else None,
             stems_source=Path(paths['stems_source']) if paths.get('stems_source') else None,
 
