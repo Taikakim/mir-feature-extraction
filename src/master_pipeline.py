@@ -406,6 +406,13 @@ class MasterPipeline:
         logger.info(f"Output: {fmt_filename(str(self.working_dir))}")
         if self.config.stems_source:
             logger.info(f"Stems:  {fmt_filename(str(self.config.stems_source))}")
+
+        # Warn about in-place processing
+        if self.config.output_dir is None:
+            logger.warning("No output directory specified - processing will modify source folder!")
+            logger.warning("Stems, beat grids, and metadata will be written alongside originals.")
+            logger.info("(Set 'paths.output' in config to use a separate output folder)")
+
         logger.info(fmt_header("=" * 70))
 
         # Clean up any stale lock files from previous interrupted runs

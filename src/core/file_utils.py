@@ -308,10 +308,94 @@ SKIP_DIRECTORIES = {
 
 # Pattern to detect crop folders (end with _0, _1, _2, etc.)
 import re
+import hashlib
 CROP_FOLDER_PATTERN = re.compile(r'_\d+$')
 
 
-def find_organized_folders(root_directory: str | Path) -> List[Path]:
+def get_file_fingerprint(file_path: Path, chunk_size: int = 8192) -> str:
+    """
+    Get a quick fingerprint of a file for duplicate detection.
+
+    Uses file size + hash of first and last chunks for speed.
+    This is fast even for large files while still catching duplicates.
+
+    Args:
+        file_path: Path to the file
+        chunk_size: Bytes to read from start and end (default 8KB)
+
+    Returns:
+        String fingerprint like "size_hash" or empty string on error
+    """
+    try:
+        size = file_path.stat().st_size
+        hasher = hashlib.md5()
+
+        with open(file_path, 'rb') as f:
+            # Read first chunk
+            hasher.update(f.read(chunk_size))
+
+            # Read last chunk if file is large enough
+            if size > chunk_size * 2:
+                f.seek(-chunk_size, 2)  # Seek from end
+                hasher.update(f.read(chunk_size))
+
+        return f"{size}_{hasher.hexdigest()[:16]}"
+    except Exception:
+        return ""
+
+
+def deduplicate_folders(folders: List[Path], warn: bool = True) -> List[Path]:
+    """
+    Remove duplicate folders that contain the same full_mix file.
+
+    Detects duplicates by fingerprinting the full_mix audio file.
+    When duplicates are found, keeps the first one (alphabetically).
+
+    Args:
+        folders: List of organized folder paths
+        warn: If True, log warnings about skipped duplicates
+
+    Returns:
+        Deduplicated list of folders
+    """
+    seen_fingerprints: Dict[str, Path] = {}
+    unique_folders = []
+    duplicates_skipped = 0
+
+    for folder in sorted(folders):  # Sort for deterministic "first" selection
+        # Find full_mix file
+        full_mix = None
+        for ext in AUDIO_EXTENSIONS:
+            candidates = list(folder.glob(f'full_mix{ext}'))
+            if candidates:
+                full_mix = candidates[0]
+                break
+
+        if not full_mix:
+            unique_folders.append(folder)
+            continue
+
+        fingerprint = get_file_fingerprint(full_mix)
+        if not fingerprint:
+            unique_folders.append(folder)
+            continue
+
+        if fingerprint in seen_fingerprints:
+            duplicates_skipped += 1
+            if warn:
+                original = seen_fingerprints[fingerprint]
+                logger.warning(f"Skipping duplicate: {folder.name} (same audio as {original.name})")
+        else:
+            seen_fingerprints[fingerprint] = folder
+            unique_folders.append(folder)
+
+    if duplicates_skipped > 0:
+        logger.info(f"Skipped {duplicates_skipped} duplicate folder(s) with identical audio")
+
+    return unique_folders
+
+
+def find_organized_folders(root_directory: str | Path, deduplicate: bool = True) -> List[Path]:
     """
     Find all organized audio folders in a directory tree.
 
@@ -320,9 +404,10 @@ def find_organized_folders(root_directory: str | Path) -> List[Path]:
 
     Args:
         root_directory: Root directory to search
+        deduplicate: If True, skip folders with identical full_mix audio files
 
     Returns:
-        List of Path objects for organized folders
+        List of Path objects for organized folders (deduplicated by default)
     """
     root_directory = Path(root_directory)
     organized_folders = []
@@ -345,8 +430,17 @@ def find_organized_folders(root_directory: str | Path) -> List[Path]:
             if folder not in organized_folders and not should_skip(folder):
                 organized_folders.append(folder)
 
+    organized_folders = sorted(organized_folders)
+
+    # Deduplicate folders with identical full_mix audio
+    if deduplicate and len(organized_folders) > 1:
+        original_count = len(organized_folders)
+        organized_folders = deduplicate_folders(organized_folders)
+        if len(organized_folders) < original_count:
+            logger.info(f"After deduplication: {len(organized_folders)} unique folders")
+
     logger.info(f"Found {len(organized_folders)} organized folders in {root_directory}")
-    return sorted(organized_folders)
+    return organized_folders
 
 
 def get_midi_files(audio_folder: str | Path,
