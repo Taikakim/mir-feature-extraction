@@ -918,31 +918,28 @@ class Pipeline:
                         logger.info(f"  Loading model...")
                         # Initialized once here
                         flamingo = MusicFlamingoAnalyzer(model_path=None, mmproj_path=None)
-                        
-                        logger.info(f"  Processing {len(to_process)} files...")
+
+                        # Start background prefetcher to warm disk cache
+                        # This helps hide HDD I/O latency while GPU processes
+                        from src.core.audio_prefetcher import PathPrefetcher
+                        prefetcher = PathPrefetcher(to_process, buffer_size=8)
+                        prefetcher.start()
+
+                        logger.info(f"  Processing {len(to_process)} files (with disk prefetch)...")
                         for i, crop_path in enumerate(to_process, 1):
                             results = {}
                             try:
-                                # Run all prompts for this file
-                                # Use analyze_structure if available or sequential calls?
-                                # MusicFlamingoAnalyzer has analyze() which does single prompt.
-                                # But we can optimize by ensuring the encoder is run only once if we used a specialized method,
-                                # but MusicFlamingoAnalyzer caches the encoding if we call it sequentially on same file? 
-                                # No, analyze method re-encodes.
-                                # However, MusicFlamingoAnalyzer is fast. Let's just loop prompts.
-                                # UPDATE: My MusicFlamingoAnalyzer.analyze method supports retries now.
-                                
                                 for prompt_type in active_prompts:
                                     key = f'music_flamingo_{prompt_type}'
-                                    
+
                                     # Overwrite check for specific key
                                     info_path = get_crop_info_path(crop_path)
                                     existing = read_info(info_path) if info_path.exists() else {}
-                                    
+
                                     if self.config.overwrite or key not in existing:
                                         # Using the new robust analyze method
                                         results[key] = flamingo.analyze(crop_path, prompt_type=prompt_type)
-                                
+
                                 if results:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
                                     safe_update(get_crop_info_path(crop_path), results)
@@ -950,11 +947,16 @@ class Pipeline:
 
                                 logger.info(f"  [{i}/{len(to_process)}] {crop_path.name}")
 
+                                # Mark file as processed so prefetcher can clean up
+                                prefetcher.mark_processed(crop_path)
+
                             except Exception as e:
                                 logger.error(f"  Flamingo failed for {crop_path.name}: {e}")
                                 self.stats["crops_failed"] += 1
+                                prefetcher.mark_processed(crop_path)
                                 # Don't break loop, keep processing other files
-                        
+
+                        prefetcher.stop()
                         del flamingo
                     else:
                         logger.info("  All files already analyzed.")
