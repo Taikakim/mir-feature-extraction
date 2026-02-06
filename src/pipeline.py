@@ -78,6 +78,7 @@ class PipelineConfig:
 
     # Flamingo options
     flamingo_model: str = "Q8_0"
+    flamingo_context_size: int = 1024  # LLM context window size
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
     flamingo_prompts: Dict[str, bool] = field(default_factory=dict)
 
@@ -506,9 +507,10 @@ class Pipeline:
                 from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
                 logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.config.flamingo_model}...")
 
-                # Use auto-detection with configured model name
+                # Use auto-detection with configured model name and context
                 flamingo_analyzer = MusicFlamingoAnalyzer(
                     model_name=self.config.flamingo_model,
+                    n_ctx=self.config.flamingo_context_size,
                     n_gpu_layers=-1
                 )
             except Exception as e:
@@ -902,9 +904,12 @@ class Pipeline:
                             to_process.append(crop_path)
                     
                     if to_process:
-                        logger.info(f"  Loading model ({self.config.flamingo_model})...")
-                        # Initialized once here with configured model
-                        flamingo = MusicFlamingoAnalyzer(model_name=self.config.flamingo_model)
+                        logger.info(f"  Loading model ({self.config.flamingo_model}, ctx={self.config.flamingo_context_size})...")
+                        # Initialized once here with configured model and context
+                        flamingo = MusicFlamingoAnalyzer(
+                            model_name=self.config.flamingo_model,
+                            n_ctx=self.config.flamingo_context_size
+                        )
 
                         # Start background prefetcher to warm disk cache
                         # This helps hide HDD I/O latency while GPU processes

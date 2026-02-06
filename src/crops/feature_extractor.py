@@ -51,6 +51,7 @@ class CropFeatureExtractor:
         skip_essentia: bool = False,
         skip_timbral: bool = False,
         flamingo_model: str = 'Q6_K',
+        flamingo_context_size: int = 1024,
         device: str = 'cuda',
     ):
         """
@@ -63,6 +64,7 @@ class CropFeatureExtractor:
             skip_essentia: Skip Essentia features
             skip_timbral: Skip Audio Commons timbral features
             flamingo_model: GGUF model for Music Flamingo ('IQ3_M', 'Q6_K', 'Q8_0')
+            flamingo_context_size: LLM context window size (default 1024)
             device: Device for GPU models ('cuda' or 'cpu')
         """
         self.skip_demucs = skip_demucs
@@ -71,6 +73,7 @@ class CropFeatureExtractor:
         self.skip_essentia = skip_essentia
         self.skip_timbral = skip_timbral
         self.flamingo_model = flamingo_model
+        self.flamingo_context_size = flamingo_context_size
         self.device = device
 
         # Lazy-loaded models (load on first use)
@@ -90,9 +93,10 @@ class CropFeatureExtractor:
             from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
             logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.flamingo_model}...")
 
-            # Use auto-detection with configured model name
+            # Use auto-detection with configured model name and context
             self._flamingo = MusicFlamingoAnalyzer(
                 model_name=self.flamingo_model,
+                n_ctx=self.flamingo_context_size,
                 n_gpu_layers=-1,  # All layers on GPU
             )
             logger.info("Music Flamingo loaded successfully")

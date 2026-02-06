@@ -151,6 +151,8 @@ overwrite:
 music_flamingo:
   enabled: true
   model: Q8_0                    # IQ3_M (fast), Q6_K (balanced), Q8_0 (best quality)
+  context_size: 1024             # LLM context window (1024-2048 plenty for descriptions)
+                                 # Lower = less VRAM. Audio is pre-encoded, not in context.
 
   # Prompt types to generate (all enabled by default)
   prompts:

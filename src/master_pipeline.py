@@ -135,6 +135,7 @@ class MasterPipelineConfig:
     # Music Flamingo
     skip_flamingo: bool = False
     flamingo_model: str = 'Q8_0'
+    flamingo_context_size: int = 1024  # LLM context window size
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
 
     # Metadata
@@ -252,6 +253,7 @@ class MasterPipelineConfig:
             # Music Flamingo
             skip_flamingo=not flamingo.get('enabled', True),
             flamingo_model=flamingo.get('model', 'Q8_0'),
+            flamingo_context_size=flamingo.get('context_size', 1024),
             flamingo_token_limits=flamingo.get('max_tokens', {}),
 
             # Metadata
@@ -1615,6 +1617,7 @@ class MasterPipeline:
                 skip_audiobox=self.config.skip_audiobox,
                 skip_midi=True,
                 flamingo_model=self.config.flamingo_model,
+                flamingo_context_size=self.config.flamingo_context_size,
                 flamingo_token_limits=self.config.flamingo_token_limits,
                 flamingo_prompts=self.config.flamingo_prompts,
             )
