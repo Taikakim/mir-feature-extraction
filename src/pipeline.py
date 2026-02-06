@@ -822,8 +822,12 @@ class Pipeline:
                             for crop_path, results in zip(batch_paths, batch_results):
                                 if results:
                                     safe_update(get_crop_info_path(crop_path), results)
+                                    self.stats["crops_processed"] += 1
+                                else:
+                                    self.stats["crops_failed"] += 1
                         except Exception as e:
                             logger.error(f"  AudioBox batch failed: {e}")
+                            self.stats["crops_failed"] += len(batch_paths)
 
                         logger.info(progress.update(batch_end))
 
@@ -942,11 +946,13 @@ class Pipeline:
                                 if results:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
                                     safe_update(get_crop_info_path(crop_path), results)
-                                
+                                    self.stats["crops_processed"] += 1
+
                                 logger.info(f"  [{i}/{len(to_process)}] {crop_path.name}")
-                                
+
                             except Exception as e:
                                 logger.error(f"  Flamingo failed for {crop_path.name}: {e}")
+                                self.stats["crops_failed"] += 1
                                 # Don't break loop, keep processing other files
                         
                         del flamingo
