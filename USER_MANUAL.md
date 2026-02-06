@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.4
-**Last Updated:** 2026-01-26
+**Version:** 1.5
+**Last Updated:** 2026-02-06
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -28,11 +28,12 @@ This framework extracts 78 numeric MIR features + 5 natural language AI descript
 ### What It Does
 
 - **Organizes** audio files into structured folders
-- **Separates** audio into stems (drums, bass, other, vocals) using Demucs htdemucs_ft
-- **Extracts** 78 numeric conditioning features per track
-- **Generates** 5 AI text descriptions via Music Flamingo (GGUF or Transformers)
+- **Separates** audio into stems (drums, bass, other, vocals) using Demucs or BS-RoFormer
+- **Extracts** 97+ numeric conditioning features per track
+- **Generates** 5 AI text descriptions via Music Flamingo (model configurable in YAML)
 - **Transcribes** drums to MIDI using ADTOF-PyTorch (GPU-accelerated)
-- **Saves** results in JSON `.INFO` files and auxiliary grid files
+- **Saves** results in JSON `.INFO` files with atomic writes and HDD optimization
+- **Tracks** processing speed with realtime factor statistics
 
 ### What You Get
 

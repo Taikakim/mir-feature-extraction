@@ -1,115 +1,147 @@
-# Session Summary - 2026-02-05 (Latest Updates)
+# Session Summary - 2026-02-06
 
 ## What We Accomplished
 
-### 1. Critical Bug Fixes
+### 1. BS-RoFormer Integration & Bug Fixes
 
-**Essentia TensorFlow Deadlock (FINAL FIX):**
-- ProcessPoolExecutor with staggered worker startup still caused deadlocks
-- **Root cause:** TensorFlow deadlocks on concurrent inference, not just graph loading
-- **Solution:** Changed to sequential processing - TensorFlow handles internal parallelism
-- Processing is still fast (~2-4s/file) because TensorFlow uses multi-threaded ops internally
+**BS-RoFormer as Alternative to Demucs:**
+- Integrated BS-RoFormer as drop-in replacement for Demucs stem separation
+- Config option: `source_separation.backend: bs_roformer` or `demucs`
+- Fixed multiple bugs from initial implementation:
+  - `model` → `separator` variable naming
+  - `audio_folder` → `folder_path` parameter
+  - Moved `atexit.register()` after class definition
+  - Removed duplicate function definitions and imports
 
-**Universal Skip Logic Pattern:**
-- Added `should_process(info_path, output_keys, overwrite)` utility in `json_handler.py`
-- **Key principle:** Check ALL output keys, not just one (any missing = needs processing)
-- Applied consistently across: pipeline_workers.py, pipeline.py, spectral_features.py, chroma.py, audio_commons.py
-- Example: `LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']`
+**Stem Check Improvements:**
+- Both backends now check for existing stems in ALL formats (.wav, .flac, .mp3)
+- Previously Demucs only checked configured output format
+- Prevents re-processing when stems created by different backend
 
-**ID3 Metadata Propagation:**
-- Source track ID3 tags now written to crop audio files (MP3/FLAC)
-- Metadata transferred: artist, title, album, year, genre
-- Uses mutagen for tag writing (ID3v2 for MP3, Vorbis comments for FLAC)
+### 2. Audio Duration Tracking
 
-**Previous Essentia Fix (superseded):**
-- Running Essentia with 20 parallel workers caused TensorFlow to deadlock
-- Added separate `essentia_workers` config (default: 4, TensorFlow-safe)
-- Other CPU features can still use higher parallelism
+**New Pipeline Statistics:**
+- Added `total_audio_duration` tracking to `PipelineStats`
+- Added `realtime_factor` property (audio seconds / processing seconds)
+- Pipeline calculates total audio duration at startup
+- Summary shows processing speed relative to realtime:
+  ```
+  Audio processed: 12.5 min (751s)
+  Processing speed: 0.53x realtime
+    (Took 1.9 seconds of wall time per second of audio)
+  ```
 
-**Skip Logic Key Mismatches:**
-- Sequential mode was checking wrong feature keys, causing re-processing
-- Fixed: `spectral_centroid` → `spectral_flatness`, `rms_bass` → `rms_energy_bass`, `chroma_mean` → `chroma_0`
+### 3. Music Flamingo Model Detection Fix
 
-**Crop BPM/Beat Count Bug:**
-- Crop-specific values were being overwritten by source track values
-- Fixed: Removed `bpm` and `beat_count` from `OPTIONAL_TRANSFERRABLE`
+**imatrix File Exclusion:**
+- Fixed model auto-detection to exclude `imatrix` calibration files
+- Now picks largest GGUF model file (highest quality quantization)
+- Applied to all 4 locations:
+  - `music_flamingo_llama_cpp.py` (3 places)
+  - `pipeline.py`
+  - `feature_extractor.py`
 
-### 2. Performance Improvements
+### 4. HDD I/O Optimization
 
-**Spectral Features - Essentia Migration:**
-- Rewrote `spectral_features.py` to use Essentia (faster C++ backend)
-- Changed aggregation from mean to median (more robust to outliers)
-- Kept librosa as fallback if Essentia not available
+**RAM Prefetcher (`src/core/audio_prefetcher.py`):**
+- New `AudioPrefetcher` class loads audio into RAM in background thread
+- New `PathPrefetcher` warms OS disk cache for path-based APIs
+- Integrated into Music Flamingo pass with buffer_size=8
+- Hides HDD seek latency while GPU processes current file
 
-### 3. Pipeline Cleanup
+**Batch .INFO Writes:**
+- Pre-load source .INFO once before crop loop (was N redundant reads)
+- New `batch_write_info()` function for efficient multi-file writes
+- Uses atomic writes (temp file + rename) for crash safety
+- Groups all .INFO writes at end of folder processing
 
-**Removed Unused .ONSETS Slicing:**
-- Analysis found `.ONSETS` files were sliced for crops but never used
-- Crop analysis only calculates BPM via librosa (doesn't read .ONSETS)
-- Syncopation/complexity (which use .ONSETS) not run on crops
-- Keeps `.BEATS_GRID` and `.DOWNBEATS` slicing (these ARE used)
+### 5. Stats Counter Fixes
 
-### 4. Code Refactoring
-
-**New Core Modules Extracted:**
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/core/terminal.py` | 179 | ANSI colors, ColoredFormatter |
-| `src/core/metadata_utils.py` | 149 | Audio metadata extraction |
-| `src/core/pipeline_stats.py` | 148 | TimingStats, PipelineStats |
-| `src/core/pipeline_workers.py` | 180 | Parallel processing workers |
-
-`master_pipeline.py` reduced from 2218 to 1673 lines (-545)
-
-## Configuration Changes
-
-**New Option:**
-```yaml
-processing:
-  feature_workers: 20    # For CPU features (loudness, spectral, timbral)
-  essentia_workers: 4    # Separate limit for Essentia (TensorFlow-safe)
-```
+**crops_processed Counter:**
+- AudioBox and Music Flamingo passes weren't incrementing counter
+- Fixed: now properly tracks processed/failed crops
+- Summary correctly shows "Crops analyzed: N" instead of 0
 
 ## Commits This Session
 
 | Hash | Description |
 |------|-------------|
-| `68a5c3f` | Universal should_process() pattern and Essentia sequential fix |
-| `d3b7132` | Update session documentation for 2026-02-05 |
-| `edf1d07` | Remove unused .ONSETS slicing from crop creation |
-| `750e96a` | Fix crop INFO overwriting crop-specific bpm/beat_count with source values |
-| `60cb85c` | Rewrite spectral features to use Essentia instead of librosa |
-| `7e802d9` | Use median instead of mean for spectral feature aggregation |
+| `de8ca35` | Fix Demucs stem check to detect all formats |
+| `5cc89c1` | Use atomic writes in batch_write_info for safety |
+| `a5ee1e0` | Optimize crop .INFO writes for HDD performance |
+| `5235ba0` | Add audio prefetcher for HDD I/O optimization |
+| `27c9637` | Fix crops_processed counter in batched pipeline passes |
+| `4578e53` | Fix Music Flamingo model detection in music_flamingo_llama_cpp.py |
+| `d1078a7` | Add audio duration tracking and fix Music Flamingo model detection |
+| `55872f3` | Fix duplicate code block and Music Flamingo init in pipeline.py |
+| `a1b5229` | Fix undefined audio_folder variable in save_stem |
+| `8224c2f` | Fix: Error when config input is null instead of defaulting to '.' |
+| `5e22b5a` | Fix folder discovery to skip crops, repos, and test output |
+| `e2ceab9` | Fix BS-RoFormer model variable and exclude .venv from folder scan |
+| `950f4b7` | Update BS-RoFormer docs with pipeline integration details |
+| `e3ba4f3` | Integrate BS-RoFormer into master pipeline with bug fixes |
 
-## Verified Pipeline Flow
+## New Files
 
-1. **Stage 2a:** Demucs separates full tracks into stems
-2. **Stage 2b:** Rhythm analysis (beats, onsets, downbeats) on full_mix only
-3. **Stage 2c:** Metadata lookup
-4. **Stage 2d:** Per-stem features stored on full_mix .INFO
-5. **Stage 3:** Crops created with stems at identical positions (perfect sync)
-   - `.BEATS_GRID` and `.DOWNBEATS` sliced (NOT `.ONSETS`)
-   - Crop-specific bpm/beat_count calculated fresh
-6. **Stage 4:** Only full_mix crops analyzed (stem crops excluded)
-   - Per-stem loudness extracted from stem crops
-   - Existing features skipped when overwrite=false
+| File | Purpose |
+|------|---------|
+| `src/core/audio_prefetcher.py` | RAM prefetcher for HDD I/O optimization |
+| `src/preprocessing/bs_roformer_sep.py` | BS-RoFormer stem separation wrapper |
+| `docs/BS_ROFORMER_OPTIMIZATION.md` | BS-RoFormer walkthrough and optimization guide |
+
+## Configuration Changes
+
+**New Source Separation Options:**
+```yaml
+source_separation:
+  backend: bs_roformer  # or 'demucs'
+
+  bs_roformer:
+    model_name: jarredou-BS-ROFO-SW-Fixed-drums
+    model_dir: /home/kim/Projects/mir/models/bs-roformer
+    batch_size: 1
+    device: cuda
+```
+
+**Overwrite Control:**
+```yaml
+overwrite:
+  source_separation: false  # Skip if stems exist (any format)
+  demucs: false            # Backwards compatibility alias
+```
 
 ## Key Files Modified
 
-- `src/core/json_handler.py` - **NEW:** `should_process()`, `should_process_file()` utilities
-- `src/core/pipeline_workers.py` - Universal skip logic with full key lists
-- `src/pipeline.py` - Essentia sequential processing, universal skip logic
-- `src/master_pipeline.py` - refactored to use core modules, universal skip logic
-- `src/spectral/spectral_features.py` - Essentia + median aggregation, `should_process()`
-- `src/harmonic/chroma.py` - `should_process()` with all 12 chroma keys
-- `src/timbral/audio_commons.py` - `should_process()` with all 8 timbral keys
-- `src/tools/create_training_crops.py` - ID3 tag propagation, bpm fix
-- `config/master_pipeline.yaml` - essentia_workers option
-- `config/small.yaml` - test config
+- `src/master_pipeline.py` - BS-RoFormer integration, duration tracking, stem checks
+- `src/pipeline.py` - Music Flamingo fixes, prefetcher integration, stats counters
+- `src/core/pipeline_stats.py` - Added total_audio_duration and realtime_factor
+- `src/core/json_handler.py` - Added batch_write_info() function
+- `src/tools/create_training_crops.py` - Optimized .INFO writes for HDD
+- `src/classification/music_flamingo_llama_cpp.py` - imatrix exclusion fix
+- `src/crops/feature_extractor.py` - imatrix exclusion fix
 
-## Previous Sessions
+## Performance Improvements
 
-- See `project.log` for full session history
-- 2026-01-26: Parallel processing, batch feature extraction
-- 2026-01-25: Demucs parallel processing, file organizer improvements
-- 2026-01-21: ADTOF drum transcription integration
+| Optimization | Impact |
+|--------------|--------|
+| Pre-load source .INFO | Eliminates N redundant file reads per folder |
+| Batch .INFO writes | Groups writes at end (better HDD seek pattern) |
+| RAM prefetcher | Hides HDD latency during GPU processing |
+| All-format stem check | Prevents unnecessary re-separation |
+
+## Verified Behavior
+
+1. **Stage 2 Stem Separation:**
+   - Checks for existing stems in .wav, .flac, .mp3
+   - Skips if all 4 stems found (drums, bass, other, vocals)
+   - Works with both BS-RoFormer and Demucs backends
+
+2. **Music Flamingo Model Detection:**
+   - Excludes mmproj and imatrix files
+   - Selects largest GGUF file (highest quality)
+   - Works in all entry points (CLI, batch, pipeline)
+
+3. **Stats Tracking:**
+   - Total audio duration calculated at startup
+   - Realtime factor shown in summary
+   - crops_processed counter accurate for all passes

@@ -24,12 +24,13 @@ This framework extracts **97 music information retrieval (MIR) features** from a
 ✅ **97+ Numeric Features** extracted per track
 ✅ **AI-Powered Descriptions** using Music Flamingo (8B params)
 ✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
-✅ **Per-Stem Analysis** - Features from Demucs separated stems (drums, bass, other, vocals)
+✅ **Per-Stem Analysis** - Demucs or BS-RoFormer separated stems (drums, bass, other, vocals)
 ✅ **GPU Accelerated** processing (AMD ROCm / NVIDIA CUDA)
 ✅ **MIDI Drum Transcription** using ADTOF-PyTorch or Drumsep
-✅ **Batch Processing** with automatic organization
-✅ **Safe JSON Updates** with feature merging
+✅ **Batch Processing** with automatic organization and HDD optimization
+✅ **Safe JSON Updates** with atomic writes and feature merging
 ✅ **Production Ready** - optimized for AMD RDNA4 (RX 9070 XT)
+✅ **Realtime Stats** - Processing speed tracking relative to audio duration
 
 ---
 

@@ -502,6 +502,29 @@ music_flamingo:
 4. **Demucs Workers**: Changed from unused `jobs` to subprocess-based `workers`
 5. **All Config Updated**: `master_pipeline.yaml` now has all parallel processing settings
 
+### 2026-02-06 Session (BS-RoFormer Integration & HDD Optimization)
+
+1. ✅ **BS-RoFormer Integration**: Alternative stem separation backend
+   - Config: `source_separation.backend: bs_roformer` or `demucs`
+   - Fixed multiple implementation bugs from initial integration
+2. ✅ **Audio Duration Tracking**: Pipeline now shows realtime processing factor
+   - Total audio duration calculated at startup
+   - Summary shows "Processing speed: Nx realtime"
+3. ✅ **Music Flamingo Model Detection**: Excludes imatrix calibration files
+   - Now picks largest GGUF model (highest quality)
+   - Fixed in all 4 auto-detection locations
+4. ✅ **HDD I/O Optimization**: RAM prefetcher and batch writes
+   - New `AudioPrefetcher` and `PathPrefetcher` classes
+   - Music Flamingo pass uses prefetch buffer of 8 files
+   - Batch .INFO writes with atomic temp file + rename
+5. ✅ **Stats Counter Fixes**: crops_processed now accurate for all passes
+6. ✅ **Stem Check Improvement**: Both backends check all formats (.wav, .flac, .mp3)
+
+**New Files:**
+- `src/core/audio_prefetcher.py` - RAM prefetcher for HDD optimization
+- `src/preprocessing/bs_roformer_sep.py` - BS-RoFormer wrapper
+- `docs/BS_ROFORMER_OPTIMIZATION.md` - Integration guide
+
 ---
 
 ## References to Check (By Date - Newest First)
@@ -531,6 +554,6 @@ music_flamingo:
 
 ---
 
-**Last Updated**: 2026-01-26 (Session: Parallel processing, Music Flamingo config, batch feature extraction)
+**Last Updated**: 2026-02-06 (Session: BS-RoFormer integration, HDD optimization, audio duration tracking)
 **Hardware**: AMD Radeon RX 9070 XT (16GB VRAM) + Ryzen 9 9900X
 
