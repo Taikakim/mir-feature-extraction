@@ -313,6 +313,54 @@ def should_process(info_path: str | Path, output_keys: list, overwrite: bool = F
         return True
 
 
+def batch_write_info(writes: list, merge: bool = True) -> int:
+    """
+    Batch write multiple .INFO files efficiently.
+
+    Optimized for HDD by minimizing lock overhead and grouping writes.
+    For new files (merge=False), skips locking entirely.
+
+    Args:
+        writes: List of (file_path, data_dict) tuples
+        merge: If True, merge with existing data. If False, overwrite (faster for new files)
+
+    Returns:
+        Number of files successfully written
+
+    Example:
+        >>> writes = [
+        ...     (Path('/path/to/crop1.INFO'), {'bpm': 120, 'position': 0.0}),
+        ...     (Path('/path/to/crop2.INFO'), {'bpm': 120, 'position': 0.5}),
+        ... ]
+        >>> batch_write_info(writes, merge=False)
+        2
+    """
+    success_count = 0
+
+    for file_path, data in writes:
+        file_path = Path(file_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if merge and file_path.exists():
+                # Need to read-modify-write with locking
+                safe_update(file_path, data)
+            else:
+                # New file - direct write, no locking needed
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+            success_count += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to write {file_path}: {e}")
+
+    if success_count > 0:
+        logger.debug(f"Batch wrote {success_count}/{len(writes)} .INFO files")
+
+    return success_count
+
+
 def should_process_file(file_path: str | Path, output_keys: list, overwrite: bool = False) -> bool:
     """
     Convenience wrapper: Check if an audio file needs processing.

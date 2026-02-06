@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.file_utils import find_organized_folders, get_stem_files
 from core.common import setup_logging
 from rhythm.beat_grid import load_beat_grid
-from core.json_handler import get_info_path, read_info, safe_update
+from core.json_handler import get_info_path, read_info, safe_update, batch_write_info
 from core.file_locks import FileLock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -878,6 +878,19 @@ def create_crops_for_file(folder_path: Path,
     align_grid = downbeat_times if (downbeat_times is not None and len(downbeat_times) > 0) else beat_times
     global_bpm = float(bpm) if bpm else 0.0
 
+    # Pre-load transferrable features from source .INFO (reuse info_data loaded above)
+    # This avoids re-reading the same file for every crop
+    source_transferrable = {}
+    for feature in TRANSFERRABLE_FEATURES:
+        if feature in info_data:
+            source_transferrable[feature] = info_data[feature]
+    for feature in OPTIONAL_TRANSFERRABLE:
+        if feature in info_data:
+            source_transferrable[feature] = info_data[feature]
+
+    # Collect .INFO data for batch write at end (reduces HDD seeks)
+    pending_info_writes = []
+
     # Initial start: snap to closest downbeat after silence
     aligned_start = find_closest_downbeat(align_grid, start_offset_sec)
     if aligned_start is not None:
@@ -1033,47 +1046,20 @@ def create_crops_for_file(folder_path: Path,
         with open(crop_path.with_suffix('.json'), 'w') as f:
             json.dump(meta, f, indent=2)
 
-        # Create .INFO file with position key and transferred features
-        # Use crop_path.with_suffix('.INFO') for per-crop INFO file
-        info_path = crop_path.with_suffix('.INFO')
-        info_data = {
+        # Prepare .INFO data (batch write at end for HDD efficiency)
+        crop_info_path = crop_path.with_suffix('.INFO')
+        crop_info_data = {
             "position": position,
             "bpm": round(local_bpm, 1),
             "beat_count": beat_count,
             "downbeats": num_downbeats
         }
-        
-        # Load source .INFO if available
-        source_info_path = get_info_path(full_mix_path)
-        if source_info_path.exists():
-            try:
-                # Read source .INFO
-                with open(source_info_path, 'r') as f:
-                    source_info = json.load(f)
-                
-                # Transfer features
-                transferred_count = 0
-                for feature in TRANSFERRABLE_FEATURES:
-                    if feature in source_info:
-                        info_data[feature] = source_info[feature]
-                        transferred_count += 1
-                    else:
-                        # Warn about missing transferrable features (except optional ones)
-                        if feature not in OPTIONAL_TRANSFERRABLE:
-                            # Don't spam warnings for every crop, just log debug
-                            # logger.debug(f"Missing transferrable feature '{feature}' in source")
-                            pass
-                
-                # Also check optional features
-                for feature in OPTIONAL_TRANSFERRABLE:
-                    if feature in source_info:
-                        info_data[feature] = source_info[feature]
-                        transferred_count += 1
-                        
-            except Exception as e:
-                logger.warning(f"Failed to read source info: {e}")
-        
-        safe_update(info_path, info_data)
+
+        # Add pre-loaded transferrable features (already loaded before loop)
+        crop_info_data.update(source_transferrable)
+
+        # Queue for batch write
+        pending_info_writes.append((crop_info_path, crop_info_data))
 
         crop_count += 1
 
@@ -1088,6 +1074,12 @@ def create_crops_for_file(folder_path: Path,
             current_start_sec = next_start
         else:
             current_start_sec = next_target
+
+    # Batch write all .INFO files (much faster on HDD than individual writes)
+    if pending_info_writes:
+        logger.debug(f"Batch writing {len(pending_info_writes)} .INFO files...")
+        # Use merge=False since these are new crop files (no existing data)
+        batch_write_info(pending_info_writes, merge=False)
 
     return crop_count
 
