@@ -25,26 +25,38 @@ class TimingStats:
     end_time: float = 0.0
     items_processed: int = 0
     items_skipped: int = 0
-    
+    audio_duration: float = 0.0  # Total audio duration processed (seconds)
+
     @property
     def elapsed(self) -> float:
         """Total elapsed time in seconds."""
         return self.end_time - self.start_time if self.end_time > 0 else 0.0
-    
+
     @property
     def items_per_second(self) -> float:
         """Processing speed in items per second."""
         if self.elapsed > 0 and self.items_processed > 0:
             return self.items_processed / self.elapsed
         return 0.0
-    
+
     @property
     def seconds_per_item(self) -> float:
         """Average time per item in seconds."""
         if self.items_processed > 0:
             return self.elapsed / self.items_processed
         return 0.0
-    
+
+    @property
+    def realtime_factor(self) -> float:
+        """Processing speed as multiple of realtime (audio_duration / elapsed).
+
+        >1.0 means faster than realtime, <1.0 means slower.
+        Returns 0 if audio_duration not tracked.
+        """
+        if self.elapsed > 0 and self.audio_duration > 0:
+            return self.audio_duration / self.elapsed
+        return 0.0
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -54,6 +66,8 @@ class TimingStats:
             'items_skipped': self.items_skipped,
             'items_per_second': round(self.items_per_second, 3),
             'seconds_per_item': round(self.seconds_per_item, 3),
+            'audio_duration': round(self.audio_duration, 2),
+            'realtime_factor': round(self.realtime_factor, 2),
         }
 
 
@@ -105,13 +119,22 @@ class PipelineStats:
         self.operation_timing[name] = timing
         return timing
     
-    def end_operation(self, name: str, items_processed: int = 0, items_skipped: int = 0) -> float:
-        """End timing an operation and return elapsed time."""
+    def end_operation(self, name: str, items_processed: int = 0, items_skipped: int = 0,
+                      audio_duration: float = 0.0) -> float:
+        """End timing an operation and return elapsed time.
+
+        Args:
+            name: Operation name
+            items_processed: Number of items processed
+            items_skipped: Number of items skipped
+            audio_duration: Total audio duration processed in seconds (for realtime factor)
+        """
         if name in self.operation_timing:
             timing = self.operation_timing[name]
             timing.end_time = time.time()
             timing.items_processed = items_processed
             timing.items_skipped = items_skipped
+            timing.audio_duration = audio_duration
             return timing.elapsed
         return 0.0
     

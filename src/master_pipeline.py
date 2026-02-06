@@ -663,17 +663,19 @@ class MasterPipeline:
         else:
             logger.info(f"Using backend: {fmt_notification('Demucs')}")
             self._run_demucs_batch(folders)
-            
-        sep_time = self.stats.end_operation('demucs', 
+
+        sep_time = self.stats.end_operation('demucs',
             items_processed=self.stats.tracks_separated,
-            items_skipped=len(folders) - self.stats.tracks_separated)
+            items_skipped=len(folders) - self.stats.tracks_separated,
+            audio_duration=self.stats.total_audio_duration)
         logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
 
         # Sub-stage 2b: Beat/onset/downbeat detection
         logger.info("\n[2b] Rhythm Analysis (beats, onsets, downbeats)")
         self.stats.start_operation('rhythm')
         self._run_rhythm_analysis(folders)
-        rhythm_time = self.stats.end_operation('rhythm', items_processed=len(folders))
+        rhythm_time = self.stats.end_operation('rhythm', items_processed=len(folders),
+            audio_duration=self.stats.total_audio_duration)
         logger.info(fmt_dim(f"    Rhythm analysis completed in {rhythm_time:.1f}s"))
 
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
@@ -688,8 +690,9 @@ class MasterPipeline:
         logger.info("\n[2d] First-Stage Features")
         self.stats.start_operation('first_stage_features')
         self._run_first_stage_features(folders)
-        features_time = self.stats.end_operation('first_stage_features', 
-            items_processed=len(folders))
+        features_time = self.stats.end_operation('first_stage_features',
+            items_processed=len(folders),
+            audio_duration=self.stats.total_audio_duration)
         logger.info(fmt_dim(f"    First-stage features completed in {features_time:.1f}s"))
 
         self.stats.time_track_analysis = time.time() - start_time
@@ -1436,8 +1439,13 @@ class MasterPipeline:
             logger.error(f"Cropping failed: {e}")
             self.stats.errors.append(f"Cropping: {e}")
 
-        crop_time = self.stats.end_operation('cropping', 
-            items_processed=self.stats.crops_created)
+        # Calculate total crop audio duration (crop_length * count)
+        crop_duration_sec = self.config.crop_length_samples / 44100.0
+        total_crop_audio = crop_duration_sec * self.stats.crops_created
+
+        crop_time = self.stats.end_operation('cropping',
+            items_processed=self.stats.crops_created,
+            audio_duration=total_crop_audio)
         self.stats.time_cropping = time.time() - start_time
         logger.info(fmt_dim(f"Cropping completed in {crop_time:.1f}s ({self.stats.crops_created} crops)"))
 
@@ -1518,8 +1526,10 @@ class MasterPipeline:
             logger.info("\n[4a] Crop Stem Separation (Demucs)")
             self.stats.start_operation('crop_demucs')
             self._run_crop_demucs(all_crops)
-            crop_demucs_time = self.stats.end_operation('crop_demucs', 
-                items_processed=len(all_crops))
+            crop_audio_duration = (self.config.crop_length_samples / 44100.0) * len(all_crops)
+            crop_demucs_time = self.stats.end_operation('crop_demucs',
+                items_processed=len(all_crops),
+                audio_duration=crop_audio_duration)
             logger.info(fmt_dim(f"    Crop Demucs completed in {crop_demucs_time:.1f}s"))
         elif self.config.stems_source:
             # Crop stems from source
@@ -1533,12 +1543,20 @@ class MasterPipeline:
         logger.info("\n[4b] Crop Feature Extraction")
         self.stats.start_operation('crop_features')
         self._run_crop_features(crops_dir)
+
+        # Calculate total crop audio duration for realtime factor
+        crop_duration_sec = self.config.crop_length_samples / 44100.0
+        crops_audio_duration = crop_duration_sec * self.stats.crops_analyzed
+
         crop_features_time = self.stats.end_operation('crop_features',
-            items_processed=self.stats.crops_analyzed)
+            items_processed=self.stats.crops_analyzed,
+            audio_duration=crops_audio_duration)
         logger.info(fmt_dim(f"    Crop features completed in {crop_features_time:.1f}s"))
 
+        total_crops_audio = crop_duration_sec * len(all_crops)
         total_crop_analysis_time = self.stats.end_operation('crop_analysis',
-            items_processed=len(all_crops))
+            items_processed=len(all_crops),
+            audio_duration=total_crops_audio)
         self.stats.time_crop_analysis = time.time() - start_time
         logger.info(fmt_dim(f"Crop analysis completed in {total_crop_analysis_time:.1f}s"))
 
@@ -1780,24 +1798,31 @@ class MasterPipeline:
             print("\n" + fmt_header("=== OPERATION TIMING DETAILS ==="))
             print(f"{'Operation':<25} {'Time':>10} {'Items':>8} {'Speed':>15}")
             print("-" * 60)
-            
-            for name, timing in sorted(self.stats.operation_timing.items(), 
+
+            for name, timing in sorted(self.stats.operation_timing.items(),
                                        key=lambda x: x[1].start_time):
                 time_str = f"{timing.elapsed:.1f}s"
                 items_str = str(timing.items_processed) if timing.items_processed > 0 else "-"
-                
-                if timing.items_processed > 0 and timing.elapsed > 0:
+
+                # Show realtime factor if audio duration tracked, otherwise items/s
+                if timing.realtime_factor > 0:
+                    speed_str = f"{timing.realtime_factor:.2f}x realtime"
+                elif timing.items_processed > 0 and timing.elapsed > 0:
                     if timing.items_per_second >= 1:
                         speed_str = f"{timing.items_per_second:.2f}/s"
                     else:
                         speed_str = f"{timing.seconds_per_item:.2f}s/item"
                 else:
                     speed_str = "-"
-                
+
                 print(f"{name:<25} {time_str:>10} {items_str:>8} {speed_str:>15}")
-            
+
             print("-" * 60)
-            print(f"{'Total':<25} {self.stats.total_time:>9.1f}s")
+            # Show overall realtime factor
+            if self.stats.realtime_factor > 0:
+                print(f"{'Total':<25} {self.stats.total_time:>9.1f}s          {self.stats.realtime_factor:.2f}x realtime")
+            else:
+                print(f"{'Total':<25} {self.stats.total_time:>9.1f}s")
             print()
 
 
