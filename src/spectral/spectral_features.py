@@ -24,7 +24,7 @@ Output:
 import numpy as np
 import soundfile as sf
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 import logging
 
 import sys
@@ -183,7 +183,9 @@ def analyze_spectral_features_librosa(audio: np.ndarray,
 
 def analyze_spectral_features(audio_path: str | Path,
                               frame_size: int = 2048,
-                              hop_size: int = 512) -> Dict[str, float]:
+                              hop_size: int = 512,
+                              audio: Optional[np.ndarray] = None,
+                              sr: Optional[int] = None) -> Dict[str, float]:
     """
     Analyze spectral features for an audio file.
 
@@ -193,6 +195,8 @@ def analyze_spectral_features(audio_path: str | Path,
         audio_path: Path to audio file
         frame_size: FFT window size (default: 2048)
         hop_size: Hop size in samples (default: 512)
+        audio: Pre-loaded mono audio array (skips disk read if provided)
+        sr: Sample rate (required if audio is provided)
 
     Returns:
         Dictionary with spectral features:
@@ -203,17 +207,20 @@ def analyze_spectral_features(audio_path: str | Path,
     """
     audio_path = Path(audio_path)
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if audio is None:
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Analyzing spectral features: {audio_path.name}")
+        logger.info(f"Analyzing spectral features: {audio_path.name}")
 
-    # Load audio
-    audio, sr = sf.read(str(audio_path))
+        # Load audio
+        audio, sr = sf.read(str(audio_path))
 
-    # Convert to mono if stereo
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
+        # Convert to mono if stereo
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+    else:
+        logger.info(f"Analyzing spectral features: {audio_path.name} (pre-loaded)")
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
 

@@ -126,13 +126,17 @@ def calculate_loudness(audio: np.ndarray, sample_rate: int) -> Dict[str, float]:
 
 
 def analyze_file_loudness(audio_path: str | Path,
-                           prefix: str = '') -> Dict[str, float]:
+                           prefix: str = '',
+                           audio: Optional[np.ndarray] = None,
+                           sr: Optional[int] = None) -> Dict[str, float]:
     """
     Analyze loudness of a single audio file.
 
     Args:
         audio_path: Path to audio file
         prefix: Optional prefix for feature keys (e.g., 'drums' -> 'lufs_drums')
+        audio: Pre-loaded audio array (skips disk read if provided)
+        sr: Sample rate (required if audio is provided)
 
     Returns:
         Dictionary with loudness features
@@ -143,16 +147,16 @@ def analyze_file_loudness(audio_path: str | Path,
     """
     audio_path = Path(audio_path)
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if audio is None:
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Analyzing loudness: {audio_path.name}")
+        logger.info(f"Analyzing loudness: {audio_path.name}")
+        audio, sr = sf.read(str(audio_path))
+    else:
+        logger.info(f"Analyzing loudness: {audio_path.name} (pre-loaded)")
 
     try:
-        # Load audio
-        audio, sr = sf.read(str(audio_path))
-
-        # Calculate loudness
         loudness = calculate_loudness(audio, sr)
 
         # Add prefix if specified

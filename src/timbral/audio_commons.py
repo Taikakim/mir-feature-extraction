@@ -295,15 +295,23 @@ def analyze_warmth(audio_path: str | Path) -> float:
 
 
 def analyze_all_timbral_features(audio_path: str | Path,
-                                  features: Optional[list] = None) -> Dict[str, float]:
+                                  features: Optional[list] = None,
+                                  audio: Optional['np.ndarray'] = None,
+                                  sr: Optional[int] = None) -> Dict[str, float]:
     """
     Analyze all (or selected) Audio Commons timbral features.
+
+    When audio/sr are provided, the audio is written to /dev/shm (tmpfs RAM disk)
+    once, and all 8 timbral_models calls read from RAM instead of HDD.
+    This eliminates 7 redundant disk reads per analysis.
 
     Args:
         audio_path: Path to audio file
         features: Optional list of features to extract. If None, extracts all.
                  Valid: ['brightness', 'roughness', 'hardness', 'depth',
                         'booming', 'reverberation', 'sharpness', 'warmth']
+        audio: Pre-loaded audio array (written to /dev/shm for timbral_models)
+        sr: Sample rate (required if audio is provided)
 
     Returns:
         Dictionary with timbral features
@@ -315,9 +323,25 @@ def analyze_all_timbral_features(audio_path: str | Path,
         raise ImportError("timbral_models is not installed")
 
     audio_path = Path(audio_path)
+    tmpfs_path = None
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    # If pre-loaded audio provided, write to /dev/shm for timbral_models
+    # (library only accepts file paths, so we use RAM disk to avoid HDD I/O)
+    if audio is not None and sr is not None:
+        try:
+            import soundfile as sf
+            import os
+            tmpfs_path = Path(f'/dev/shm/mir_timbral_{os.getpid()}.wav')
+            sf.write(str(tmpfs_path), audio, sr)
+            analysis_path = tmpfs_path
+            logger.info(f"Analyzing {audio_path.name} timbral features (via /dev/shm)")
+        except Exception as e:
+            logger.debug(f"/dev/shm write failed ({e}), falling back to disk path")
+            analysis_path = audio_path
+    else:
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        analysis_path = audio_path
 
     # Define all available features and their analysis functions
     all_features = {
@@ -338,16 +362,21 @@ def analyze_all_timbral_features(audio_path: str | Path,
     logger.info(f"Analyzing {len(features)} timbral features: {audio_path.name}")
 
     results = {}
-    for feature_name in features:
-        if feature_name not in all_features:
-            logger.warning(f"Unknown feature: {feature_name}")
-            continue
+    try:
+        for feature_name in features:
+            if feature_name not in all_features:
+                logger.warning(f"Unknown feature: {feature_name}")
+                continue
 
-        try:
-            value = all_features[feature_name](audio_path)
-            results[feature_name] = value
-        except Exception as e:
-            logger.error(f"Could not analyze {feature_name}: {e}")
+            try:
+                value = all_features[feature_name](analysis_path)
+                results[feature_name] = value
+            except Exception as e:
+                logger.error(f"Could not analyze {feature_name}: {e}")
+    finally:
+        # Clean up tmpfs file
+        if tmpfs_path is not None and tmpfs_path.exists():
+            tmpfs_path.unlink()
 
     logger.info(f"Extracted {len(results)}/{len(features)} timbral features")
     return results

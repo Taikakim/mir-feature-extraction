@@ -37,6 +37,8 @@ Performance (2.5min track on RX 9070 XT):
 import logging
 import subprocess
 import re
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 import sys
@@ -86,6 +88,61 @@ DEFAULT_TOKEN_LIMITS = {
 }
 
 
+@dataclass
+class InferenceStats:
+    """Timing statistics from a single llama-mtmd-cli run."""
+    audio_encode_ms: float = 0.0
+    audio_decode_ms: float = 0.0
+    load_ms: float = 0.0
+    prompt_eval_ms: float = 0.0
+    prompt_tokens: int = 0
+    prompt_tokens_per_sec: float = 0.0
+    eval_ms: float = 0.0
+    eval_tokens: int = 0
+    eval_tokens_per_sec: float = 0.0
+    total_ms: float = 0.0
+    total_tokens: int = 0
+    wall_time_ms: float = 0.0  # measured externally
+
+
+@dataclass
+class AggregateStats:
+    """Accumulated stats across multiple inference runs."""
+    runs: int = 0
+    total_prompt_tokens: int = 0
+    total_eval_tokens: int = 0
+    total_prompt_ms: float = 0.0
+    total_eval_ms: float = 0.0
+    total_audio_encode_ms: float = 0.0
+    total_audio_decode_ms: float = 0.0
+    total_wall_ms: float = 0.0
+
+    def add(self, stats: InferenceStats):
+        self.runs += 1
+        self.total_prompt_tokens += stats.prompt_tokens
+        self.total_eval_tokens += stats.eval_tokens
+        self.total_prompt_ms += stats.prompt_eval_ms
+        self.total_eval_ms += stats.eval_ms
+        self.total_audio_encode_ms += stats.audio_encode_ms
+        self.total_audio_decode_ms += stats.audio_decode_ms
+        self.total_wall_ms += stats.wall_time_ms
+
+    def summary(self) -> str:
+        if self.runs == 0:
+            return "No inference runs recorded"
+        avg_eval_tps = (self.total_eval_tokens / self.total_eval_ms * 1000) if self.total_eval_ms > 0 else 0
+        avg_prompt_tps = (self.total_prompt_tokens / self.total_prompt_ms * 1000) if self.total_prompt_ms > 0 else 0
+        avg_wall = self.total_wall_ms / self.runs / 1000
+        lines = [
+            f"Music Flamingo Performance ({self.runs} runs)",
+            f"  Prompt eval: {self.total_prompt_tokens} tokens, {avg_prompt_tps:.1f} tok/s avg",
+            f"  Generation:  {self.total_eval_tokens} tokens, {avg_eval_tps:.1f} tok/s avg",
+            f"  Audio:       {self.total_audio_encode_ms / 1000:.2f}s encode, {self.total_audio_decode_ms / 1000:.2f}s decode",
+            f"  Wall time:   {self.total_wall_ms / 1000:.1f}s total, {avg_wall:.1f}s avg/run",
+        ]
+        return '\n'.join(lines)
+
+
 class MusicFlamingoGGUF:
     """
     Music Flamingo using GGUF/llama.cpp (fastest inference method).
@@ -99,6 +156,7 @@ class MusicFlamingoGGUF:
         cli_path: Optional[Path] = None,
         model_dir: Optional[Path] = None,
         gpu_layers: int = 99,
+        context_size: int = 2048,
         token_limits: Optional[Dict[str, int]] = None,
     ):
         """
@@ -109,11 +167,13 @@ class MusicFlamingoGGUF:
             cli_path: Path to llama-mtmd-cli binary
             model_dir: Directory containing GGUF files
             gpu_layers: Layers to offload to GPU (99 = all)
+            context_size: LLM context window size (default 2048)
             token_limits: Custom max tokens per prompt type (overrides defaults)
         """
         self.cli_path = Path(cli_path) if cli_path else DEFAULT_CLI_PATH
         self.model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
         self.gpu_layers = gpu_layers
+        self.context_size = context_size
 
         # Merge custom token limits with defaults
         self.token_limits = DEFAULT_TOKEN_LIMITS.copy()
@@ -140,6 +200,10 @@ class MusicFlamingoGGUF:
 
         if not self.mmproj_file.exists():
             raise FileNotFoundError(f"MMProj not found: {self.mmproj_file}")
+
+        # Performance tracking
+        self.stats = AggregateStats()
+        self.last_stats: Optional[InferenceStats] = None
 
         logger.info("=" * 60)
         logger.info("Music Flamingo GGUF Initialized")
@@ -197,6 +261,7 @@ class MusicFlamingoGGUF:
             "--audio", str(audio_path),
             "-p", prompt,
             "-n", str(max_new_tokens),
+            "-c", str(self.context_size),
             "--gpu-layers", str(self.gpu_layers),
             "--temp", str(temperature),
             "--top-p", str(top_p),
@@ -204,6 +269,7 @@ class MusicFlamingoGGUF:
 
         # Run inference
         try:
+            t0 = time.monotonic()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -211,6 +277,7 @@ class MusicFlamingoGGUF:
                 cwd=str(PROJECT_ROOT),
                 timeout=300,  # 5 minute timeout
             )
+            wall_ms = (time.monotonic() - t0) * 1000
 
             # Note: llama-mtmd-cli may output "error: invalid argument:" to stderr
             # even on success (it's a warning about optional params, not a real error).
@@ -218,6 +285,21 @@ class MusicFlamingoGGUF:
             if result.returncode != 0 and not result.stdout.strip():
                 logger.error(f"CLI error: {result.stderr}")
                 raise RuntimeError(f"llama-mtmd-cli failed: {result.stderr[:500]}")
+
+            # Parse timing stats from stderr
+            run_stats = self._parse_timing_stats(result.stderr, wall_ms)
+            self.last_stats = run_stats
+            self.stats.add(run_stats)
+
+            # Log per-run timing
+            if run_stats.eval_tokens > 0:
+                logger.info(
+                    f"  {run_stats.eval_tokens} tokens generated "
+                    f"at {run_stats.eval_tokens_per_sec:.1f} tok/s, "
+                    f"prompt {run_stats.prompt_tokens} tokens "
+                    f"at {run_stats.prompt_tokens_per_sec:.0f} tok/s, "
+                    f"wall {wall_ms / 1000:.1f}s"
+                )
 
             # Parse output - extract the generated text
             output = result.stdout
@@ -230,7 +312,7 @@ class MusicFlamingoGGUF:
             # Normalize for T5 tokenizer compatibility
             normalized = normalize_music_flamingo_text(description)
 
-            logger.info(f"✓ Generated {len(normalized)} characters")
+            logger.info(f"  {len(normalized)} chars output")
             return normalized
 
         except subprocess.TimeoutExpired:
@@ -255,19 +337,82 @@ class MusicFlamingoGGUF:
             'ggml_', 'llama_', 'clip_', 'load_', 'print_info',
             'common_', 'sched_', 'warmup:', 'init_', 'main:',
             'encoding audio', 'audio slice', 'decoding audio',
-            'audio decoded', 'WARN:', 'build:', 'mtmd_cli'
+            'audio decoded', 'WARN:', 'build:', 'mtmd_cli',
+        )
+        # GDB backtrace noise from ggml_print_backtrace()
+        skip_contains = (
+            'LWP ', 'GDB supports', 'debuginfod', 'Enable debuginfod',
+            'libthread_db', 'Thread debugging', 'answered N',
+            '.gdbinit', 'Inferior ', 'detached]',
+            ' in ?? ()', '#0 ', '#1 ', '#2 ', '#3 ', '#4 ',
+            '#5 ', '#6 ', '#7 ', '#8 ', '#9 ', '#10', '#11',
+            '#12', '#13', '#14', '#15', '#16', '#17', '#18', '#19',
         )
 
         for line in lines:
+            stripped = line.strip()
             # Skip logging lines
-            if any(line.strip().startswith(prefix) for prefix in skip_prefixes):
+            if any(stripped.startswith(prefix) for prefix in skip_prefixes):
+                continue
+            # Skip GDB backtrace lines
+            if any(marker in stripped for marker in skip_contains):
+                continue
+            # Skip hex address lines from GDB (e.g. "0x00007f...")
+            if stripped.startswith('0x'):
                 continue
             # Skip empty lines at the start
-            if not response_lines and not line.strip():
+            if not response_lines and not stripped:
                 continue
             response_lines.append(line)
 
         return '\n'.join(response_lines).strip()
+
+    def _parse_timing_stats(self, stderr: str, wall_time_ms: float) -> InferenceStats:
+        """Extract timing statistics from llama-mtmd-cli stderr output."""
+        stats = InferenceStats(wall_time_ms=wall_time_ms)
+
+        # Audio encode: "audio slice encoded in 274 ms"
+        m = re.search(r'audio slice encoded in\s+([\d.]+)\s*ms', stderr)
+        if m:
+            stats.audio_encode_ms = float(m.group(1))
+
+        # Audio decode: "audio decoded (batch 1/1) in 148 ms"
+        m = re.search(r'audio decoded.*?in\s+([\d.]+)\s*ms', stderr)
+        if m:
+            stats.audio_decode_ms = float(m.group(1))
+
+        # Load time
+        m = re.search(r'load time\s*=\s*([\d.]+)\s*ms', stderr)
+        if m:
+            stats.load_ms = float(m.group(1))
+
+        # Prompt eval: "prompt eval time = 508.37 ms / 764 tokens ( 0.67 ms per token, 1502.83 tokens per second)"
+        m = re.search(
+            r'prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens?\s*\(\s*[\d.]+\s*ms per token,\s*([\d.]+)\s*tokens per second\)',
+            stderr,
+        )
+        if m:
+            stats.prompt_eval_ms = float(m.group(1))
+            stats.prompt_tokens = int(m.group(2))
+            stats.prompt_tokens_per_sec = float(m.group(3))
+
+        # Eval (generation): "eval time = 14.74 ms / 1 runs ( 14.74 ms per token, 67.85 tokens per second)"
+        m = re.search(
+            r'(?<!\bprompt\s)eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*runs?\s*\(\s*[\d.]+\s*ms per token,\s*([\d.]+)\s*tokens per second\)',
+            stderr,
+        )
+        if m:
+            stats.eval_ms = float(m.group(1))
+            stats.eval_tokens = int(m.group(2))
+            stats.eval_tokens_per_sec = float(m.group(3))
+
+        # Total time
+        m = re.search(r'total time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens?', stderr)
+        if m:
+            stats.total_ms = float(m.group(1))
+            stats.total_tokens = int(m.group(2))
+
+        return stats
 
     def analyze_structured(self, audio_path: str | Path) -> Dict[str, str]:
         """
@@ -282,30 +427,49 @@ class MusicFlamingoGGUF:
         # Just call analyze_all_prompts for consistency
         return self.analyze_all_prompts(audio_path)
 
-    def analyze_all_prompts(self, audio_path: str | Path, prompts: Optional[List[str]] = None) -> Dict[str, str]:
+    def analyze_all_prompts(self, audio_path: str | Path, prompts: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """
         Run all prompt types and return results keyed for .INFO file.
 
         Args:
             audio_path: Path to audio file
-            prompts: List of prompt types to run (default: all)
+            prompts: Dict of {prompt_name: prompt_text} (default: DEFAULT_PROMPTS)
 
         Returns:
-            Dict with keys matching transformers output:
-                music_flamingo_full, music_flamingo_technical, etc.
+            Dict with keys matching music_flamingo_{prompt_name}
         """
         results = {}
-        
+        track_eval_tokens = 0
+        track_eval_ms = 0.0
+        track_t0 = time.monotonic()
+
         target_prompts = prompts if prompts else list(DEFAULT_PROMPTS.keys())
 
         for prompt_type in target_prompts:
-            if prompt_type not in DEFAULT_PROMPTS:
+            # If we are using default prompts, validate keys
+            if not prompts and prompt_type not in DEFAULT_PROMPTS:
                 logger.warning(f"Unknown prompt type: {prompt_type}")
                 continue
-                
+
             key = f"music_flamingo_{prompt_type}"
             logger.info(f"Running {prompt_type} analysis...")
-            results[key] = self.analyze(audio_path, prompt_type=prompt_type)
+
+            # Get the actual prompt text
+            prompt_text = prompts[prompt_type] if prompts else None
+
+            results[key] = self.analyze(audio_path, prompt=prompt_text, prompt_type=prompt_type)
+
+            if self.last_stats:
+                track_eval_tokens += self.last_stats.eval_tokens
+                track_eval_ms += self.last_stats.eval_ms
+
+        track_wall = (time.monotonic() - track_t0) * 1000
+        if track_eval_ms > 0:
+            avg_tps = track_eval_tokens / track_eval_ms * 1000
+            logger.info(
+                f"Track total: {track_eval_tokens} tokens, "
+                f"{avg_tps:.1f} tok/s, {track_wall / 1000:.1f}s wall"
+            )
 
         return results
 
@@ -410,6 +574,12 @@ def batch_analyze_music_flamingo_gguf(
             logger.error(f"  ✗ Failed: {e}")
 
     print_batch_summary(stats, "Music Flamingo GGUF Analysis")
+
+    # Print aggregate performance stats
+    if analyzer.stats.runs > 0:
+        logger.info("")
+        logger.info(analyzer.stats.summary())
+
     return stats
 
 
@@ -471,9 +641,13 @@ if __name__ == "__main__":
             if save_to_info:
                 info_path = get_info_path(audio_path)
                 safe_update(info_path, results)
-                logger.info(f"✓ Saved to {info_path.name}")
+                logger.info(f"Saved to {info_path.name}")
 
-        logger.info("✓ Complete")
+            # Print performance summary
+            if analyzer.stats.runs > 0:
+                print(f"\n{analyzer.stats.summary()}")
+
+        logger.info("Complete")
 
     except Exception as e:
         logger.error(f"Error: {e}")

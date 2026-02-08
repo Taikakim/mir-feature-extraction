@@ -18,6 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Set ROCm environment before torch imports (tuning=True to generate new kernels)
+from core.rocm_env import setup_rocm_env
+setup_rocm_env(tuning=True)
+
 from core.common import setup_logging
 from core.json_handler import get_info_path, safe_update
 import soundfile as sf
@@ -60,28 +64,18 @@ def main():
 
     setup_logging(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    # Set environment for optimal performance
     logger.info("=" * 80)
     logger.info("FP8 BENCHMARK WITH TUNABLEOPS")
     logger.info("=" * 80)
 
-    # ROCm optimizations
-    os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
-    os.environ['FLASH_ATTENTION_TRITON_AMD_ENABLE'] = 'TRUE'
-    os.environ['PYTORCH_TUNABLEOP_ENABLED'] = '1'
-    os.environ['PYTORCH_TUNABLEOP_TUNING'] = '1'  # Enable tuning (generate new results)
+    # Benchmark-specific overrides (verbose tuning output)
     os.environ['PYTORCH_TUNABLEOP_VERBOSE'] = '1'
-    os.environ['PYTORCH_TUNABLEOP_FILENAME'] = str(Path.cwd() / 'tunableop_results0.csv')
-    os.environ['PYTORCH_HIP_ALLOC_CONF'] = 'garbage_collection_threshold:0.8,max_split_size_mb:512'
-    os.environ['HIP_FORCE_DEV_KERNARG'] = '1'
-    os.environ['OMP_NUM_THREADS'] = '8'
 
-    logger.info("Environment:")
-    logger.info(f"  PYTORCH_ALLOC_CONF: {os.environ['PYTORCH_ALLOC_CONF']}")
-    logger.info(f"  PYTORCH_TUNABLEOP_ENABLED: {os.environ['PYTORCH_TUNABLEOP_ENABLED']}")
-    logger.info(f"  PYTORCH_TUNABLEOP_TUNING: {os.environ['PYTORCH_TUNABLEOP_TUNING']}")
-    logger.info(f"  PYTORCH_TUNABLEOP_FILENAME: {os.environ['PYTORCH_TUNABLEOP_FILENAME']}")
-    logger.info(f"  FLASH_ATTENTION_TRITON_AMD_ENABLE: {os.environ['FLASH_ATTENTION_TRITON_AMD_ENABLE']}")
+    logger.info("Environment (set by core.rocm_env with tuning=True):")
+    for key in ('PYTORCH_ALLOC_CONF', 'PYTORCH_TUNABLEOP_ENABLED',
+                'PYTORCH_TUNABLEOP_TUNING', 'PYTORCH_TUNABLEOP_FILENAME',
+                'FLASH_ATTENTION_TRITON_AMD_ENABLE'):
+        logger.info(f"  {key}: {os.environ.get(key, '(not set)')}")
     logger.info("")
 
     audio_file = Path(args.audio_file)

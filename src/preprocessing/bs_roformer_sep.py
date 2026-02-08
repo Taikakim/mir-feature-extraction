@@ -27,6 +27,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass, field
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Set ROCm environment before torch imports
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
+
 import numpy as np
 import yaml
 from tqdm import tqdm

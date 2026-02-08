@@ -36,21 +36,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Set ROCm environment before torch imports
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
+
 try:
     import yaml
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
-
-# Set ROCm environment before torch imports
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from core.common import setup_logging, ProgressBar
 from core.file_utils import find_organized_folders, find_crop_folders, find_crop_files, get_stem_files
@@ -155,7 +151,7 @@ class MasterPipelineConfig:
     feature_workers: int = 8  # Parallel workers for feature extraction
     essentia_workers: int = 4  # Separate limit for Essentia (TensorFlow deadlocks with high parallelism)
     batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
-    flamingo_prompts: Dict[str, bool] = field(default_factory=dict)  # Enabled prompts
+    flamingo_prompts: Dict[str, str] = field(default_factory=dict)  # Key: prompt_name, Value: prompt_text
 
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten.

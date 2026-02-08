@@ -29,7 +29,7 @@ import librosa
 import soundfile as sf
 from scipy.signal import butter, sosfilt
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 import logging
 
 import sys
@@ -122,7 +122,9 @@ def calculate_band_rms(audio: np.ndarray,
     return rms_db
 
 
-def analyze_multiband_rms(audio_path: str | Path) -> Dict[str, float]:
+def analyze_multiband_rms(audio_path: str | Path,
+                          audio: Optional[np.ndarray] = None,
+                          sr: Optional[int] = None) -> Dict[str, float]:
     """
     Analyze multiband RMS energy for an audio file.
 
@@ -134,6 +136,8 @@ def analyze_multiband_rms(audio_path: str | Path) -> Dict[str, float]:
 
     Args:
         audio_path: Path to audio file
+        audio: Pre-loaded mono audio array (skips disk read if provided)
+        sr: Sample rate (required if audio is provided)
 
     Returns:
         Dictionary with RMS energy levels in dB:
@@ -144,13 +148,18 @@ def analyze_multiband_rms(audio_path: str | Path) -> Dict[str, float]:
     """
     audio_path = Path(audio_path)
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if audio is None:
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Analyzing multiband RMS: {audio_path.name}")
+        logger.info(f"Analyzing multiband RMS: {audio_path.name}")
 
-    # Load audio
-    audio, sr = librosa.load(str(audio_path), sr=None, mono=True)
+        # Load audio (soundfile is faster than librosa.load)
+        audio, sr = sf.read(str(audio_path))
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+    else:
+        logger.info(f"Analyzing multiband RMS: {audio_path.name} (pre-loaded)")
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
 

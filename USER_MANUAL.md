@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.5
-**Last Updated:** 2026-02-06
+**Version:** 1.6
+**Last Updated:** 2026-02-07
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -54,7 +54,7 @@ For each audio track:
 
 - **Python:** 3.12+ (tested with 3.12)
 - **NumPy:** >=2.0.0, <2.4 (pinned for numba compatibility)
-- **GPU:** AMD (ROCm 7.1+) or NVIDIA (CUDA) recommended for stem separation and Music Flamingo
+- **GPU:** AMD (ROCm 7.2+) or NVIDIA (CUDA) recommended for stem separation and Music Flamingo
 - **Disk Space:** ~50MB per minute of audio (for stems + features)
 - **VRAM:** 13GB+ for Music Flamingo AI descriptions
 
@@ -86,15 +86,23 @@ The following are required:
 - **Demucs** - Stem separation (installed via pip)
 - **llama.cpp** - For Music Flamingo GGUF inference (build from source)
 
-### Essential Environment Variables
+### ROCm GPU Environment
+
+All ROCm environment variables are centralized in `src/core/rocm_env.py` and documented in `config/master_pipeline.yaml`. Every GPU-using entry point calls `setup_rocm_env()` before importing torch, so manual exports are optional (shell exports override the defaults).
 
 ```bash
-# For GPU optimization (AMD ROCm)
-export PYTORCH_ALLOC_CONF=expandable_segments:True
+# AMD ROCm optimizations (set automatically by rocm_env.py)
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_TUNING=0
+export PYTORCH_TUNABLEOP_TUNING=0           # 1 = generate new kernels (slow first run)
+export PYTORCH_TUNABLEOP_VERBOSE=1
+export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export PYTORCH_HIP_FREE_MEMORY_THRESHOLD_MB=256
+export HIP_FORCE_DEV_KERNARG=1              # prevent CPU/GPU desync on AMD
+export TORCH_COMPILE=0                       # buggy with Flash Attention on RDNA
 export OMP_NUM_THREADS=8
+# MIOPEN_FIND_MODE is NOT set by default (can cause freezes).
+# Set to 2 (NORMAL) or 3 (EXHAUSTIVE) in shell if needed.
 ```
 
 **Note:** External patches for librosa 0.11+ and NumPy 2.x compatibility are documented in `EXTERNAL_PATCHES.md`.
@@ -1129,6 +1137,6 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Framework Version:** 1.4
+**Framework Version:** 1.6
 **Compatible with:** Stable Audio Tools (Stability AI)
-**Last Updated:** 2026-01-26
+**Last Updated:** 2026-02-07

@@ -11,22 +11,18 @@ Usage:
     extractor.extract_features(crop_path, stems={'drums': drums_path, ...})
 """
 
-import os
 import logging
+import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any
-import sys
-
-# Set ROCm environment before torch imports
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Set ROCm environment before torch imports
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
 from core.file_utils import get_crop_stem_files, DEMUCS_STEMS
 from core.json_handler import safe_update, get_crop_info_path, read_info
@@ -90,14 +86,11 @@ class CropFeatureExtractor:
             return
 
         try:
-            from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
-            logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.flamingo_model}...")
+            from classification.music_flamingo import MusicFlamingoGGUF
+            logger.info(f"Loading Music Flamingo (GGUF/CLI) {self.flamingo_model}...")
 
-            # Use auto-detection with configured model name and context
-            self._flamingo = MusicFlamingoAnalyzer(
-                model_name=self.flamingo_model,
-                n_ctx=self.flamingo_context_size,
-                n_gpu_layers=-1,  # All layers on GPU
+            self._flamingo = MusicFlamingoGGUF(
+                model=self.flamingo_model,
             )
             logger.info("Music Flamingo loaded successfully")
         except Exception as e:
@@ -135,10 +128,21 @@ class CropFeatureExtractor:
         if stems is None:
             stems = get_crop_stem_files(crop_path)
 
-        # Get audio info
-        info = sf.info(str(crop_path))
-        duration = info.duration
-        sample_rate = info.samplerate
+        # PRE-LOAD: Read crop audio ONCE from disk (shared across all feature functions)
+        crop_audio, sample_rate = sf.read(str(crop_path))
+        import numpy as np
+        crop_mono = crop_audio.mean(axis=1) if crop_audio.ndim > 1 else crop_audio
+        duration = len(crop_audio) / sample_rate
+
+        # Pre-load stem audio into RAM
+        preloaded_stems = {}
+        for stem_name in ['drums', 'bass', 'other', 'vocals']:
+            if stem_name in stems:
+                try:
+                    s_audio, s_sr = sf.read(str(stems[stem_name]))
+                    preloaded_stems[stem_name] = (s_audio, s_sr)
+                except Exception:
+                    pass
 
         logger.info(f"Extracting features for: {crop_path.name}")
         logger.info(f"  Duration: {duration:.2f}s, SR: {sample_rate}Hz")
@@ -148,23 +152,31 @@ class CropFeatureExtractor:
         timings = {}
 
         # 1. Loudness (LUFS/LRA)
-        self._extract_loudness(crop_path, stems, results, timings, existing, overwrite)
+        self._extract_loudness(crop_path, stems, results, timings, existing, overwrite,
+                               crop_audio=crop_audio, crop_sr=sample_rate,
+                               preloaded_stems=preloaded_stems)
 
         # 2. BPM (if not already present from crop creation)
-        self._extract_bpm(crop_path, results, timings, existing, overwrite)
+        self._extract_bpm(crop_path, results, timings, existing, overwrite,
+                          crop_mono=crop_mono, crop_sr=sample_rate)
 
         # 3. Spectral features
-        self._extract_spectral(crop_path, results, timings, existing, overwrite)
+        self._extract_spectral(crop_path, results, timings, existing, overwrite,
+                               crop_mono=crop_mono, crop_sr=sample_rate)
 
         # 4. Multiband RMS
-        self._extract_multiband_rms(crop_path, results, timings, existing, overwrite)
+        self._extract_multiband_rms(crop_path, results, timings, existing, overwrite,
+                                     crop_mono=crop_mono, crop_sr=sample_rate)
 
         # 5. Chroma features
-        self._extract_chroma(crop_path, stems, results, timings, existing, overwrite)
+        self._extract_chroma(crop_path, stems, results, timings, existing, overwrite,
+                             preloaded_stems=preloaded_stems, crop_mono=crop_mono,
+                             crop_sr=sample_rate)
 
         # 6. Timbral features (Audio Commons)
         if not self.skip_timbral:
-            self._extract_timbral(crop_path, results, timings, existing, overwrite)
+            self._extract_timbral(crop_path, results, timings, existing, overwrite,
+                                  crop_audio=crop_audio, crop_sr=sample_rate)
 
         # 7. AudioBox Aesthetics
         if not self.skip_audiobox:
@@ -197,7 +209,8 @@ class CropFeatureExtractor:
         return feature_key not in existing
 
     def _extract_loudness(self, crop_path: Path, stems: Dict, results: Dict,
-                          timings: Dict, existing: Dict, overwrite: bool):
+                          timings: Dict, existing: Dict, overwrite: bool,
+                          crop_audio=None, crop_sr=None, preloaded_stems=None):
         """Extract loudness features (LUFS/LRA)."""
         if not self._should_extract('lufs', existing, overwrite):
             logger.debug("  Skipping loudness (already exists)")
@@ -205,18 +218,25 @@ class CropFeatureExtractor:
 
         try:
             start = time.time()
-            from timbral.loudness import analyze_loudness
+            from timbral.loudness import analyze_file_loudness
 
-            # Analyze main crop
-            loudness = analyze_loudness(crop_path)
+            # Analyze main crop (pre-loaded)
+            loudness = analyze_file_loudness(crop_path, audio=crop_audio, sr=crop_sr)
             results.update(loudness)
 
-            # Analyze stems if available
-            for stem_name in ['drums', 'bass', 'other', 'vocals']:
-                if stem_name in stems:
-                    stem_loudness = analyze_loudness(stems[stem_name])
+            # Analyze stems (pre-loaded)
+            if preloaded_stems:
+                for stem_name, (s_audio, s_sr) in preloaded_stems.items():
+                    stem_loudness = analyze_file_loudness(
+                        stems[stem_name], audio=s_audio, sr=s_sr)
                     results[f'lufs_{stem_name}'] = stem_loudness.get('lufs')
                     results[f'lra_{stem_name}'] = stem_loudness.get('lra')
+            else:
+                for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                    if stem_name in stems:
+                        stem_loudness = analyze_file_loudness(stems[stem_name])
+                        results[f'lufs_{stem_name}'] = stem_loudness.get('lufs')
+                        results[f'lra_{stem_name}'] = stem_loudness.get('lra')
 
             timings['loudness'] = time.time() - start
             logger.info(f"  Loudness: {timings['loudness']:.2f}s")
@@ -224,7 +244,8 @@ class CropFeatureExtractor:
             logger.warning(f"  Loudness failed: {e}")
 
     def _extract_bpm(self, crop_path: Path, results: Dict, timings: Dict,
-                     existing: Dict, overwrite: bool):
+                     existing: Dict, overwrite: bool,
+                     crop_mono=None, crop_sr=None):
         """Extract BPM (if not already present)."""
         # BPM is often inherited from crop creation, so check first
         if not self._should_extract('bpm', existing, overwrite):
@@ -244,7 +265,8 @@ class CropFeatureExtractor:
             logger.warning(f"  BPM failed: {e}")
 
     def _extract_spectral(self, crop_path: Path, results: Dict, timings: Dict,
-                          existing: Dict, overwrite: bool):
+                          existing: Dict, overwrite: bool,
+                          crop_mono=None, crop_sr=None):
         """Extract spectral features."""
         if not self._should_extract('spectral_centroid', existing, overwrite):
             logger.debug("  Skipping spectral (already exists)")
@@ -254,7 +276,7 @@ class CropFeatureExtractor:
             start = time.time()
             from spectral.spectral_features import analyze_spectral_features
 
-            spectral = analyze_spectral_features(crop_path)
+            spectral = analyze_spectral_features(crop_path, audio=crop_mono, sr=crop_sr)
             results.update(spectral)
 
             timings['spectral'] = time.time() - start
@@ -263,7 +285,8 @@ class CropFeatureExtractor:
             logger.warning(f"  Spectral failed: {e}")
 
     def _extract_multiband_rms(self, crop_path: Path, results: Dict, timings: Dict,
-                                existing: Dict, overwrite: bool):
+                                existing: Dict, overwrite: bool,
+                                crop_mono=None, crop_sr=None):
         """Extract multiband RMS energy."""
         if not self._should_extract('rms_bass', existing, overwrite):
             logger.debug("  Skipping multiband RMS (already exists)")
@@ -273,7 +296,7 @@ class CropFeatureExtractor:
             start = time.time()
             from spectral.multiband_rms import analyze_multiband_rms
 
-            rms = analyze_multiband_rms(crop_path)
+            rms = analyze_multiband_rms(crop_path, audio=crop_mono, sr=crop_sr)
             results.update(rms)
 
             timings['multiband_rms'] = time.time() - start
@@ -282,7 +305,8 @@ class CropFeatureExtractor:
             logger.warning(f"  Multiband RMS failed: {e}")
 
     def _extract_chroma(self, crop_path: Path, stems: Dict, results: Dict,
-                        timings: Dict, existing: Dict, overwrite: bool):
+                        timings: Dict, existing: Dict, overwrite: bool,
+                        preloaded_stems=None, crop_mono=None, crop_sr=None):
         """Extract chroma features."""
         if not self._should_extract('chroma_mean', existing, overwrite):
             logger.debug("  Skipping chroma (already exists)")
@@ -290,14 +314,24 @@ class CropFeatureExtractor:
 
         try:
             start = time.time()
+            import numpy as np
             from harmonic.chroma import analyze_chroma
 
-            # Use harmonic stem if available (other or bass+other mix)
-            audio_for_chroma = crop_path
-            if 'other' in stems:
-                audio_for_chroma = stems['other']
-
-            chroma = analyze_chroma(audio_for_chroma)
+            # Use harmonic stem if available (pre-loaded), else crop mono
+            if preloaded_stems and 'other' in preloaded_stems:
+                other_audio, other_sr = preloaded_stems['other']
+                if other_audio.ndim > 1:
+                    other_audio = other_audio.mean(axis=1)
+                chroma = analyze_chroma(
+                    stems['other'], use_stems=False,
+                    audio=other_audio.astype(np.float32), sr=other_sr)
+            elif crop_mono is not None:
+                chroma = analyze_chroma(
+                    crop_path, use_stems=False,
+                    audio=crop_mono.astype(np.float32), sr=crop_sr)
+            else:
+                audio_for_chroma = stems.get('other', crop_path)
+                chroma = analyze_chroma(audio_for_chroma)
             results.update(chroma)
 
             timings['chroma'] = time.time() - start
@@ -306,7 +340,8 @@ class CropFeatureExtractor:
             logger.warning(f"  Chroma failed: {e}")
 
     def _extract_timbral(self, crop_path: Path, results: Dict, timings: Dict,
-                         existing: Dict, overwrite: bool):
+                         existing: Dict, overwrite: bool,
+                         crop_audio=None, crop_sr=None):
         """Extract Audio Commons timbral features."""
         if not self._should_extract('brightness', existing, overwrite):
             logger.debug("  Skipping timbral (already exists)")
@@ -316,7 +351,8 @@ class CropFeatureExtractor:
             start = time.time()
             from timbral.audio_commons import analyze_all_timbral_features
 
-            timbral = analyze_all_timbral_features(crop_path)
+            timbral = analyze_all_timbral_features(
+                crop_path, audio=crop_audio, sr=crop_sr)
             results.update(timbral)
 
             timings['timbral'] = time.time() - start
@@ -384,40 +420,10 @@ class CropFeatureExtractor:
         try:
             start = time.time()
 
-            # Use structured analysis which runs multiple prompts efficiently
-            try:
-                # Map prompt types to boolean flags for analyzer
-                results_struct = self._flamingo.analyze_structured(
-                    crop_path,
-                    include_genre=True,
-                    include_mood=True,
-                    include_instrumentation=True,
-                    include_technical=True
-                )
-                
-                # Map back to result keys
-                if 'genre_mood_description' in results_struct:
-                    results['music_flamingo_genre_mood'] = results_struct['genre_mood_description']
-                    
-                if 'instrumentation_description' in results_struct:
-                    results['music_flamingo_instrumentation'] = results_struct['instrumentation_description']
-                    
-                if 'technical_description' in results_struct:
-                    results['music_flamingo_technical'] = results_struct['technical_description']
-                    
-                if 'full_description' in results_struct:
-                    results['music_flamingo_full'] = results_struct['full_description']
-                    
-                # Structure prompt is not in analyze_structured by default, run manually if needed
-                if 'music_flamingo_structure' not in existing or overwrite:
-                     results['music_flamingo_structure'] = self._flamingo.analyze(
-                        crop_path, prompt_type='structure', max_tokens=300
-                     )
-
-            except Exception as e:
-                logger.error(f"Music Flamingo structured analysis failed: {e}")
-
-            results['music_flamingo_model'] = f'gguf_{self.flamingo_model}_persistent'
+            # Run all 5 prompt types via CLI (returns music_flamingo_* keys directly)
+            flamingo_results = self._flamingo.analyze_all_prompts(crop_path)
+            results.update(flamingo_results)
+            results['music_flamingo_model'] = f'gguf_{self.flamingo_model}'
 
             timings['flamingo'] = time.time() - start
             logger.info(f"  Music Flamingo: {timings['flamingo']:.2f}s ({len(prompt_types)} prompts)")

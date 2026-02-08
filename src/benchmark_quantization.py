@@ -13,17 +13,11 @@ import time
 import logging
 from pathlib import Path
 
-# Environment setup for optimal performance
-os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
-os.environ['FLASH_ATTENTION_TRITON_AMD_ENABLE'] = 'TRUE'
-os.environ['PYTORCH_TUNABLEOP_ENABLED'] = '1'
-os.environ['PYTORCH_TUNABLEOP_TUNING'] = '0'
-os.environ['PYTORCH_TUNABLEOP_FILENAME'] = '/home/kim/Projects/mir/tunableop_results00.csv'
-os.environ['PYTORCH_HIP_ALLOC_CONF'] = 'garbage_collection_threshold:0.8,max_split_size_mb:512'
-os.environ['HIP_FORCE_DEV_KERNARG'] = '1'
-os.environ['OMP_NUM_THREADS'] = '8'
-
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Set ROCm environment before torch imports
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
 from classification.music_flamingo_transformers import MusicFlamingoTransformers
 from core.common import setup_logging

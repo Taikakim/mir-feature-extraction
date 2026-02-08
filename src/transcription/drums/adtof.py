@@ -25,6 +25,10 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Set ROCm environment before any torch imports (adtof_pytorch uses PyTorch)
+from src.core.rocm_env import setup_rocm_env
+setup_rocm_env()
+
 from src.core.common import setup_logging
 
 logger = logging.getLogger(__name__)

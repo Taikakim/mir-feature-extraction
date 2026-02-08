@@ -181,6 +181,11 @@ def calculate_hpcp(audio: np.ndarray,
     # Average across all frames
     avg_hpcp = np.mean(hpcp_frames, axis=0)
 
+    # Essentia HPCP uses A as index 0 (A, A#, B, C, C#...)
+    # We want C as index 0 (C, C#, D, D#, E...) to match standard MIR conventions
+    # So we roll by -3 (left shift) to move index 3 (C) to index 0
+    avg_hpcp = np.roll(avg_hpcp, -3)
+
     # Convert from unitMax to unitSum for cross-file comparability
     # This preserves the nonLinear processing benefits while making
     # results comparable across different audio files
@@ -194,7 +199,9 @@ def calculate_hpcp(audio: np.ndarray,
 def analyze_chroma(audio_path: str | Path,
                    frame_size: int = 4096,
                    hop_size: int = 2048,
-                   use_stems: bool = True) -> Dict[str, float]:
+                   use_stems: bool = True,
+                   audio: Optional[np.ndarray] = None,
+                   sr: Optional[int] = None) -> Dict[str, float]:
     """
     Analyze chroma features for an audio file using Essentia HPCP.
 
@@ -206,6 +213,8 @@ def analyze_chroma(audio_path: str | Path,
         frame_size: Analysis frame size
         hop_size: Hop size between frames
         use_stems: Whether to try using harmonic stems (default: True)
+        audio: Pre-loaded mono float32 audio array (skips disk read if provided)
+        sr: Sample rate (required if audio is provided)
 
     Returns:
         Dictionary with chroma features:
@@ -213,24 +222,27 @@ def analyze_chroma(audio_path: str | Path,
     """
     audio_path = Path(audio_path)
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if audio is not None:
+        # Pre-loaded audio provided — use directly
+        logger.info(f"Analyzing chroma (HPCP): {audio_path.name} (pre-loaded)")
+        used_stems = False
+    else:
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Analyzing chroma (HPCP): {audio_path.name}")
+        logger.info(f"Analyzing chroma (HPCP): {audio_path.name}")
 
-    # Try to use harmonic stems if in organized folder
-    audio = None
-    sr = None
-    used_stems = False
+        # Try to use harmonic stems if in organized folder
+        used_stems = False
 
-    if use_stems and audio_path.parent.is_dir():
-        audio, sr, used_stems = mix_harmonic_stems(audio_path.parent)
+        if use_stems and audio_path.parent.is_dir():
+            audio, sr, used_stems = mix_harmonic_stems(audio_path.parent)
 
-    # Fallback to direct file loading
-    if audio is None:
-        audio, sr = sf.read(str(audio_path), dtype='float32')
-        if len(audio.shape) > 1:
-            audio = np.mean(audio, axis=1)
+        # Fallback to direct file loading
+        if audio is None:
+            audio, sr = sf.read(str(audio_path), dtype='float32')
+            if len(audio.shape) > 1:
+                audio = np.mean(audio, axis=1)
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
     if used_stems:

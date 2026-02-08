@@ -9,8 +9,8 @@
 # PATHS
 # =============================================================================
 paths:
-  input: null                    # Required: Input directory (raw audio or organized)
-  output: null                   # Output directory for organized files (null = in-place)
+  input: /run/media/kim/e2b6d8bb-c062-4d44-9f21-40d0eb277696/00ai/01test                    # Required: Input directory (raw audio or organized)
+  output: /run/media/kim/e2b6d8bb-c062-4d44-9f21-40d0eb277696/00ai/01test-separated                # Output directory for organized files (null = in-place)
   stems_source: null             # Pre-existing stems directory (skips Demucs if set)
 
 # =============================================================================
@@ -89,9 +89,9 @@ cropping:
 
   mode: beat-aligned               # sequential or beat-aligned
   overlap: false                 # 50% overlap between crops
-  div4: true                    # Ensure downbeats divisible by 4 (beat-aligned mode)
+  div4: false                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 10                     # Parallel workers for cropping
+  workers: 12                     # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -151,24 +151,26 @@ overwrite:
 music_flamingo:
   enabled: true
   model: Q8_0                    # IQ3_M (fast), Q6_K (balanced), Q8_0 (best quality)
-  context_size: 1024             # LLM context window (1024-2048 plenty for descriptions)
+  context_size: 16384             # LLM context window (1024-2048 plenty for descriptions)
                                  # Lower = less VRAM. Audio is pre-encoded, not in context.
 
   # Prompt types to generate (all enabled by default)
+  # Prompt types to generate (define as "key: prompt text")
+  # You can add your own custom keys here.
   prompts:
-    full: true                   # Comprehensive description
-    technical: true              # Tempo, key, chords, dynamics
-    genre_mood: true             # Genre and emotional character
-    instrumentation: true        # Instruments and sounds
-    structure: true              # Arrangement and structure
+    brief: "Describe this track in one sentence."
+    technical: "explain the textures, dynamics and prominent production aesthetics. Keep the description compact, under 30 words"
+    genre_mood_inst: "Brief description suitable for an AI inference prompt: What is the genre, mood and instrumentation of this music? Be specific about subgenres and describe the emotional character. Try to keep the description under 30 words."
+    instrumentation: "Very brief description about the timbre and recognised instruments. What instruments and sounds are present in this track? Try to keep the description under 15 words"
+    very_brief: "Describe the piece in less than six words"
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:
-    full: 384
-    technical: 256
-    genre_mood: 256
-    instrumentation: 256
-    structure: 256
+    full: 256
+    technical: 128
+    genre_mood: 128
+    instrumentation: 128
+    structure: 128
 
 # =============================================================================
 # METADATA LOOKUP
@@ -201,6 +203,41 @@ metadata:
 filename_cleanup:
   enabled: true                  # Clean filenames for T5 tokenizer compatibility
                                  # Converts accented chars to ASCII, normalizes spaces/dashes
+
+# =============================================================================
+# ROCM / GPU ENVIRONMENT
+# =============================================================================
+# These are applied by src/core/rocm_env.py before torch is imported.
+# Shell exports take precedence (os.environ.setdefault never overwrites).
+# Kept here as the canonical reference for the project.
+rocm:
+  # Flash Attention 2 via Triton (AMD)
+  FLASH_ATTENTION_TRITON_AMD_ENABLE: "TRUE"
+
+  # TunableOp — pre-tuned GEMM kernels for RDNA4
+  # TUNING=1 generates new kernels (slow first run); 0 reuses cached results
+  PYTORCH_TUNABLEOP_ENABLED: "1"
+  PYTORCH_TUNABLEOP_TUNING: "0"
+  PYTORCH_TUNABLEOP_VERBOSE: "1"
+
+  # HIP memory management
+  # garbage_collection_threshold frees unused blocks; max_split_size_mb caps allocation chunks
+  PYTORCH_HIP_ALLOC_CONF: "garbage_collection_threshold:0.8,max_split_size_mb:512"
+  # Release cached blocks when free VRAM falls below this (helps prevent OOM)
+  PYTORCH_HIP_FREE_MEMORY_THRESHOLD_MB: "256"
+
+  # Prevent common AMD CPU/GPU desync performance bug
+  HIP_FORCE_DEV_KERNARG: "1"
+
+  # torch.compile is buggy with Flash Attention on RDNA — keep disabled
+  TORCH_COMPILE: "0"
+
+  # CPU thread count
+  OMP_NUM_THREADS: "10"
+
+  MIOPEN_FIND_MODE: "2"
+  # MIOPEN_FIND_MODE: disabled — causes VAE freezes on some workloads
+  # Set to 2 (NORMAL) or 3 (EXHAUSTIVE) in shell if needed for specific scripts
 
 # =============================================================================
 # PROCESSING OPTIONS

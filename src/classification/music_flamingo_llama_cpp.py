@@ -48,23 +48,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROMPTS = {
     'full': (
         "Describe this track in full detail - tell me the genre, tempo, and key, "
-        "then dive into the instruments, production style, and overall mood it creates."
+        "then dive into the instruments, production style, and overall mood it creates. Try to use concise language and fit the description in less than 1000 characters"
     ),
     'technical': (
         "Break the track down like a critic - list its tempo, key, and chordal motion, "
-        "then explain the textures, dynamics, and emotional impact of the performance."
+        "then explain the textures, dynamics, and emotional impact of the performance. Be brief."
     ),
     'genre_mood': (
-        "What is the genre and mood of this music? Be specific about subgenres "
-        "and describe the emotional character."
+        "Give me a short, one-paragraph description: What is the genre and mood of this music? Be specific about subgenres "
+        "and describe the emotional character and tensions."
     ),
     'instrumentation': (
         "What instruments and sounds are present in this track? List all the main "
-        "instruments and describe the production techniques used."
+        "instruments and describe the production techniques used. Be very brief, avoiding too much narrative, instead present the results as a technical brief"
     ),
     'structure': (
         "Analyze the structure and arrangement of this track. Describe the sections, "
-        "transitions, and how the composition unfolds over time."
+        "transitions, and how the composition unfolds over time. Be very brief, try to fit everything in two too three sentences"
     ),
 }
 

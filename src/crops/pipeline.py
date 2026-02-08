@@ -24,23 +24,19 @@ Usage:
     python -m crops.pipeline /path/to/crops/ --batch --format flac --flamingo-model Q8_0
 """
 
-import os
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-import sys
-
-# Set ROCm environment before torch imports
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Set ROCm environment before torch imports
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
 from core.file_utils import find_crop_files, find_crop_folders, get_crop_stem_files, DEMUCS_STEMS
 from core.common import setup_logging

@@ -48,29 +48,13 @@ import warnings
 # ROCm Environment Configuration (AMD-optimized)
 # =============================================================================
 # Must be set BEFORE importing PyTorch
-# Based on working ComfyUI AMD configuration
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
-# --- Flash Attention 2 (Triton Backend) ---
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-
-# --- Performance Tuning (GEMMs & Kernels) ---
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Set to 1 for first run tuning
-os.environ.setdefault('PYTORCH_TUNABLEOP_VERBOSE', '0')  # Set to 1 for debug output
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-
-# --- Memory Management (HIP-specific for AMD) ---
-os.environ.setdefault('PYTORCH_HIP_ALLOC_CONF', 'garbage_collection_threshold:0.8,max_split_size_mb:512')
-os.environ.setdefault('PYTORCH_HIP_FREE_MEMORY_THRESHOLD_MB', '256')
-
-# --- Prevent CPU/GPU sync bug (important for AMD) ---
-os.environ.setdefault('HIP_FORCE_DEV_KERNARG', '1')
-
-# --- MIOpen configuration ---
-os.environ.setdefault('MIOPEN_FIND_MODE', '3')  # 2=NORMAL, 3=EXHAUSTIVE (slower but better kernels)
-
-# --- Enable torch.compile() by default ---
-os.environ.setdefault('TORCH_COMPILE', '1')
+# --- Benchmark-specific overrides (override rocm_env defaults) ---
+os.environ['MIOPEN_FIND_MODE'] = '3'   # EXHAUSTIVE kernel search for benchmarking
+os.environ['TORCH_COMPILE'] = '1'      # Test torch.compile in this benchmark
 
 # --- Suppress warnings ---
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
@@ -800,32 +784,68 @@ Examples:
         sys.exit(1)
     
     # Find model
+    # Find model
     model_info = None
-    if args.model_name:
-        models = discover_models()
-        if args.model_name not in models:
-            print(f"ERROR: Model not found: {args.model_name}")
-            print("Available models:")
-            for name in models:
-                print(f"  - {name}")
-            sys.exit(1)
-        model_info = models[args.model_name]
-        model_dir = model_info['path']
-    elif args.model_dir:
-        model_dir = args.model_dir
-        if not model_dir.exists():
-            print(f"ERROR: Model directory not found: {model_dir}")
-            sys.exit(1)
+    
+    # Case 1: Start with provided paths
+    if args.model_dir:
+        search_dir = args.model_dir
     else:
-        # Use first available model
-        models = discover_models()
-        if not models:
-            print("ERROR: No models found and --model-dir not specified")
-            sys.exit(1)
-        model_name = list(models.keys())[0]
-        model_info = models[model_name]
-        model_dir = model_info['path']
-        print(f"Using first available model: {model_name}")
+        search_dir = MODELS_DIR
+        
+    if not search_dir.exists():
+         print(f"ERROR: Model directory not found: {search_dir}")
+         sys.exit(1)
+
+    # Check if direct path to model (contains config.yaml)
+    has_config = list(search_dir.glob("config.yaml")) or list(search_dir.glob("*.yaml"))
+    
+    # Determine target models
+    target_models = {}
+
+    if has_config and not args.model_name:
+        # User pointed directly to a model folder
+        # We need to construct a model_info for it manually or use discover_models on it
+        # Safest is to just register it as a single model
+        model_name = search_dir.name
+        is_mel_band = "mel" in model_name.lower() or "melband" in model_name.lower()
+        
+        # Find checkpoint
+        ckpt_files = list(search_dir.glob("*.ckpt")) + list(search_dir.glob("*.pth")) + list(search_dir.glob("*.safetensors"))
+        if not ckpt_files:
+             print(f"ERROR: No checkpoint found in: {search_dir}")
+             sys.exit(1)
+        checkpoint = max(ckpt_files, key=lambda p: p.stat().st_size)
+        
+        target_models[model_name] = {
+            "path": search_dir,
+            "config": has_config[0],
+            "checkpoint": checkpoint,
+            "is_mel_band": is_mel_band
+        }
+        print(f"Targeting single model: {model_name}")
+        
+    else:
+        # Discover models in the directory
+        models = discover_models(search_dir)
+        
+        if args.model_name:
+            if args.model_name not in models:
+                print(f"ERROR: Model '{args.model_name}' not found in {search_dir}")
+                print("Available models:")
+                for name in models:
+                    print(f"  - {name}")
+                sys.exit(1)
+            target_models = {args.model_name: models[args.model_name]}
+            print(f"Targeting specific model: {args.model_name}")
+        else:
+            if not models:
+                 print(f"ERROR: No models found in: {search_dir}")
+                 sys.exit(1)
+            
+            # Use ALL available models
+            target_models = models
+            print(f"Found {len(models)} models. All will be processed.")
     
     # Check dependencies
     if not BS_ROFORMER_AVAILABLE:
@@ -840,138 +860,178 @@ Examples:
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
-    # Load config - use discovered config path or find any yaml in the folder
-    if model_info and 'config' in model_info:
-        config_path = model_info['config']
-    else:
-        # Find any yaml file in the model directory
-        yaml_files = list(model_dir.glob("*.yaml")) + list(model_dir.glob("*.yml"))
-        if not yaml_files:
-            print(f"ERROR: No config file found in: {model_dir}")
+    # Validate input files
+    input_files = []
+    if input_path.is_file():
+        input_files = [input_path]
+    elif input_path.is_dir():
+        # Find common audio extensions
+        for ext in ['*.wav', '*.flac', '*.mp3', '*.m4a', '*.aiff']:
+            input_files.extend(list(input_path.rglob(ext)))
+        if not input_files:
+            print(f"ERROR: No audio files found in: {input_path}")
             sys.exit(1)
-        config_path = yaml_files[0]  # Use first yaml found
+        print(f"Found {len(input_files)} audio files in {input_path}")
     
-    print(f"\nLoading config from: {config_path}")
-    audio_cfg, model_cfg, inf_cfg = load_config_from_yaml(config_path)
+    # -------------------------------------------------------------------------
+    # Processing Loop
+    # -------------------------------------------------------------------------
     
-    # Override inference settings from args
-    inf_cfg.batch_size = args.batch_size
-    inf_cfg.use_fp16 = not args.no_fp16
-    inf_cfg.use_compile = args.compile
-    inf_cfg.compile_mode = args.compile_mode
-    inf_cfg.low_vram = args.low_vram
+    # Iterate over each model found
+    total_models = len(target_models)
+    print(f"\nProcessing {len(input_files)} files across {total_models} models...")
     
-    # Find checkpoint
-    ckpt_files = list(model_dir.glob("*.ckpt")) + list(model_dir.glob("*.pth")) + list(model_dir.glob("*.safetensors"))
-    if not ckpt_files:
-        print(f"ERROR: No checkpoint found in: {model_dir}")
-        sys.exit(1)
-    checkpoint_path = max(ckpt_files, key=lambda p: p.stat().st_size)
-    
-    # Check if MelBand
-    model_cfg.is_mel_band = "mel" in model_dir.name.lower() or "melband" in model_dir.name.lower()
-    
-    # Create model
-    print(f"\nCreating {'MelBand-Roformer' if model_cfg.is_mel_band else 'BS-Roformer'} model...")
-    print(f"  dim={model_cfg.dim}, depth={model_cfg.depth}, heads={model_cfg.heads}")
-    
-    model = create_model(model_cfg, device)
-    model = load_model_weights(model, checkpoint_path, device)
-    model.eval()
-    
-    # Compile if requested
-    if args.compile:
-        print(f"\nCompiling model with mode='{args.compile_mode}'...")
-        model = torch.compile(model, mode=args.compile_mode)
-    
-    # Load audio
-    print(f"\nLoading audio: {input_path}")
-    audio, sr = load_audio(input_path, audio_cfg.sample_rate)
-    
-    # Normalize audio (crucial for accurate model inference)
-    print("Normalizing input audio...")
-    audio = normalize_audio(audio)
-    
-    duration = len(audio) / sr
-    print(f"  Duration: {duration:.1f}s ({duration/60:.1f} min)")
-    print(f"  Sample rate: {sr} Hz")
-    print(f"  Channels: {audio.shape[1]}")
-    
-    # Separate
-    mode_str = "low-vram" if inf_cfg.low_vram else f"batch_size={inf_cfg.batch_size}"
-    print(f"\nSeparating with {mode_str}, fp16={inf_cfg.use_fp16}...")
-    start_time = time.time()
-    
-    if inf_cfg.low_vram:
-        separated = separate_audio_fast(model, audio, audio_cfg, inf_cfg, device)
-    else:
-        separated = separate_audio(model, audio, audio_cfg, model_cfg, inf_cfg, device)
-    
-    elapsed = time.time() - start_time
-    speed = duration / elapsed
-    print(f"\nSeparation complete in {elapsed:.1f}s ({speed:.2f}x realtime)")
-    
-    # Calculate instrumental (original - vocals)
-    instrumental = audio - separated
-    
-    # Save outputs
-    # Create model-specific output directory
-    output_dir = args.output / model_dir.name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    stem_name = input_path.stem
-    print(f"\nSaving outputs...")
+    for m_idx, (model_name, model_info) in enumerate(target_models.items(), 1):
+        print(f"\n" + "="*80)
+        print(f"MODEL [{m_idx}/{total_models}]: {model_name}")
+        print(f"="*80)
+        
+        model_dir = model_info['path']
+        
+        # Load config
+        if 'config' in model_info:
+            config_path = model_info['config']
+        else:
+            yaml_files = list(model_dir.glob("*.yaml")) + list(model_dir.glob("*.yml"))
+            if not yaml_files:
+                print(f"ERROR: No config file found for {model_name}, skipping.")
+                continue
+            config_path = yaml_files[0]
 
-    if separated.shape[0] > 1:
-        # Multi-stem output
-        instruments = model_cfg.instruments
-        for i in range(separated.shape[0]):
-            if i < len(instruments):
-                inst_name = instruments[i]
-            else:
-                inst_name = f"stem_{i}"
+        print(f"Loading config: {config_path.name}")
+        try:
+            audio_cfg, model_cfg, inf_cfg = load_config_from_yaml(config_path)
+        except Exception as e:
+            print(f"Error loading config for {model_name}: {e}")
+            continue
+
+        # Override inference settings from args
+        inf_cfg.batch_size = args.batch_size
+        inf_cfg.use_fp16 = not args.no_fp16
+        inf_cfg.use_compile = args.compile
+        inf_cfg.compile_mode = args.compile_mode
+        inf_cfg.low_vram = args.low_vram
+        
+        # Find checkpoint
+        if 'checkpoint' in model_info:
+            checkpoint_path = model_info['checkpoint']
+        else:
+            ckpt_files = list(model_dir.glob("*.ckpt")) + list(model_dir.glob("*.pth")) + list(model_dir.glob("*.safetensors"))
+            if not ckpt_files:
+                print(f"Error: No checkpoint found for {model_name}, skipping.")
+                continue
+            checkpoint_path = max(ckpt_files, key=lambda p: p.stat().st_size)
+
+        # Settings
+        model_cfg.is_mel_band = model_info['is_mel_band']
+        
+        # Load Model
+        try:
+            print(f"Loading model weights: {checkpoint_path.name}")
+            model = create_model(model_cfg, device)
+            model = load_model_weights(model, checkpoint_path, device)
+            model.eval()
             
-            out_path = output_dir / f"{stem_name}_{inst_name}.wav"
-            # Normalize stem
-            separated[i] = normalize_audio(separated[i])
-            save_audio(separated[i], out_path, sr)
-            print(f"  {inst_name.capitalize()}: {out_path}")
+            if args.compile:
+                print(f"Compiling model...")
+                model = torch.compile(model, mode=args.compile_mode)
+                
+        except Exception as e:
+            print(f"Failed to load model {model_name}: {e}")
+            continue
+
+        # Process each file
+        for f_idx, audio_file in enumerate(input_files, 1):
+            print(f"\nFile [{f_idx}/{len(input_files)}]: {audio_file.name}")
             
-    else:
-        # Single stem output
-        target_name = model_cfg.target_instrument or "vocals"
-        target_path = output_dir / f"{stem_name}_{target_name}.wav"
-        # Normalize target
-        separated[0] = normalize_audio(separated[0])
-        save_audio(separated[0], target_path, sr)
-        print(f"  {target_name.capitalize()}: {target_path}")
+            try:
+                # Load audio
+                audio, sr = load_audio(audio_file, audio_cfg.sample_rate)
+                audio = normalize_audio(audio)
+                duration = len(audio) / sr
+                
+                # Separate
+                print(f"  Separating ({duration:.1f}s)...")
+                start_time = time.time()
+                
+                if inf_cfg.low_vram:
+                    separated = separate_audio_fast(model, audio, audio_cfg, inf_cfg, device)
+                else:
+                    separated = separate_audio(model, audio, audio_cfg, model_cfg, inf_cfg, device)
+                
+                elapsed = time.time() - start_time
+                speed = duration / elapsed if elapsed > 0 else 0
+                print(f"  Done in {elapsed:.1f}s ({speed:.2f}x realtime)")
+                
+                # Save Outputs
+                # Output structure: output_dir / model_name / file_name / stems.wav
+                # OR user requested: "saving the outputs in folders named after the models"
+                # Let's do: output_dir / model_name / audio_filename_stem.wav
+                
+                model_out_dir = args.output / model_name
+                model_out_dir.mkdir(parents=True, exist_ok=True)
+                
+                file_stem = audio_file.stem
+                
+                # Determine stem names
+                instruments = model_cfg.instruments
+                if not instruments:
+                     if model_cfg.num_stems == 4:
+                         instruments = ['drums', 'bass', 'other', 'vocals']
+                     elif model_cfg.num_stems == 2:
+                         instruments = ['vocals', 'instrumental']
+                     else:
+                         instruments = [f"stem_{i}" for i in range(model_cfg.num_stems)]
+                
+                # Map stems
+                stem_map = {}
+                stems_count = separated.shape[0]
+                
+                if stems_count == 1:
+                    target_name = model_cfg.target_instrument or "vocals"
+                    stem_map[target_name] = separated[0]
+                    stem_map["instrumental" if target_name == "vocals" else "other"] = audio - separated[0]
+                else:
+                    for i in range(stems_count):
+                        name = instruments[i] if i < len(instruments) else f"stem_{i}"
+                        stem_map[name] = separated[i]
+                
+                # Save
+                STANDARD_STEMS = {'drums', 'bass', 'vocals', 'instrumental'} 
+                extra_stems_audio = []
+                
+                for name, audio_data in stem_map.items():
+                    out_name = f"{file_stem}_{name}.wav"
+                    out_path = model_out_dir / out_name
+                    
+                    normalized = normalize_audio(audio_data)
+                    save_audio(normalized, out_path, sr)
+                    
+                    if name not in STANDARD_STEMS and name != 'other':
+                        extra_stems_audio.append(audio_data)
+
+                # Combine extra
+                if extra_stems_audio and 'other' not in stem_map:
+                    combined_other = np.sum(np.stack(extra_stems_audio), axis=0)
+                    combined_other = normalize_audio(combined_other)
+                    save_audio(combined_other, model_out_dir / f"{file_stem}_other.wav", sr)
+                    print(f"  Saved stems + combined 'other' to {model_out_dir}")
+                else:
+                    print(f"  Saved stems to {model_out_dir}")
+
+            except Exception as e:
+                print(f"  ERROR processing file {audio_file.name}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # Calculate instrumental/residual
-        # Residual = Mixture - Target
-        residual = audio - separated[0]
-        
-        residual_name = "instrumental" if target_name == "vocals" else "other"
-        residual_name = "residual" if target_name == "other" else residual_name
-        
-        residual_path = output_dir / f"{stem_name}_{residual_name}.wav"
-        # Normalize residual
-        residual = normalize_audio(residual)
-        save_audio(residual, residual_path, sr)
-        print(f"  {residual_name.capitalize()}: {residual_path}")
+        # Cleanup model to free VRAM for next iteration
+        del model
+        torch.cuda.empty_cache()
     
-    # Summary
-    print(f"\n{'='*60}")
-    print("SUMMARY")
-    print(f"{'='*60}")
-    print(f"Model: {model_dir.name}")
-    print(f"Input: {input_path.name} ({duration:.1f}s)")
-    print(f"Processing time: {elapsed:.1f}s")
-    print(f"Speed: {speed:.2f}x realtime")
-    print(f"Output: {output_dir}")
-    
+    print(f"\nBatch processing complete.")
     if device.type == 'cuda':
-        max_memory = torch.cuda.max_memory_allocated() / 1024**3
-        print(f"Peak VRAM: {max_memory:.2f} GB")
+        max_me = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"Peak VRAM: {max_me:.2f} GB")
 
 
 if __name__ == '__main__':

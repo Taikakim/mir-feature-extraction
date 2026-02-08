@@ -1,556 +1,95 @@
 # MIR Feature Extraction Framework
 
-!==! Very much a hot work-in-progress mess, but it alread kind of works for me and my RX 9070 XT, so I thought, it could be a good starting point for other people too. !==!
+Comprehensive music feature extraction pipeline for conditioning **Stable Audio Tools** and similar audio generation models. Extracts 97+ numeric MIR features, 496 AI classification labels, and 5 natural language descriptions from audio files.
 
-!==! Things are going fast, the bits and pieces that connect everything are probably not all up to date all the time, but I try to check that the individual core analysis scripts keep working !==!
+**Status:** Work-in-progress but functional. Core analysis scripts are tested; pipeline glue may lag behind. Scripts have built-in `--help`.
 
-!=! There's lots of auxilirary notes etc that will come and go, but the readme and manual should have everything that matters. The scripts also have their own help systems !==!
+## What It Does
 
-Main thing missing still is what to do with all of this raw data: pre-encode latents and create training prompts and new conditionings.
+1. **Organizes** audio files into structured folders
+2. **Separates** stems (drums, bass, other, vocals) via Demucs or BS-RoFormer
+3. **Extracts** rhythm, loudness, spectral, harmonic, timbral, and aesthetic features
+4. **Classifies** genre (400), mood (56), instruments (40) via Essentia
+5. **Generates** 5 AI text descriptions via Music Flamingo (8B params)
+6. **Transcribes** drums to MIDI via ADTOF-PyTorch
+7. **Creates** beat-aligned training crops with feature migration
 
-**Comprehensive music feature extraction pipeline for conditioning Stable Audio Tools and similar audio generation models.**
-
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: TBD](https://img.shields.io/badge/license-TBD-lightgrey.svg)](LICENSE)
-
----
-
-## Overview
-
-This framework extracts **97 music information retrieval (MIR) features** from audio files, specifically designed as conditioning data for Stable Audio Tools training. It analyzes both full mixes and separated stems to capture comprehensive musical characteristics.
-
-### Key Features
-
-✅ **97+ Numeric Features** extracted per track
-✅ **AI-Powered Descriptions** using Music Flamingo (8B params)
-✅ **Genre/Mood/Instrument Classification** (400 genres, 56 moods, 40 instruments)
-✅ **Per-Stem Analysis** - Demucs or BS-RoFormer separated stems (drums, bass, other, vocals)
-✅ **GPU Accelerated** processing (AMD ROCm / NVIDIA CUDA)
-✅ **MIDI Drum Transcription** using ADTOF-PyTorch or Drumsep
-✅ **Batch Processing** with automatic organization and HDD optimization
-✅ **Safe JSON Updates** with atomic writes and feature merging
-✅ **Production Ready** - optimized for AMD RDNA4 (RX 9070 XT)
-✅ **Realtime Stats** - Processing speed tracking relative to audio duration
-
----
-
-## Feature Categories
-
-### Numeric Features (97+)
-
-| Category | Features | Description |
-|----------|----------|-------------|
-| **Rhythm** | 29 | BPM, syncopation, onset density (Full Mix + **Per-Stem**) |
-| **Loudness** | 10 | LUFS/LRA (Full Mix + **Per-Stem**) |
-| **Spectral** | 4 | Flatness, flux, skewness, kurtosis (Full Mix) |
-| **RMS Energy** | 4 | Bass, body, mid, air frequency bands (Full Mix) |
-| **Chroma** | 12 | 12-dimensional pitch class weights (Full Mix) |
-| **Harmonic** | 4 | Movement and variance (**Bass & Other Stems**) |
-| **Timbral** | 8 | Audio Commons perceptual features (Full Mix) |
-| **Aesthetics** | 4 | Content enjoyment/usefulness, production complexity/quality |
-| **Classification** | 2 | Danceability, atonality |
-| **Metadata** | 20 | Release year, Spotify IDs, Spotify audio features (energy, valence, etc.) |
-
-### AI Classification Features
-
-| Category | Labels | Description |
-|----------|--------|-------------|
-| **Genre** | 400 | Discogs taxonomy (Blues, Electronic, Rock, Jazz, etc.) |
-| **Mood/Theme** | 56 | MTG Jamendo (energetic, calm, dark, happy, epic, etc.) |
-| **Instrument** | 40 | MTG Jamendo (guitar, drums, piano, synthesizer, etc.) |
-
-### Natural Language Descriptions (Music Flamingo)
-
-| Prompt Type | Description |
-|-------------|-------------|
-| **full** | Comprehensive description (genre, tempo, key, instruments, mood) |
-| **technical** | Tempo, key, chords, dynamics, performance analysis |
-| **genre_mood** | Genre classification + emotional character |
-| **instrumentation** | Instruments and sounds present |
-| **structure** | Arrangement and structure analysis |
-
-**Total: 97+ numeric features + 496 classification labels + 5 AI descriptions + MIDI drums**
-
-### Feature Units Reference
-
-| Feature | Unit | Range | Description |
-|---------|------|-------|-------------|
-| **bpm** | BPM | 40-300 | Beats per minute |
-| **beat_regularity** | seconds | 0-1 | Std dev of beat intervals (lower = more regular) |
-| **onset_density** | onsets/sec | 0-50 | Note/percussion events per second |
-| **onset_count** | count | 0-∞ | Total detected onset events |
-| **lufs** | LUFS | -70 to 0 | Integrated loudness (ITU-R BS.1770) |
-| **lra** | LU | 0-25 | Loudness range (dynamic variation) |
-| **spectral_flatness** | ratio | 0-1 | Noise-like (1) vs tonal (0) |
-| **spectral_flux** | - | 0-∞ | Rate of spectral change |
-| **spectral_skewness** | - | -∞ to ∞ | Asymmetry of spectral distribution |
-| **spectral_kurtosis** | - | 0-∞ | Spectral peakedness |
-| **rms_bass/body/mid/air** | dB | -60 to 0 | Energy in frequency bands |
-| **chroma_C/C#/.../B** | weight | 0-1 | Pitch class presence (12 features) |
-| **brightness** | score | 0-100 | High-frequency content perception |
-| **roughness** | score | 0-100 | Harshness/beating perception |
-| **hardness** | score | 0-100 | Soft vs metallic perception |
-| **depth** | score | 0-100 | Low-frequency spaciousness |
-| **booming** | score | 0-100 | Low-frequency resonance (100-200 Hz) |
-| **reverberation** | score | 0-100 | Wet/dry balance |
-| **sharpness** | score | 0-100 | High-frequency harshness |
-| **warmth** | score | 0-100 | Mid-low frequency richness |
-| **danceability** | probability | 0-1 | Dance suitability |
-| **atonality** | probability | 0-1 | Absence of tonal center |
-| **audiobox_ce/cu/pc/pq** | score | 1-10 | Enjoyment/usefulness/complexity/quality |
-| **syncopation_index** | score | 0-1 | Rhythmic complexity relative to beat |
-| **release_year** | year | int | Original release year (MusicBrainz/Spotify) |
-| **spotify_danceability** | score | 0-1 | Dance suitability (Spotify API) |
-| **spotify_energy** | score | 0-1 | Perceptual measure of intensity/activity |
-| **spotify_valence** | score | 0-1 | Musical positiveness (high=happy, low=sad) |
-
----
-
-## Quick Start
-
-### 1. Clone and Setup
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/mir.git
-cd mir
-
-# Create virtual environment
-python3 -m venv mir
-source mir/bin/activate  # Windows: mir\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Setup external repositories and apply patches
-bash scripts/setup_external_repos.sh
-# Or use Python script: python scripts/apply_patches.py
-```
-
-### 2. Organize Your Audio Files
-
-```bash
-# Convert flat audio files into organized folders
-python src/preprocessing/file_organizer.py /path/to/audio/
-```
-
-**Before:**
-```
-/music/
-├── song1.mp3
-├── song2.flac
-└── song3.wav
-```
-
-**After:**
-```
-/music/
-├── Artist1 - Album1 - Song1/
-│   └── full_mix.mp3
-├── Artist2 - Album2 - Song2/
-│   └── full_mix.flac
-└── Artist3 - Album3 - Song3/
-    └── full_mix.wav
-```
-
-### 3. Separate Stems
-
-```bash
-# Use GPU for fast processing (~9-15x realtime)
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --device cuda
-
-# Or process single track
-python src/preprocessing/demucs_sep.py "/path/to/audio/Artist - Album - Track/"
-
-# Output format options
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format flac              # Lossless (default)
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format mp3 --bitrate 320 # MP3 CBR
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format mp3 --preset 2    # MP3 VBR
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format ogg --ogg-quality 0.6  # OGG
-python src/preprocessing/demucs_sep.py /path/to/audio/ --batch --format wav24             # 24-bit WAV
-```
-
-**Output Formats:** `flac` (default), `mp3`, `ogg`, `wav`, `wav24`, `wav32`
-
-**GPU Performance:**
-- AMD (ROCm) / NVIDIA (CUDA): ~9-15x realtime (10min track in 40-60 seconds)
-- CPU: ~0.1x realtime (10min track in 60+ minutes)
-
-### 4. Extract Features
-
-```bash
-# Test single file with all features
-python src/test_all_features.py "/path/to/Track Name/full_mix.flac"
-
-# Or use --transformers flag for A/B testing with full Music Flamingo model
-python src/test_all_features.py "/path/to/Track Name/full_mix.flac" --transformers
-
-# Run modules individually for batch processing
-python src/rhythm/rhythm_analysis.py /path/to/audio/ --batch
-python src/preprocessing/loudness.py /path/to/audio/ --batch
-python src/spectral/spectral_features.py /path/to/audio/ --batch
-python src/harmonic/chroma_analysis.py /path/to/audio/ --batch
-python src/harmonic/per_stem_harmonic.py /path/to/audio/ --batch
-python src/timbral/audio_commons.py /path/to/audio/ --batch
-python src/classification/essentia_features.py /path/to/audio/ --batch --gmi
-python src/rhythm/per_stem_rhythm.py /path/to/audio/ --batch
-
-# Music Flamingo AI descriptions (requires 16GB VRAM)
-python src/classification/music_flamingo_transformers.py /path/to/audio/ --batch --flash-attention
-```
-
-**Processing Time:** ~35s per track (standard features), ~2.5min per track (with all 5 AI descriptions)
-
-### 5. Create Training Crops (Optional)
-
-```bash
-# Sequential mode: exact sample length, no beat alignment
-python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --sequential
-
-# Beat-aligned with 50% overlap (Recommended for training)
-python src/tools/create_training_crops.py /path/to/audio/ --length 2097152 --overlap --div4
-
-# Parallel processing (Fastest) - Process 8 folders concurrently
-python src/tools/create_training_crops.py /path/to/audio/ --output-dir /path/to/crops --workers 8
-
-# Save to custom output directory
-python src/tools/create_training_crops.py /path/to/audio/ -o /path/to/output --div4
-```
-
-**Crop Features:**
-- **Smart Beat Alignment:** Snap to zero-crossings, align to beats, optional `--div4` for loop-friendly lengths
-- **Parallel Processing:** Multi-threaded folder processing with `--threads` / `-j`
-- **Rhythm Slicing:** Automatically slices `.BEATS_GRID`, `.ONSETS`, and `.DOWNBEATS` for each crop
-- **Enhanced Metadata:** Transfers all source metadata + calculates per-crop BPM and beat count
-- **Position Tracking:** Adds `position` (0.0-1.0) to crop `.INFO` files
-- **Output:** `TrackName/TrackName_N.flac` + matching `.INFO` and rhythm files
-
-### 6. Access Results
-
-Features saved to `.INFO` JSON files:
-
-```json
-{
-  "bpm": 142.19,
-  "bpm_is_defined": 1,
-  "danceability": 0.987,
-  "lufs": -12.73,
-  "brightness": 58.64,
-  "essentia_genre": {"Electronic---House": 0.85, "Electronic---Tech House": 0.72},
-  "essentia_mood": {"energetic": 0.91, "groovy": 0.78, "party": 0.65},
-  "essentia_instrument": {"synthesizer": 0.89, "drums": 0.95, "bass": 0.82},
-  "music_flamingo_full": "This track is an energetic house music production...",
-  "music_flamingo_technical": "The tempo is approximately 128 BPM...",
-  ...
-}
-```
-
----
-
-## Output Structure
-
-```
-Artist - Album - Track/
-├── full_mix.mp3                           # Original audio
-├── drums.mp3                              # Separated stems (MP3 @ 320kbps)
-├── bass.mp3
-├── other.mp3
-├── vocals.mp3
-├── Artist - Album - Track.INFO            # 77 features (JSON)
-├── Artist - Album - Track.BEATS_GRID      # Beat timestamps (JSON)
-└── separated/                             # Demucs working directory
-    └── htdemucs/
-        └── ...
-```
-
----
-
-## Documentation
-
-- **[USER_MANUAL.md](USER_MANUAL.md)** - Comprehensive usage guide
-- **[FEATURES_STATUS.md](FEATURES_STATUS.md)** - Complete feature implementation status
-- **[EXTERNAL_PATCHES.md](EXTERNAL_PATCHES.md)** - External repository modifications
-- **[project.log](project.log)** - Development history and decisions
-- **[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)** - Original implementation plan
-
----
-
-## Project Structure
-
-```
-mir/
-├── src/                          # Source code
-│   ├── core/                    # Core utilities (JSON, file handling, logging)
-│   ├── preprocessing/           # File organization, stem separation, loudness
-│   ├── rhythm/                  # Beat detection, BPM, syncopation, onsets
-│   ├── spectral/                # Spectral features and RMS energy
-│   ├── harmonic/                # Chroma, harmonic movement
-│   ├── timbral/                 # Audio Commons timbral features
-│   └── classification/          # Essentia, Music Flamingo AI descriptions
-├── scripts/                      # Setup and utility scripts
-│   ├── setup_external_repos.sh  # Clone and patch external dependencies
-│   └── apply_patches.py         # Apply librosa compatibility patches
-├── plans/                        # Implementation plan files
-├── repos/                        # External repositories (not tracked)
-│   └── repos/
-│       └── timbral_models/      # Audio Commons (cloned + patched)
-├── test_data/                    # Test audio (not tracked)
-├── .gitignore                    # Git ignore rules
-├── requirements.txt              # Python dependencies
-├── README.md                     # This file
-├── USER_MANUAL.md               # Usage documentation
-├── FEATURES_STATUS.md           # Implementation status
-├── EXTERNAL_PATCHES.md          # External patches documentation
-└── project.log                  # Development log
-```
-
----
+All features are saved to `.INFO` JSON files with atomic writes (never overwrites).
 
 ## Requirements
 
-### System Requirements
+- **Python** 3.12+
+- **GPU:** AMD ROCm 7.2+ (tested on RX 9070 XT / RDNA4) or NVIDIA CUDA
+- **VRAM:** 5-13 GB depending on workload
+- **OS:** Linux (tested on Arch)
 
-- **Python:** 3.10 or higher
-- **GPU:** AMD (ROCm) or NVIDIA (CUDA) recommended for stem separation
-- **Disk Space:** ~50MB per minute of audio (stems + features)
-- **Memory:** 8GB+ RAM recommended
+### Key Dependencies
 
-### Python Dependencies
+| Package | Purpose |
+|---------|---------|
+| PyTorch (ROCm/CUDA) | GPU compute |
+| Demucs / BS-RoFormer | Stem separation |
+| Essentia + TensorFlow | Classification (genre/mood/instrument) |
+| llama.cpp (HIP build) | Music Flamingo GGUF inference |
+| librosa, soundfile | Audio I/O and analysis |
+| timbral_models | Audio Commons perceptual features (patched, cloned via setup script) |
 
-Core libraries:
-- **librosa** >= 0.11.0 - Audio analysis
-- **soundfile** >= 0.12.0 - Audio I/O
-- **demucs** >= 4.0.0 - Stem separation
-- **pyloudnorm** >= 0.1.0 - Loudness measurement
-- **essentia** >= 2.1b6 - High-level features
-- **numpy**, **scipy**, **pandas** - Scientific computing
+See `requirements.txt` for the full list.
 
-See `requirements.txt` for complete list.
-
-### External Dependencies
-
-- **timbral_models** (Audio Commons) - Cloned and patched automatically via setup script
-
----
-
-## GPU Support
-
-### AMD GPUs (ROCm)
+## Quick Start
 
 ```bash
-# Use --device cuda (AMD GPUs appear as CUDA with ROCm)
-python src/preprocessing/demucs_sep.py audio/ --batch --device cuda
+# Setup
+python -m venv mir && source mir/bin/activate
+pip install -r requirements.txt
+bash scripts/setup_external_repos.sh
+
+# Test all features on a single file
+python src/test_all_features.py "/path/to/audio.flac"
+
+# Full pipeline (config-driven)
+python src/master_pipeline.py --config config/master_pipeline.yaml
 ```
 
-**Performance:** ~9.4x realtime (10min track in ~64 seconds)
+## ROCm GPU Environment
 
-**Optimizations for AMD RDNA4:** Set these environment variables for best performance:
+All ROCm environment variables are centralized in `src/core/rocm_env.py` and documented in `config/master_pipeline.yaml`. Every GPU-using script calls `setup_rocm_env()` before importing torch.
+
+Key variables (set automatically, shell exports override):
 
 ```bash
-export PYTORCH_ALLOC_CONF=expandable_segments:True
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_TUNING=0
-export OMP_NUM_THREADS=8
+export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export HIP_FORCE_DEV_KERNARG=1
+export TORCH_COMPILE=0   # buggy with FA on RDNA
 ```
 
-### NVIDIA GPUs (CUDA)
+## Documentation
 
-```bash
-# Use --device cuda
-python src/preprocessing/demucs_sep.py audio/ --batch --device cuda
-```
+- **[USER_MANUAL.md](USER_MANUAL.md)** - Full usage guide, module reference, troubleshooting
+- **[FEATURES_STATUS.md](FEATURES_STATUS.md)** - Feature implementation tracker
+- **[config/master_pipeline.yaml](config/master_pipeline.yaml)** - All pipeline and ROCm settings
 
-**Performance:** ~10-15x realtime
-
-### CPU Only
-
-```bash
-# Use --device cpu (default)
-python src/preprocessing/demucs_sep.py audio/ --batch
-```
-
-**Performance:** ~0.1x realtime (very slow)
-
----
-
-## BS Roformer Source Separation (Superior to Demucs)
-
-BS Roformer models provide state-of-the-art vocal/instrumental separation, outperforming Demucs.
-
-### Installation
-
-```bash
-# Install audio-separator (base)
-pip install audio-separator
-
-# For AMD ROCm GPUs - install ROCm-compatible ONNX Runtime:
-pip uninstall onnxruntime-gpu  # Remove CUDA version if present
-pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
-
-# Note: BS Roformer models use PyTorch (your ROCm PyTorch works)
-# ONNX Runtime is only needed for MDX-Net models
-```
-
-### Usage
-
-```bash
-# Separate vocals with best model (SDR 12.97)
-audio-separator song.wav --model_filename model_bs_roformer_ep_317_sdr_12.9755.ckpt
-
-# List all available models
-audio-separator --list_models
-
-# Test script for all models (see tests/test_bs_roformer.py)
-python tests/test_bs_roformer.py song.wav --output out --models all
-```
-
-### ONNX Runtime for AMD ROCm
-
-> **⚠️ Important:** The default `onnxruntime-gpu` package is CUDA-only and won't work on AMD GPUs.
-
-| GPU | Package | Install Command |
-|-----|---------|-----------------|
-| AMD (ROCm 7.2+) | `onnxruntime-migraphx` | `pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/` |
-| AMD (fallback) | `onnxruntime` | `pip install onnxruntime` (CPU-only, PyTorch models still use GPU) |
-| NVIDIA | `onnxruntime-gpu` | `pip install onnxruntime-gpu` |
-
-**Note:** May require `numpy==1.26.4` (numpy 2.0 incompatible with ROCm ONNX wheels).
-
-**Docs:** https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
-
-
----
-
-## Known Issues & Solutions
-
-### ✅ Audio Commons librosa API Errors (FIXED)
-
-**Issue:** `onset_detect() takes 0 positional arguments but 2 positional arguments were given`
-
-**Solution:** Automatically fixed by running `scripts/apply_patches.py` during setup. Patches documented in `EXTERNAL_PATCHES.md`.
-
-### ✅ TorchCodec/FFmpeg Errors (FIXED)
-
-**Issue:** Demucs fails to save FLAC output files with TorchCodec errors
-
-**Solution:** Native FLAC output is attempted first (fast). If torchcodec fails, automatically falls back to WAV + soundfile conversion. OGG uses WAV intermediate (no native support). MP3 uses lameenc (reliable).
-
-### ✅ AudioBox Aesthetics (FIXED)
-
-**Status:** AudioBox aesthetics features now use actual Meta AudioBox model inference.
-
-**Solution:** Implemented in `src/timbral/audiobox_aesthetics.py` using `audiobox_aesthetics` package from GitHub.
-
----
-
-## Feature Implementation Status
-
-✅ **Implemented:** 77+ numeric features + AI classification
-
-**Core Features:**
-- ✅ All rhythm features (29)
-- ✅ All loudness features (10)
-- ✅ All spectral features (4)
-- ✅ All RMS energy features (4)
-- ✅ All chroma features (12)
-- ✅ All harmonic features (4)
-- ✅ All timbral features (8)
-- ✅ All aesthetic features (4)
-- ✅ All classification features (2)
-
-**AI Features:**
-- ✅ Genre classification (400 Discogs genres)
-- ✅ Mood/theme classification (56 MTG Jamendo labels)
-- ✅ Instrument classification (40 MTG Jamendo labels)
-- ✅ Music Flamingo descriptions (5 prompt types)
-
-**Missing:**
-- ✅ Position feature (implemented via smart cropping system)
-
-See [FEATURES_STATUS.md](FEATURES_STATUS.md) for complete details.
-
----
-
-## Development Roadmap
-
-### ✅ Phase 1: Core Feature Extraction (COMPLETE)
-- File organization system
-- Stem separation (Demucs)
-- Rhythm analysis (BPM, beats, syncopation, onsets)
-- Loudness analysis (LUFS/LRA per-stem)
-- Spectral features (flatness, flux, skewness, kurtosis)
-- RMS energy (4 frequency bands)
-- Harmonic features (chroma, movement, variance)
-- Timbral features (Audio Commons 8 features)
-- Classification (danceability, atonality, aesthetics)
-
-### ✅ Phase 2: Dataset Preparation (COMPLETE)
-- ✅ Smart cropping system (`src/tools/create_training_crops.py`)
-- ✅ Position feature calculation (via cropping metadata)
-- ✅ AudioBox model inference (`src/timbral/audiobox_aesthetics.py`)
-- Statistical analysis tool (planned)
-
-### ✅ Phase 3: AI Classification (COMPLETE)
-- Genre classification (400 Discogs genres via Essentia)
-- Mood/theme classification (56 MTG Jamendo labels)
-- Instrument classification (40 MTG Jamendo labels)
-- Music Flamingo AI descriptions (5 prompt types)
-
-### 📅 Phase 4: Advanced Features (IN PROGRESS)
-- ✅ MIDI drum transcription (ADTOF-PyTorch, Drumsep)
-- ❌ Bass MIDI transcription (Basic Pitch, PESTO)
-- ❌ Polyphonic MIDI transcription (MT3, MR-MT3)
-- Kick/snare/cymbal per-drum analysis
-- Auxiliary file outputs (.ONSETS_GRID, .CHROMA)
-
----
-
-## Contributing
-
-Contributions welcome! Areas of interest:
-- Smart cropping algorithm implementation
-- AudioBox aesthetics model integration
-- MIDI transcription pipeline
-- Additional feature extractors
-- Documentation improvements
-
----
-
-## Citation
-
-If you use this framework in your research, please cite:
+## Project Layout
 
 ```
-[Citation to be added]
+src/
+  core/           # Utilities: JSON handler, file utils, rocm_env, text normalization
+  preprocessing/  # File organization, stem separation (Demucs, BS-RoFormer), loudness
+  rhythm/         # Beat detection, BPM, syncopation, onsets, per-stem rhythm
+  spectral/       # Spectral features, multiband RMS
+  harmonic/       # Chroma, per-stem harmonic movement
+  timbral/        # Audio Commons features, AudioBox aesthetics
+  classification/ # Essentia, Music Flamingo (GGUF + Transformers)
+  transcription/  # MIDI drum transcription (ADTOF, Drumsep)
+  tools/          # Metadata lookup, training crops, statistics
+  crops/          # Crop-specific pipeline and feature extraction
+config/           # YAML pipeline configuration
+repos/            # External repos (cloned by setup script, not tracked)
 ```
-
-Based on:
-- [Stable Audio Tools](https://github.com/Stability-AI/stable-audio-tools) (Stability AI)
-- [Essentia](https://essentia.upf.edu/) (Music Technology Group, UPF Barcelona)
-- [Demucs](https://github.com/facebookresearch/demucs) (Meta Research)
-- [Audio Commons Timbral Models](https://github.com/AudioCommons/timbral_models)
-- [Music Flamingo](https://huggingface.co/nvidia/Music-Flamingo) (NVIDIA Research)
-
----
 
 ## License
 
-[To be determined]
-
----
-
-## Support
-
-For issues, bugs, or feature requests:
-1. Check [USER_MANUAL.md](USER_MANUAL.md) for usage help
-2. Review [FEATURES_STATUS.md](FEATURES_STATUS.md) for implementation status
-3. Consult [project.log](project.log) for known issues
-4. Open an issue on GitHub
-
----
-
-**Version:** 1.4
-**Last Updated:** 2026-01-26
-**Status:** Production Ready (Core + AI Features + Training Crops + MIDI Drums)
-**Features:** 97+ numeric + 496 AI labels + 5 AI descriptions + smart cropping + MIDI drum transcription + parallel processing
+TBD

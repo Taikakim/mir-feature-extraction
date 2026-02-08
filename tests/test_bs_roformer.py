@@ -56,22 +56,9 @@ from typing import List, Optional, Dict, Any
 # ROCm Environment Configuration
 # =============================================================================
 # Must be set BEFORE importing PyTorch
-
-# ROCm memory management
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-
-# Enable Flash Attention for AMD (Triton-based)
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-
-# Enable tunable operations for ROCm optimization
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')
-
-# Thread configuration
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-
-# MIOpen configuration
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
 # Suppress TensorFlow warnings
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')

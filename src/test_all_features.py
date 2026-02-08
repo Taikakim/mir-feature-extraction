@@ -24,33 +24,18 @@ Music Flamingo backends:
 # CRITICAL: Set PyTorch/ROCm config BEFORE any imports
 # This must happen before torch is imported anywhere (including by dependencies)
 import os
+import sys
 from pathlib import Path
-
-# Memory management for ROCm (expandable_segments not supported on HIP)
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-
-# AMD ROCm optimizations
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')  # Fast MIOpen kernel selection (avoid long delays)
-
-# Set tunableop results file if it exists
-_tunableop_file = Path(__file__).parent.parent / 'tunableop_results00.csv'
-if _tunableop_file.exists():
-    os.environ.setdefault('PYTORCH_TUNABLEOP_FILENAME', str(_tunableop_file))
+sys.path.insert(0, str(Path(__file__).parent))
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
 import argparse
 import json
 import logging
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List, Callable
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from core.common import setup_logging, FEATURE_RANGES
 from core.file_utils import get_stem_files

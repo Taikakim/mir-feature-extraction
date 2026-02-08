@@ -80,7 +80,7 @@ class PipelineConfig:
     flamingo_model: str = "Q8_0"
     flamingo_context_size: int = 1024  # LLM context window size
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
-    flamingo_prompts: Dict[str, bool] = field(default_factory=dict)
+    flamingo_prompts: Dict[str, str] = field(default_factory=dict)
 
     @property
     def working_dir(self) -> Path:
@@ -92,6 +92,10 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     """
     Worker function for parallel CPU feature extraction.
     Must be top-level for pickling.
+
+    Pre-loads crop audio and stems into RAM once, then passes pre-loaded arrays
+    to all feature functions to avoid redundant disk reads (was 17 reads per crop,
+    now 1-5 depending on stems).
 
     Args is a tuple of (crop_path, config_dict, existing_keys) where existing_keys
     is a set of keys already present in the .INFO file.
@@ -121,6 +125,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         from src.core.file_utils import get_crop_stem_files
         import librosa
         import soundfile as sf
+        import numpy as np
 
         # Optional imports
         timbral_func = None
@@ -130,52 +135,88 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                 timbral_func = analyze_all_timbral_features
             except ImportError: pass
 
+        # =====================================================================
+        # PRE-LOAD: Read crop audio ONCE from disk (eliminates ~12 redundant reads)
+        # =====================================================================
+        crop_audio, crop_sr = sf.read(str(crop_path))
+
+        # Mono version for most features
+        if crop_audio.ndim > 1:
+            crop_mono = crop_audio.mean(axis=1)
+        else:
+            crop_mono = crop_audio
+
+        # Pre-load stems into RAM (1 read each instead of repeated per-feature)
         stems = get_crop_stem_files(crop_path)
+        preloaded_stems = {}  # stem_name -> (audio_array, sr)
+        for stem_name in ['drums', 'bass', 'other', 'vocals']:
+            if stem_name in stems:
+                try:
+                    s_audio, s_sr = sf.read(str(stems[stem_name]))
+                    preloaded_stems[stem_name] = (s_audio, s_sr)
+                except Exception:
+                    pass
+
+        # =====================================================================
+        # FEATURE EXTRACTION: All functions use pre-loaded arrays
+        # =====================================================================
 
         # Loudness - check ALL output keys
         if not config_dict.get('skip_loudness'):
             if _needs_processing(LOUDNESS_KEYS):
                 try:
-                    results.update(analyze_file_loudness(crop_path))
-                    for stem_name in ['drums', 'bass', 'other', 'vocals']:
-                        if stem_name in stems:
-                            stem_loud = analyze_file_loudness(stems[stem_name])
-                            results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                    results.update(analyze_file_loudness(crop_path, audio=crop_audio, sr=crop_sr))
+                    for stem_name, (s_audio, s_sr) in preloaded_stems.items():
+                        stem_loud = analyze_file_loudness(
+                            stems[stem_name], audio=s_audio, sr=s_sr)
+                        results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
                 except Exception: pass
 
-        # BPM - single key is fine here
+        # BPM - use pre-loaded mono audio
         if not config_dict.get('skip_rhythm'):
             if overwrite or 'bpm' not in existing_keys:
                 try:
-                    y, sr = sf.read(str(crop_path))
-                    if y.ndim > 1: y = y.mean(axis=1)
-                    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-                    # Handle both scalar and array returns from librosa
+                    tempo, _ = librosa.beat.beat_track(y=crop_mono, sr=crop_sr)
                     bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
                     results['bpm'] = round(bpm, 1)
                 except Exception: pass
 
-        # Spectral - check ALL output keys
+        # Spectral - pass pre-loaded mono audio
         if not config_dict.get('skip_spectral'):
             if _needs_processing(SPECTRAL_KEYS):
-                try: results.update(analyze_spectral_features(crop_path))
+                try:
+                    results.update(analyze_spectral_features(
+                        crop_path, audio=crop_mono, sr=crop_sr))
                 except Exception: pass
             if _needs_processing(MULTIBAND_KEYS):
-                try: results.update(analyze_multiband_rms(crop_path))
+                try:
+                    results.update(analyze_multiband_rms(
+                        crop_path, audio=crop_mono, sr=crop_sr))
                 except Exception: pass
 
-        # Chroma - check ALL output keys
+        # Chroma - use 'other' stem if available (pre-loaded), else crop mono
         if not config_dict.get('skip_harmonic'):
             if _needs_processing(CHROMA_KEYS):
                 try:
-                    chroma_input = stems.get('other', crop_path)
-                    results.update(analyze_chroma(chroma_input, use_stems=False))
+                    if 'other' in preloaded_stems:
+                        other_audio, other_sr = preloaded_stems['other']
+                        if other_audio.ndim > 1:
+                            other_audio = other_audio.mean(axis=1)
+                        results.update(analyze_chroma(
+                            stems['other'], use_stems=False,
+                            audio=other_audio.astype(np.float32), sr=other_sr))
+                    else:
+                        results.update(analyze_chroma(
+                            crop_path, use_stems=False,
+                            audio=crop_mono.astype(np.float32), sr=crop_sr))
                 except Exception: pass
 
-        # Timbral - check ALL output keys
+        # Timbral - pass pre-loaded audio (writes to /dev/shm RAM disk internally)
         if timbral_func and not config_dict.get('skip_timbral'):
             if _needs_processing(TIMBRAL_KEYS):
-                try: results.update(timbral_func(crop_path))
+                try:
+                    results.update(timbral_func(
+                        crop_path, audio=crop_audio, sr=crop_sr))
                 except Exception: pass
 
         return {'path': crop_path, 'results': results, 'success': True}
@@ -504,17 +545,16 @@ class Pipeline:
         flamingo_analyzer = None
         if not self.config.skip_flamingo:
             try:
-                from classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer
-                logger.info(f"Loading Music Flamingo (llama-cpp-python) {self.config.flamingo_model}...")
+                from classification.music_flamingo import MusicFlamingoGGUF
+                logger.info(f"Loading Music Flamingo (GGUF/CLI) {self.config.flamingo_model}...")
 
-                # Use auto-detection with configured model name and context
-                flamingo_analyzer = MusicFlamingoAnalyzer(
-                    model_name=self.config.flamingo_model,
-                    n_ctx=self.config.flamingo_context_size,
-                    n_gpu_layers=-1
+                flamingo_analyzer = MusicFlamingoGGUF(
+                    model=self.config.flamingo_model,
                 )
             except Exception as e:
                 logger.warning(f"Music Flamingo not available: {e}")
+
+        import numpy as np
 
         # Process each crop
         for i, crop_path in enumerate(all_crops, 1):
@@ -525,20 +565,32 @@ class Pipeline:
                 existing = read_info(info_path) if info_path.exists() else {}
                 results = {}
 
-                # Get stems if available
+                # PRE-LOAD: Read crop audio ONCE from disk
+                crop_audio, crop_sr = sf.read(str(crop_path))
+                crop_mono = crop_audio.mean(axis=1) if crop_audio.ndim > 1 else crop_audio
+
+                # Pre-load stems into RAM
                 stems = get_crop_stem_files(crop_path)
+                preloaded_stems = {}
+                for stem_name in ['drums', 'bass', 'other', 'vocals']:
+                    if stem_name in stems:
+                        try:
+                            s_audio, s_sr = sf.read(str(stems[stem_name]))
+                            preloaded_stems[stem_name] = (s_audio, s_sr)
+                        except Exception:
+                            pass
 
                 # Loudness
                 if not self.config.skip_loudness:
                     if self.config.overwrite or 'lufs' not in existing:
                         try:
-                            results.update(analyze_file_loudness(crop_path))
-                            # Analyze stems too
-                            for stem_name in ['drums', 'bass', 'other', 'vocals']:
-                                if stem_name in stems:
-                                    stem_loud = analyze_file_loudness(stems[stem_name])
-                                    results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
-                                    results[f'lra_{stem_name}'] = stem_loud.get('lra')
+                            results.update(analyze_file_loudness(
+                                crop_path, audio=crop_audio, sr=crop_sr))
+                            for stem_name, (s_audio, s_sr) in preloaded_stems.items():
+                                stem_loud = analyze_file_loudness(
+                                    stems[stem_name], audio=s_audio, sr=s_sr)
+                                results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                                results[f'lra_{stem_name}'] = stem_loud.get('lra')
                             logger.info("  ✓ Loudness")
                         except Exception as e:
                             logger.warning(f"  Loudness failed: {e}")
@@ -547,12 +599,7 @@ class Pipeline:
                 if not self.config.skip_rhythm:
                     if self.config.overwrite or 'bpm' not in existing:
                         try:
-                            # Use librosa for simple BPM estimation
-                            y, sr = sf.read(str(crop_path))
-                            if y.ndim > 1:
-                                y = y.mean(axis=1)  # Convert to mono
-                            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-                            # Handle both scalar and array returns from librosa
+                            tempo, _ = librosa.beat.beat_track(y=crop_mono, sr=crop_sr)
                             bpm_value = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
                             results['bpm'] = round(bpm_value, 1)
                             logger.info("  ✓ BPM")
@@ -563,14 +610,16 @@ class Pipeline:
                 if not self.config.skip_spectral:
                     if self.config.overwrite or 'spectral_flatness' not in existing:
                         try:
-                            results.update(analyze_spectral_features(crop_path))
+                            results.update(analyze_spectral_features(
+                                crop_path, audio=crop_mono, sr=crop_sr))
                             logger.info("  ✓ Spectral")
                         except Exception as e:
                             logger.warning(f"  Spectral failed: {e}")
 
                     if self.config.overwrite or 'rms_energy_bass' not in existing:
                         try:
-                            results.update(analyze_multiband_rms(crop_path))
+                            results.update(analyze_multiband_rms(
+                                crop_path, audio=crop_mono, sr=crop_sr))
                             logger.info("  ✓ Multiband RMS")
                         except Exception as e:
                             logger.warning(f"  Multiband RMS failed: {e}")
@@ -579,18 +628,25 @@ class Pipeline:
                 if not self.config.skip_harmonic:
                     if self.config.overwrite or 'chroma_0' not in existing:
                         try:
-                            # Use 'other' stem for melodic content if available
-                            # Pass use_stems=False since we're already providing the specific file
-                            chroma_input = stems.get('other', crop_path)
-                            results.update(analyze_chroma(chroma_input, use_stems=False))
+                            if 'other' in preloaded_stems:
+                                other_audio, other_sr = preloaded_stems['other']
+                                other_mono = other_audio.mean(axis=1) if other_audio.ndim > 1 else other_audio
+                                results.update(analyze_chroma(
+                                    stems['other'], use_stems=False,
+                                    audio=other_mono.astype(np.float32), sr=other_sr))
+                            else:
+                                results.update(analyze_chroma(
+                                    crop_path, use_stems=False,
+                                    audio=crop_mono.astype(np.float32), sr=crop_sr))
                             logger.info("  ✓ Chroma")
                         except Exception as e:
                             logger.warning(f"  Chroma failed: {e}")
 
-                # Timbral
+                # Timbral (uses /dev/shm RAM disk internally when audio provided)
                 if timbral_func and (self.config.overwrite or 'brightness' not in existing):
                     try:
-                        results.update(timbral_func(crop_path))
+                        results.update(timbral_func(
+                            crop_path, audio=crop_audio, sr=crop_sr))
                         logger.info("  ✓ Timbral")
                     except Exception as e:
                         logger.warning(f"  Timbral failed: {e}")
@@ -614,16 +670,23 @@ class Pipeline:
                 # Music Flamingo
                 if flamingo_analyzer and (self.config.overwrite or 'music_flamingo_model' not in existing):
                     try:
-                        # Determine active prompts
-                        active_prompts = [p for p, enabled in self.config.flamingo_prompts.items() if enabled]
-                        if not active_prompts and not self.config.flamingo_prompts:
-                             active_prompts = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+                        # Determine active prompts map
+                        prompts_map = self.config.flamingo_prompts
+                        if not prompts_map:
+                            from classification.music_flamingo import DEFAULT_PROMPTS
+                            prompts_map = DEFAULT_PROMPTS
 
-                        for prompt_type in active_prompts:
+                        for prompt_type, prompt_text in prompts_map.items():
                             key = f'music_flamingo_{prompt_type}'
                             if self.config.overwrite or key not in existing:
-                                results[key] = flamingo_analyzer.analyze(crop_path, prompt_type=prompt_type)
-                        
+                                # Pass the custom prompt text (if from config) or let analyzer use default
+                                p_text = prompt_text if self.config.flamingo_prompts else None
+                                results[key] = flamingo_analyzer.analyze(
+                                    crop_path, 
+                                    prompt=p_text,
+                                    prompt_type=prompt_type
+                                )
+
                         if any(k.startswith('music_flamingo_') for k in results):
                             results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
                             logger.info("  ✓ Music Flamingo")
@@ -642,6 +705,11 @@ class Pipeline:
                 self.stats["crops_failed"] += 1
 
         self.stats["total_time"] = time.time() - start_time
+
+        # Show flamingo performance stats if used
+        if flamingo_analyzer and flamingo_analyzer.stats.runs > 0:
+            logger.info(flamingo_analyzer.stats.summary())
+
         self._print_crops_summary()
 
         return self.stats["crops_failed"] == 0
@@ -871,19 +939,19 @@ class Pipeline:
         # PASS 4: Music Flamingo
         # =========================================================================
         if not self.config.skip_flamingo:
-            logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, llama-cpp) - {len(all_crops)} files")
+            logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, GGUF/CLI) - {len(all_crops)} files")
             try:
-                from src.classification.music_flamingo_llama_cpp import MusicFlamingoAnalyzer, batch_analyze_music_flamingo
+                from src.classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
                 
-                # Determine active prompts (default to all if none specified)
-                active_prompts = [p for p, enabled in self.config.flamingo_prompts.items() if enabled]
-                if not active_prompts and not self.config.flamingo_prompts:
-                    active_prompts = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+                # Determine active prompts map
+                prompts_map = self.config.flamingo_prompts
+                if not prompts_map:
+                    prompts_map = DEFAULT_PROMPTS
                 
-                if not active_prompts:
+                if not prompts_map:
                     logger.warning("  No Flamingo prompts enabled in config.")
                 else:
-                    logger.info(f"  Active prompts: {', '.join(active_prompts)}")
+                    logger.info(f"  Active prompts: {', '.join(prompts_map.keys())}")
                     
                     # Filter files needing processing (check if ALL active prompts are present)
                     to_process = []
@@ -895,7 +963,7 @@ class Pipeline:
                         if self.config.overwrite:
                             needs_run = True
                         else:
-                            for p in active_prompts:
+                            for p in prompts_map.keys():
                                 if f'music_flamingo_{p}' not in existing:
                                     needs_run = True
                                     break
@@ -904,11 +972,9 @@ class Pipeline:
                             to_process.append(crop_path)
                     
                     if to_process:
-                        logger.info(f"  Loading model ({self.config.flamingo_model}, ctx={self.config.flamingo_context_size})...")
-                        # Initialized once here with configured model and context
-                        flamingo = MusicFlamingoAnalyzer(
-                            model_name=self.config.flamingo_model,
-                            n_ctx=self.config.flamingo_context_size
+                        logger.info(f"  Loading model ({self.config.flamingo_model})...")
+                        flamingo = MusicFlamingoGGUF(
+                            model=self.config.flamingo_model,
                         )
 
                         # Start background prefetcher to warm disk cache
@@ -921,7 +987,7 @@ class Pipeline:
                         for i, crop_path in enumerate(to_process, 1):
                             results = {}
                             try:
-                                for prompt_type in active_prompts:
+                                for prompt_type, prompt_text in prompts_map.items():
                                     key = f'music_flamingo_{prompt_type}'
 
                                     # Overwrite check for specific key
@@ -930,7 +996,12 @@ class Pipeline:
 
                                     if self.config.overwrite or key not in existing:
                                         # Using the new robust analyze method
-                                        results[key] = flamingo.analyze(crop_path, prompt_type=prompt_type)
+                                        p_text = prompt_text if self.config.flamingo_prompts else None
+                                        results[key] = flamingo.analyze(
+                                            crop_path, 
+                                            prompt=p_text, 
+                                            prompt_type=prompt_type
+                                        )
 
                                 if results:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
@@ -949,6 +1020,11 @@ class Pipeline:
                                 # Don't break loop, keep processing other files
 
                         prefetcher.stop()
+
+                        # Show aggregate performance stats
+                        if flamingo.stats.runs > 0:
+                            logger.info(flamingo.stats.summary())
+
                         del flamingo
                     else:
                         logger.info("  All files already analyzed.")

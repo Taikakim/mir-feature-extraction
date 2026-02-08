@@ -45,9 +45,51 @@ from core.common import setup_logging
 from rhythm.beat_grid import load_beat_grid
 from core.json_handler import get_info_path, read_info, safe_update, batch_write_info
 from core.file_locks import FileLock
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
 logger = logging.getLogger(__name__)
+
+
+def preload_stems(folder_path: Path, target_sr: int) -> Dict[str, Tuple[np.ndarray, Path]]:
+    """
+    Pre-load all stem audio files into RAM for a track folder.
+
+    Returns dict mapping stem name to (audio_array, source_path).
+    Audio is resampled to target_sr if needed and shaped as (samples, channels).
+    """
+    loaded = {}
+
+    for stem_name in STEM_NAMES:
+        stem_path = None
+        for ext in ['.flac', '.wav', '.mp3', '.m4a']:
+            potential = folder_path / f"{stem_name}{ext}"
+            if potential.exists():
+                stem_path = potential
+                break
+
+        if stem_path is None:
+            continue
+
+        try:
+            stem_audio, stem_sr = sf.read(str(stem_path))
+
+            # Resample if needed
+            if stem_sr != target_sr:
+                logger.debug(f"Resampling {stem_name}: {stem_sr} -> {target_sr} Hz")
+                stem_audio = resample_audio(stem_audio, stem_sr, target_sr)
+
+            # Ensure shape is (samples, channels)
+            if stem_audio.ndim == 1:
+                stem_audio = stem_audio[:, np.newaxis]
+            elif stem_audio.shape[0] < stem_audio.shape[1]:
+                stem_audio = stem_audio.T
+
+            loaded[stem_name] = (stem_audio, stem_path)
+            logger.debug(f"Pre-loaded {stem_name}: {stem_audio.shape[0]} samples")
+        except Exception as e:
+            logger.warning(f"Failed to pre-load stem {stem_name}: {e}")
+
+    return loaded
 
 # Check for mutagen (for ID3 tag writing)
 try:
@@ -361,7 +403,8 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
 
 def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
                    start_sample: int, end_sample: int, sr: int,
-                   fade_len: int, metadata: Optional[Dict] = None) -> Optional[Path]:
+                   fade_len: int, metadata: Optional[Dict] = None,
+                   preloaded_audio: Optional[np.ndarray] = None) -> Optional[Path]:
     """
     Crop a stem file at the same sample positions as the full mix crop.
     Preserves the source stem's format (MP3→MP3, FLAC→FLAC, etc.).
@@ -375,27 +418,28 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         sr: Sample rate (target)
         fade_len: Fade length in samples
         metadata: Optional dict with track_metadata_* keys for ID3 tags
+        preloaded_audio: Pre-loaded audio array (samples, channels), already resampled
 
     Returns:
         Path to cropped stem, or None if failed
     """
-    if not stem_path.exists():
-        return None
-
     try:
-        # Load stem audio
-        stem_audio, stem_sr = sf.read(str(stem_path))
+        if preloaded_audio is not None:
+            stem_audio = preloaded_audio
+        else:
+            # Fallback: load from disk
+            if not stem_path.exists():
+                return None
 
-        # Resample if needed (e.g., 32kHz MP3 stems to 44.1kHz)
-        if stem_sr != sr:
-            logger.debug(f"Resampling {stem_name}: {stem_sr} -> {sr} Hz")
-            stem_audio = resample_audio(stem_audio, stem_sr, sr)
+            stem_audio, stem_sr = sf.read(str(stem_path))
 
-        # Ensure shape is (samples, channels)
-        if stem_audio.ndim == 1:
-            stem_audio = stem_audio[:, np.newaxis]
-        elif stem_audio.shape[0] < stem_audio.shape[1]:
-            stem_audio = stem_audio.T
+            if stem_sr != sr:
+                stem_audio = resample_audio(stem_audio, stem_sr, sr)
+
+            if stem_audio.ndim == 1:
+                stem_audio = stem_audio[:, np.newaxis]
+            elif stem_audio.shape[0] < stem_audio.shape[1]:
+                stem_audio = stem_audio.T
 
         # Check bounds
         if end_sample > stem_audio.shape[0]:
@@ -426,12 +470,14 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
 
 def crop_all_stems(folder_path: Path, crop_base_path: Path,
                    start_sample: int, end_sample: int, sr: int,
-                   fade_len: int, metadata: Optional[Dict] = None) -> Dict[str, Path]:
+                   fade_len: int, metadata: Optional[Dict] = None,
+                   preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None) -> Dict[str, Path]:
     """
     Crop all available stems at the same positions as the full mix.
 
     Args:
         metadata: Optional dict with track_metadata_* keys for ID3 tags
+        preloaded_stems: Pre-loaded stems from preload_stems(), maps stem_name to (audio, path)
 
     Returns:
         Dict mapping stem names to cropped paths
@@ -439,21 +485,25 @@ def crop_all_stems(folder_path: Path, crop_base_path: Path,
     cropped_stems = {}
 
     for stem_name in STEM_NAMES:
-        # Find stem file (check multiple extensions)
-        stem_path = None
-        for ext in ['.flac', '.wav', '.mp3', '.m4a']:
-            potential = folder_path / f"{stem_name}{ext}"
-            if potential.exists():
-                stem_path = potential
-                break
-
-        if stem_path is None:
-            continue
+        if preloaded_stems and stem_name in preloaded_stems:
+            stem_audio, stem_path = preloaded_stems[stem_name]
+        else:
+            # Fallback: find stem file on disk
+            stem_path = None
+            for ext in ['.flac', '.wav', '.mp3', '.m4a']:
+                potential = folder_path / f"{stem_name}{ext}"
+                if potential.exists():
+                    stem_path = potential
+                    break
+            if stem_path is None:
+                continue
+            stem_audio = None
 
         cropped = crop_stem_file(
             stem_path, crop_base_path, stem_name,
             start_sample, end_sample, sr, fade_len,
-            metadata=metadata
+            metadata=metadata,
+            preloaded_audio=stem_audio
         )
         if cropped:
             cropped_stems[stem_name] = cropped
@@ -628,7 +678,8 @@ def apply_fades(crop_audio: np.ndarray, fade_len: int) -> np.ndarray:
 
 def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                             audio: np.ndarray, full_mix_path: Path,
-                            output_dir: Optional[Path] = None) -> int:
+                            output_dir: Optional[Path] = None,
+                            preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None) -> int:
     """
     Create simple sequential crops at fixed sample length.
     No beat alignment, just exact sample boundaries with fades.
@@ -672,71 +723,96 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
         crops_dir = folder_path / "crops"
     crops_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pre-load stems if not already provided
+    if preloaded_stems is None:
+        preloaded_stems = preload_stems(folder_path, sr)
+    stem_names_loaded = list(preloaded_stems.keys())
+    if stem_names_loaded:
+        logger.debug(f"Stems in RAM: {stem_names_loaded}")
+
     crop_count = 0
     current_sample = start_sample
 
-    while current_sample + length_samples <= total_samples:
-        end_sample = current_sample + length_samples
+    # Async write pool for I/O-bound file saves
+    write_futures: List[Future] = []
+    write_pool = ThreadPoolExecutor(max_workers=4)
 
-        # Extract crop (no ZC snap for sequential mode)
-        crop_audio = audio[current_sample:end_sample].copy()
+    try:
+        while current_sample + length_samples <= total_samples:
+            end_sample = current_sample + length_samples
 
-        # Apply fades
-        crop_audio = apply_fades(crop_audio, fade_len)
+            # Extract crop (no ZC snap for sequential mode)
+            crop_audio = audio[current_sample:end_sample].copy()
 
-        # Save with same format as source (with ID3 metadata)
-        track_name = full_mix_path.parent.name
-        crop_name = f"{track_name}_{crop_count}{source_ext}"
-        crop_path = crops_dir / crop_name
-        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path,
-                                      metadata=id3_metadata)
+            # Apply fades
+            crop_audio = apply_fades(crop_audio, fade_len)
 
-        # Crop stems at the same positions (also with ID3 metadata)
-        cropped_stems = crop_all_stems(
-            folder_path, crop_path,
-            current_sample, end_sample, sr, fade_len,
-            metadata=id3_metadata
-        )
-        if cropped_stems:
-            logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")
+            # Build crop path
+            track_name = full_mix_path.parent.name
+            crop_name = f"{track_name}_{crop_count}{source_ext}"
+            crop_path = crops_dir / crop_name
 
-        # Metadata
-        start_sec = current_sample / sr
-        end_sec = end_sample / sr
-        position = start_sec / duration_sec
+            # Metadata
+            start_sec = current_sample / sr
+            end_sec = end_sample / sr
+            position = start_sec / duration_sec
 
-        # Slice rhythm files (beats, downbeats) - NOT onsets, which are unused by crop analysis
-        rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
-        for suffix in rhythm_suffixes:
-            candidates = list(folder_path.glob(f"*{suffix}"))
-            if candidates:
-                source_file = candidates[0]
-                dest_file = crop_path.with_suffix(suffix)
-                slice_rhythm_file(source_file, dest_file, start_sec, end_sec)
+            # Schedule async writes: full mix crop + stem crops
+            def _write_crop(audio_data, path, src_path, meta, stem_data, folder, base_path,
+                            s_start, s_end, s_sr, s_fade, s_meta, s_preloaded):
+                write_audio_preserving_format(audio_data, s_sr, path, source_path=src_path,
+                                              metadata=meta)
+                crop_all_stems(folder, base_path, s_start, s_end, s_sr, s_fade,
+                               metadata=s_meta, preloaded_stems=s_preloaded)
 
-        meta = {
-            "position": position,
-            "start_time": start_sec,
-            "end_time": end_sec,
-            "start_sample": current_sample,
-            "end_sample": end_sample,
-            "duration": end_sec - start_sec,
-            "samples": length_samples,
-            "source": str(full_mix_path.name),
-            "has_stems": len(cropped_stems) > 0,
-            "stem_names": list(cropped_stems.keys())
-        }
+            write_futures.append(write_pool.submit(
+                _write_crop, crop_audio, crop_path, full_mix_path, id3_metadata,
+                preloaded_stems, folder_path, crop_path,
+                current_sample, end_sample, sr, fade_len, id3_metadata, preloaded_stems
+            ))
 
-        # Save JSON metadata
-        with open(crop_path.with_suffix('.json'), 'w') as f:
-            json.dump(meta, f, indent=2)
+            # Slice rhythm files (beats, downbeats)
+            rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
+            for suffix in rhythm_suffixes:
+                candidates = list(folder_path.glob(f"*{suffix}"))
+                if candidates:
+                    source_file = candidates[0]
+                    dest_file = crop_path.with_suffix(suffix)
+                    slice_rhythm_file(source_file, dest_file, start_sec, end_sec)
 
-        # Create .INFO file with position key
-        info_path = get_info_path(crop_path)
-        safe_update(info_path, {"position": position})
+            meta = {
+                "position": position,
+                "start_time": start_sec,
+                "end_time": end_sec,
+                "start_sample": current_sample,
+                "end_sample": end_sample,
+                "duration": end_sec - start_sec,
+                "samples": length_samples,
+                "source": str(full_mix_path.name),
+                "has_stems": len(preloaded_stems) > 0,
+                "stem_names": stem_names_loaded
+            }
 
-        crop_count += 1
-        current_sample = end_sample  # Sequential: next starts where this ended
+            # Save JSON metadata
+            with open(crop_path.with_suffix('.json'), 'w') as f:
+                json.dump(meta, f, indent=2)
+
+            # Create .INFO file with position key
+            info_path = get_info_path(crop_path)
+            safe_update(info_path, {"position": position})
+
+            crop_count += 1
+            current_sample = end_sample  # Sequential: next starts where this ended
+
+        # Wait for all async writes to complete
+        for future in write_futures:
+            try:
+                future.result()
+            except Exception as e:
+                logger.warning(f"Async write failed: {e}")
+
+    finally:
+        write_pool.shutdown(wait=True)
 
     return crop_count
 
@@ -807,9 +883,16 @@ def create_crops_for_file(folder_path: Path,
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")
 
+    # Pre-load all stems into RAM (once per track, avoids ~100 redundant disk reads)
+    preloaded_stems = preload_stems(folder_path, sr)
+    if preloaded_stems:
+        stem_mb = sum(a.nbytes for a, _ in preloaded_stems.values()) / (1024 * 1024)
+        logger.info(f"Pre-loaded {len(preloaded_stems)} stems into RAM ({stem_mb:.1f} MB)")
+
     # Sequential mode: simple fixed-length crops
     if sequential:
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
+        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path,
+                                       output_dir, preloaded_stems=preloaded_stems)
 
     # Beat-aligned mode - load beat grid (BPM not needed when grids are available)
     beat_times = None
@@ -837,7 +920,8 @@ def create_crops_for_file(folder_path: Path,
                 downbeat_times = beat_times
     else:
         logger.warning(f"No beat grid for {folder_path.name}, using sequential fallback.")
-        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path, output_dir)
+        return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path,
+                                       output_dir, preloaded_stems=preloaded_stems)
 
     # Get BPM from INFO file or calculate from beat times
     info_path = get_info_path(full_mix_path)
@@ -901,6 +985,19 @@ def create_crops_for_file(folder_path: Path,
     zc_window = int(0.05 * sr)  # 50ms
     fade_len = int(0.01 * sr)   # 10ms
     is_first_crop = True
+
+    # Async write pool for I/O-bound file saves (crop audio + stem audio)
+    write_futures: List[Future] = []
+    write_pool = ThreadPoolExecutor(max_workers=4)
+    stem_names_loaded = list(preloaded_stems.keys())
+
+    def _write_crop_and_stems(audio_data, path, src_path, meta, folder, base_path,
+                              s_start, s_end, s_sr, s_fade, s_meta, s_preloaded):
+        """Write crop audio + all stem crops (runs in thread pool)."""
+        write_audio_preserving_format(audio_data, s_sr, path, source_path=src_path,
+                                      metadata=meta)
+        crop_all_stems(folder, base_path, s_start, s_end, s_sr, s_fade,
+                       metadata=s_meta, preloaded_stems=s_preloaded)
 
     while current_start_sec + 1.0 < duration_sec:
         target_start_sample = int(current_start_sec * sr)
@@ -983,17 +1080,13 @@ def create_crops_for_file(folder_path: Path,
         track_name = full_mix_path.parent.name
         crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
-        write_audio_preserving_format(crop_audio, sr, crop_path, source_path=full_mix_path,
-                                      metadata=id3_metadata)
 
-        # Crop stems at the same positions (also with ID3 metadata)
-        cropped_stems = crop_all_stems(
+        # Schedule async writes: full mix crop + stem crops
+        write_futures.append(write_pool.submit(
+            _write_crop_and_stems, crop_audio, crop_path, full_mix_path, id3_metadata,
             folder_path, crop_path,
-            actual_start_sample, actual_end_sample, sr, fade_len,
-            metadata=id3_metadata
-        )
-        if cropped_stems:
-            logger.debug(f"Cropped {len(cropped_stems)} stems for crop {crop_count}")
+            actual_start_sample, actual_end_sample, sr, fade_len, id3_metadata, preloaded_stems
+        ))
 
         # Metadata
         actual_start_sec = float(actual_start_sample / sr)
@@ -1038,8 +1131,8 @@ def create_crops_for_file(folder_path: Path,
             "samples": int(actual_end_sample - actual_start_sample),
             "downbeats": int(num_downbeats),
             "source": str(full_mix_path.name),
-            "has_stems": len(cropped_stems) > 0,
-            "stem_names": list(cropped_stems.keys())
+            "has_stems": len(preloaded_stems) > 0,
+            "stem_names": stem_names_loaded
         }
 
         # Save JSON metadata
@@ -1074,6 +1167,19 @@ def create_crops_for_file(folder_path: Path,
             current_start_sec = next_start
         else:
             current_start_sec = next_target
+
+    # Wait for all async audio writes to complete
+    write_errors = 0
+    for future in write_futures:
+        try:
+            future.result()
+        except Exception as e:
+            logger.warning(f"Async write failed: {e}")
+            write_errors += 1
+    write_pool.shutdown(wait=False)
+
+    if write_errors:
+        logger.warning(f"{write_errors} crop writes failed")
 
     # Batch write all .INFO files (much faster on HDD than individual writes)
     if pending_info_writes:

@@ -45,29 +45,18 @@ Usage:
 
 # CRITICAL: Set PyTorch/ROCm config BEFORE torch is imported
 import os
+import sys
 from pathlib import Path
 
-# Memory management for ROCm (expandable_segments not supported on HIP)
-os.environ.setdefault('PYTORCH_ALLOC_CONF', 'garbage_collection_threshold:0.8')
-# AMD ROCm optimizations
-os.environ.setdefault('FLASH_ATTENTION_TRITON_AMD_ENABLE', 'TRUE')
-os.environ.setdefault('PYTORCH_TUNABLEOP_ENABLED', '1')
-os.environ.setdefault('PYTORCH_TUNABLEOP_TUNING', '0')  # Use existing tuned kernels
-os.environ.setdefault('OMP_NUM_THREADS', '8')
-os.environ.setdefault('MIOPEN_FIND_MODE', '2')  # Fast MIOpen kernel selection (avoid long delays)
-
-# Set tunableop results file if it exists
-_tunableop_file = Path(__file__).parent.parent.parent / 'tunableop_results00.csv'
-if _tunableop_file.exists():
-    os.environ.setdefault('PYTORCH_TUNABLEOP_FILENAME', str(_tunableop_file))
-
-import logging
-from typing import Dict, List, Optional
-import sys
-import json
-import unicodedata
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
+
+import json
+import logging
+import unicodedata
+from typing import Dict, List, Optional
 
 from core.file_utils import find_organized_folders, get_stem_files
 from core.json_handler import safe_update, get_info_path

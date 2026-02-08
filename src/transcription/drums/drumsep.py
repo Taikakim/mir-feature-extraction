@@ -9,15 +9,19 @@ It interfaces with the external DrumSep model located in `repos/drumsep/model`.
 
 import logging
 import sys
-import torch
 from pathlib import Path
 from typing import Optional, List
 from unittest.mock import patch
 
 # Add project root to path if needed
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Set ROCm environment before torch imports
+from src.core.rocm_env import setup_rocm_env
+setup_rocm_env()
+
+import torch
 
 from src.core.common import PROJECT_ROOT
 

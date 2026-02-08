@@ -26,37 +26,20 @@ from typing import Dict, List, Optional
 import time
 
 # --- 1. ROCm Environment Setup (Must be before torch import) ---
-def setup_rocm_environment():
-    """Configure ROCm-specific environment variables for optimal performance."""
-    # MIOpen cache persistence
-    if 'MIOPEN_USER_DB_PATH' not in os.environ:
-        cache = Path.home() / '.cache' / 'miopen'
-        cache.mkdir(parents=True, exist_ok=True)
-        os.environ['MIOPEN_USER_DB_PATH'] = str(cache)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from core.rocm_env import setup_rocm_env
+setup_rocm_env()
 
-    # Optimize memory for high-res audio (Reduce fragmentation)
-    # Note: expandable_segments not supported on ROCm/HIP
-    if 'PYTORCH_ALLOC_CONF' not in os.environ:
-        os.environ['PYTORCH_ALLOC_CONF'] = 'garbage_collection_threshold:0.8,max_split_size_mb:128'
-
-    # Fast MIOpen kernel selection (avoid long delays)
-    if 'MIOPEN_FIND_MODE' not in os.environ:
-        os.environ['MIOPEN_FIND_MODE'] = '2'
-
-    # Enable TunableOp if available
-    if 'PYTORCH_TUNABLEOP_ENABLED' not in os.environ:
-        os.environ['PYTORCH_TUNABLEOP_ENABLED'] = '1'
-        os.environ['PYTORCH_TUNABLEOP_TUNING'] = '0'  # Use existing kernels
-
-
-setup_rocm_environment()
+# MIOpen cache persistence (Demucs-specific: avoid re-finding kernels per run)
+if 'MIOPEN_USER_DB_PATH' not in os.environ:
+    _miopen_cache = Path.home() / '.cache' / 'miopen'
+    _miopen_cache.mkdir(parents=True, exist_ok=True)
+    os.environ['MIOPEN_USER_DB_PATH'] = str(_miopen_cache)
 
 import torch
 import torch.nn.functional as F
 import torchaudio
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.common import DEMUCS_CONFIG, DEMUCS_STEMS, setup_logging
 from core.file_utils import find_organized_folders
 from preprocessing.demucs_sep import OUTPUT_FORMATS, convert_to_ogg, convert_wav_to_flac_soundfile
