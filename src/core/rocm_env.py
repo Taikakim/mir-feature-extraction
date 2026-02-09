@@ -28,7 +28,22 @@ def _rocm_clean_exit():
     triggers an assertion failure during normal process exit when GPU was used.
     This atexit handler flushes outputs and calls os._exit(0) to skip the
     broken C++ destructor chain.
+
+    TunableOp results are flushed manually before os._exit() since the
+    normal C++ destructor that writes them would be skipped.
     """
+    try:
+        import torch
+        if torch.cuda.tunable.is_enabled():
+            torch.cuda.tunable.write_file()
+    except Exception:
+        pass
+    try:
+        # Reset terminal state (fixes "keyboard not working" after run)
+        os.system('stty sane')
+    except Exception:
+        pass
+    
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)

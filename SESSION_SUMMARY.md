@@ -1,148 +1,110 @@
-# Session Summary - 2026-02-06
+# Session Summary - 2026-02-09 / 2026-02-10
 
-## What We Accomplished
+## What Was Accomplished
 
-### 1. BS-RoFormer Integration & Bug Fixes
+### 1. Audio Captioning Benchmark (Full Rewrite)
 
-**BS-RoFormer as Alternative to Demucs:**
-- Integrated BS-RoFormer as drop-in replacement for Demucs stem separation
-- Config option: `source_separation.backend: bs_roformer` or `demucs`
-- Fixed multiple bugs from initial implementation:
-  - `model` → `separator` variable naming
-  - `audio_folder` → `folder_path` parameter
-  - Moved `atexit.register()` after class definition
-  - Removed duplicate function definitions and imports
+`tests/poc_lmm_revise.py` was rewritten from a 282-line hardcoded prototype into a ~1200-line multi-phase audio captioning benchmark with CLI interface, YAML config loading, and JSON output.
 
-**Stem Check Improvements:**
-- Both backends now check for existing stems in ALL formats (.wav, .flac, .mp3)
-- Previously Demucs only checked configured output format
-- Prevents re-processing when stems created by different backend
+**5 Phases:**
+- **Phase 1:** Baseline Music Flamingo (GGUF via subprocess) -- 5 prompts from YAML config
+- **Phase 2:** Genre-Hint Music Flamingo -- same prompts with genre context appended
+- **Phase 3:** LLM Revision (llama-cpp-python) -- Qwen3-14B, GPT-OSS-20B, Granite-tiny revise Phase 1 captions
+- **Phase 4a/b/c:** Qwen2.5-Omni-7B-AWQ -- direct audio captioning (baseline, genre-hint, revision sub-phases)
+- **Phase 5:** Ensemble Rewrite -- LLMs synthesize Flamingo + Qwen Omni outputs into final captions
 
-### 2. Audio Duration Tracking
-
-**New Pipeline Statistics:**
-- Added `total_audio_duration` tracking to `PipelineStats`
-- Added `realtime_factor` property (audio seconds / processing seconds)
-- Pipeline calculates total audio duration at startup
-- Summary shows processing speed relative to realtime:
-  ```
-  Audio processed: 12.5 min (751s)
-  Processing speed: 0.53x realtime
-    (Took 1.9 seconds of wall time per second of audio)
-  ```
-
-### 3. Music Flamingo Model Detection Fix
-
-**imatrix File Exclusion:**
-- Fixed model auto-detection to exclude `imatrix` calibration files
-- Now picks largest GGUF model file (highest quality quantization)
-- Applied to all 4 locations:
-  - `music_flamingo_llama_cpp.py` (3 places)
-  - `pipeline.py`
-  - `feature_extractor.py`
-
-### 4. HDD I/O Optimization
-
-**RAM Prefetcher (`src/core/audio_prefetcher.py`):**
-- New `AudioPrefetcher` class loads audio into RAM in background thread
-- New `PathPrefetcher` warms OS disk cache for path-based APIs
-- Integrated into Music Flamingo pass with buffer_size=8
-- Hides HDD seek latency while GPU processes current file
-
-**Batch .INFO Writes:**
-- Pre-load source .INFO once before crop loop (was N redundant reads)
-- New `batch_write_info()` function for efficient multi-file writes
-- Uses atomic writes (temp file + rename) for crash safety
-- Groups all .INFO writes at end of folder processing
-
-### 5. Stats Counter Fixes
-
-**crops_processed Counter:**
-- AudioBox and Music Flamingo passes weren't incrementing counter
-- Fixed: now properly tracks processed/failed crops
-- Summary correctly shows "Crops analyzed: N" instead of 0
-
-## Commits This Session
-
-| Hash | Description |
-|------|-------------|
-| `de8ca35` | Fix Demucs stem check to detect all formats |
-| `5cc89c1` | Use atomic writes in batch_write_info for safety |
-| `a5ee1e0` | Optimize crop .INFO writes for HDD performance |
-| `5235ba0` | Add audio prefetcher for HDD I/O optimization |
-| `27c9637` | Fix crops_processed counter in batched pipeline passes |
-| `4578e53` | Fix Music Flamingo model detection in music_flamingo_llama_cpp.py |
-| `d1078a7` | Add audio duration tracking and fix Music Flamingo model detection |
-| `55872f3` | Fix duplicate code block and Music Flamingo init in pipeline.py |
-| `a1b5229` | Fix undefined audio_folder variable in save_stem |
-| `8224c2f` | Fix: Error when config input is null instead of defaulting to '.' |
-| `5e22b5a` | Fix folder discovery to skip crops, repos, and test output |
-| `e2ceab9` | Fix BS-RoFormer model variable and exclude .venv from folder scan |
-| `950f4b7` | Update BS-RoFormer docs with pipeline integration details |
-| `e3ba4f3` | Integrate BS-RoFormer into master pipeline with bug fixes |
-| `79248de` | Update documentation for 2026-02-06 session |
-
-## New Files
-
-| File | Purpose |
-|------|---------|
-| `src/core/audio_prefetcher.py` | RAM prefetcher for HDD I/O optimization |
-| `src/preprocessing/bs_roformer_sep.py` | BS-RoFormer stem separation wrapper |
-| `docs/BS_ROFORMER_OPTIMIZATION.md` | BS-RoFormer walkthrough and optimization guide |
-
-## Configuration Changes
-
-**New Source Separation Options:**
-```yaml
-source_separation:
-  backend: bs_roformer  # or 'demucs'
-
-  bs_roformer:
-    model_name: jarredou-BS-ROFO-SW-Fixed-drums
-    model_dir: /home/kim/Projects/mir/models/bs-roformer
-    batch_size: 1
-    device: cuda
+**CLI:**
+```bash
+python tests/poc_lmm_revise.py /path/to/audio.flac --genre "Goa Trance, Psytrance" -v
+python tests/poc_lmm_revise.py /path/to/audio.flac --skip-phase3 --skip-phase4
+python tests/poc_lmm_revise.py /path/to/audio.flac --info /path/to/file.INFO
 ```
 
-**Overwrite Control:**
-```yaml
-overwrite:
-  source_separation: false  # Skip if stems exist (any format)
-  demucs: false            # Backwards compatibility alias
-```
+### 2. Genre Extraction Chain
+
+Implemented multi-source genre lookup with priority:
+1. `--genre` CLI flag (comma-separated)
+2. `--info` or co-located `.INFO` file (`genres` + `musicbrainz_genres` keys)
+3. ID3/Vorbis tags via mutagen (easy mode + manual TCON fallback)
+4. Fallback: `["Unknown"]`
+
+### 3. Qwen2.5-Omni-7B-AWQ Integration
+
+Integrated as Phase 4 using the official low-VRAM approach:
+- Monkey-patches `transformers.models.qwen2_5_omni.modeling_qwen2_5_omni` with RoPE-fixed modeling file
+- Loads via `BaseAWQForCausalLM.from_quantized()` (autoawq)
+- Manual device placement for embeddings, rotary, visual, audio_tower
+- Uses `Qwen2_5OmniProcessor` + `process_mm_info()` + `apply_chat_template()`
+- Text-only output (`return_audio=False`), ~6GB VRAM
+
+**Requirements:** autoawq, qwen-omni-utils, low-VRAM modeling file in `repos/Qwen2.5-Omni/low-VRAM-mode/`
+
+### 4. Model-Specific Chat Templates (Fixed)
+
+Applied each model's documented chat format instead of relying on ad-hoc output filtering:
+
+**GPT-OSS-20B (Harmony format):**
+- `<|start|>role<|message|>content<|end|>` token structure
+- `<|channel|>final` to bypass reasoning and get direct answers
+- `Reasoning: low` in system prompt
+- Stop tokens: `<|end|>`, `<|return|>`
+
+**Granite 4.0 H Tiny:**
+- `<|start_of_role|>role<|end_of_role|>content<|end_of_text|>` format
+- Documented default system prompt prefix
+- Context limited to 4096, batch 256 (small model)
+
+**Qwen3-14B (ChatML):**
+- `<|im_start|>role\ncontent<|im_end|>` format
+- Proper ChatML for ensemble (replaced broken `/no_think` prefix)
+- Sampling: `top_p=0.8`, `top_k=20`, `min_p=0.0`
+
+### 5. Inference Optimizations
+
+- **4-bit KV Cache:** `GGML_TYPE_Q4_0` for Qwen3-14B and GPT-OSS-20B in both Phase 3 and Phase 5 (reduces VRAM/bandwidth)
+- **32k Context Window:** For large models with 2048 batch size
+- **Context Reset:** `llm.reset()` between prompts to prevent KV cache pollution and `llama_decode` crashes
+- **Per-prompt try/except:** Granite failures on individual prompts don't kill the whole model's run
+- **Caption truncation:** 300 chars for Granite, 2000 for larger models
+
+### 6. Output Cleaning
+
+- `strip_thinking_traces()` handles `<think>`/`</think>` (Qwen3), GPT-OSS Harmony tokens, reasoning preambles
+- GPT-OSS artifacts: "Let's write:", "The problem is...", parenthetical instructions
+- Noise filter: Lines that are mostly dots/question marks/ellipsis
+- All captions normalized via `normalize_music_flamingo_text()` for T5 compatibility
+
+## Key Bugs Fixed
+
+| Bug | Cause | Fix |
+|-----|-------|-----|
+| Phase 3 crash: `'str' object cannot be interpreted as an integer` | `type_k="q4_0"` (string) | Changed to `type_k=GGML_TYPE_Q4_0` (integer 2) |
+| Phase 3 Granite `llama_decode returned -1` | Context overflow | Reduced n_ctx to 4096, caption truncation, `llm.reset()` per prompt |
+| Phase 5 Qwen3 blank captions for "technical"/"brief" | `strip_thinking_traces` filtered lines starting with "the track is a" | Removed over-aggressive prefix filters |
+| GPT-OSS template `\\n` literal | f-string escaping | String concatenation without f-prefix for static parts |
+| Phase 4 garbage output (initial attempt) | Wrong processor/loading method | Rewrote to use official AWQ low-VRAM approach |
 
 ## Key Files Modified
 
-- `src/master_pipeline.py` - BS-RoFormer integration, duration tracking, stem checks
-- `src/pipeline.py` - Music Flamingo fixes, prefetcher integration, stats counters
-- `src/core/pipeline_stats.py` - Added total_audio_duration and realtime_factor
-- `src/core/json_handler.py` - Added batch_write_info() function
-- `src/tools/create_training_crops.py` - Optimized .INFO writes for HDD
-- `src/classification/music_flamingo_llama_cpp.py` - imatrix exclusion fix
-- `src/crops/feature_extractor.py` - imatrix exclusion fix
+- `tests/poc_lmm_revise.py` -- Complete rewrite + iterative fixes
+- (Templates, data structures, CLI, genre extraction, 5 phases all in this file)
 
-## Performance Improvements
+## VRAM Sequence (16GB card)
 
-| Optimization | Impact |
-|--------------|--------|
-| Pre-load source .INFO | Eliminates N redundant file reads per folder |
-| Batch .INFO writes | Groups writes at end (better HDD seek pattern) |
-| RAM prefetcher | Hides HDD latency during GPU processing |
-| All-format stem check | Prevents unnecessary re-separation |
+```
+Phase 1 (MF subprocess ~9GB) -> exits cleanly
+Phase 2 (MF subprocess ~9GB) -> exits cleanly
+Phase 3a (Qwen3-14B ~10GB)   -> del + cleanup
+Phase 3b (GPT-OSS-20B ~8GB)  -> del + cleanup
+Phase 3c (Granite-tiny ~3GB)  -> del + cleanup
+Phase 4  (Qwen-Omni AWQ ~6GB, shared across 4a/b/c) -> del + cleanup
+Phase 5a (Qwen3-14B ~10GB)   -> del + cleanup
+Phase 5b (GPT-OSS-20B ~8GB)  -> del + cleanup
+Phase 5c (Granite-tiny ~3GB)  -> del + cleanup
+```
 
-## Verified Behavior
+## Known Limitations
 
-1. **Stage 2 Stem Separation:**
-   - Checks for existing stems in .wav, .flac, .mp3
-   - Skips if all 4 stems found (drums, bass, other, vocals)
-   - Works with both BS-RoFormer and Demucs backends
-
-2. **Music Flamingo Model Detection:**
-   - Excludes mmproj and imatrix files
-   - Selects largest GGUF file (highest quality)
-   - Works in all entry points (CLI, batch, pipeline)
-
-3. **Stats Tracking:**
-   - Total audio duration calculated at startup
-   - Realtime factor shown in summary
-   - crops_processed counter accurate for all passes
+- **GPT-OSS-20B MXFP4:** Aggressive quantization degrades instruction-following; may still produce reasoning artifacts despite Harmony template
+- **Granite-tiny:** Very small context and model size; truncates input captions and produces abbreviated output
+- **Qwen2.5-Omni deps:** Requires specific autoawq + qwen-omni-utils + patched modeling file; not yet integrated into main requirements.txt

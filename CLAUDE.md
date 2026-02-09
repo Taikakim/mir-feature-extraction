@@ -27,6 +27,10 @@ python src/classification/music_flamingo_transformers.py "/path/to/audio.flac" -
 # Stem separation
 python src/preprocessing/demucs_sep_optimized.py /path/to/audio/ --batch
 python src/preprocessing/bs_roformer_sep.py /path/to/audio/ --batch
+
+# Audio captioning benchmark (5 phases: Flamingo, Genre-Hint, LLM Revision, Qwen-Omni, Ensemble)
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Goa Trance, Psytrance" -v
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --info /path/to/file.INFO --skip-phase4
 ```
 
 ## ROCm Environment
@@ -39,7 +43,7 @@ Every GPU-using entry point must call `setup_rocm_env()` BEFORE `import torch`. 
 Key settings:
 - `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE` -- Triton FA2 for AMD
 - `PYTORCH_TUNABLEOP_ENABLED=1`, `TUNING=0` -- use pre-tuned GEMM kernels
-- `PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512`
+- `PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512` (PYTORCH_HIP_ALLOC_CONF deprecated in ROCm 7.2)
 - `HIP_FORCE_DEV_KERNARG=1` -- prevent CPU/GPU desync
 - `TORCH_COMPILE=0` -- buggy with Flash Attention on RDNA
 - `MIOPEN_FIND_MODE` NOT set by default (causes freezes on some workloads)
@@ -58,8 +62,10 @@ src/
   transcription/    # drums/adtof.py, drums/drumsep.py
   tools/            # track_metadata_lookup, create_training_crops, statistical_analysis
   crops/            # pipeline.py, feature_extractor.py
+tests/              # poc_lmm_revise.py (audio captioning benchmark)
 config/             # master_pipeline.yaml (all settings)
-repos/              # External repos (timbral_models, llama.cpp, ADTOF-pytorch, etc.)
+models/             # GGUF models (Qwen3-14B, GPT-OSS-20B, Granite-tiny, Music Flamingo)
+repos/              # External repos (timbral_models, llama.cpp, ADTOF-pytorch, Qwen2.5-Omni, etc.)
 ```
 
 ### Output Structure
@@ -83,8 +89,21 @@ Track Name/
 | GGUF (recommended) | ~4s/track | 5-9 GB | `music_flamingo_gguf.py` |
 | Transformers | ~28s/prompt | 13 GB | `music_flamingo_transformers.py` |
 
-5 prompt types: `full`, `technical`, `genre_mood`, `instrumentation`, `structure`.
+5 prompt types: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`.
 All output normalized for T5 tokenizer via `core.text_utils.normalize_music_flamingo_text()`.
+
+### Audio Captioning Benchmark
+
+`tests/poc_lmm_revise.py` -- multi-phase comparison of captioning approaches:
+- **Phase 1-2:** Music Flamingo GGUF (baseline + genre-hint)
+- **Phase 3:** LLM revision via llama-cpp-python (Qwen3-14B, GPT-OSS-20B, Granite-tiny)
+- **Phase 4a/b/c:** Qwen2.5-Omni-7B-AWQ direct audio captioning (baseline, genre-hint, revision)
+- **Phase 5:** Ensemble rewrite (LLMs synthesize Flamingo + Qwen Omni)
+
+GGUF models live in `models/LMM/`. Qwen2.5-Omni low-VRAM files in `repos/Qwen2.5-Omni/low-VRAM-mode/`.
+
+Chat templates: Qwen3 = ChatML, GPT-OSS = Harmony, Granite = start_of_role/end_of_role.
+KV cache: `GGML_TYPE_Q4_0` (integer, not string) for large models.
 
 ## Development Rules
 
@@ -135,3 +154,7 @@ Load GPU models once for batch processing, not per-file.
 - **numba/numpy:** Pin numpy <2.4. Use soundfile instead of librosa for duration.
 - **MIOPEN_FIND_MODE:** Can cause freezes. Not set by default; override in shell if needed.
 - **`music_flamingo_llama_cpp.py`** is DEPRECATED (broken — never passes audio). All code uses `music_flamingo.py` (CLI subprocess) instead.
+- **llama-cpp-python `type_k`/`type_v`:** Must be integers (`GGML_TYPE_Q4_0`), not strings like `"q4_0"`.
+- **GPT-OSS-20B MXFP4:** Aggressive quantization degrades instruction-following quality.
+- **Granite-tiny context:** Limited to 4096 tokens. Truncate input captions to 300 chars.
+- **Qwen2.5-Omni AWQ:** Requires patched low-VRAM modeling file (RoPE fix for transformers 5.x) in `repos/Qwen2.5-Omni/low-VRAM-mode/`.

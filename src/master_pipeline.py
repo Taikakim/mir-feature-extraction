@@ -73,6 +73,15 @@ from core.pipeline_workers import (
 logger = logging.getLogger(__name__)
 
 
+def _flush_tunableop_results():
+    """Flush TunableOp tuning results to CSV so they survive crashes."""
+    try:
+        import torch
+        if torch.cuda.tunable.is_enabled():
+            torch.cuda.tunable.write_file()
+    except Exception:
+        pass
+
 
 @dataclass
 class MasterPipelineConfig:
@@ -459,11 +468,12 @@ class MasterPipeline:
         if not skip_to_crop_analysis:
             self._run_metadata_extraction()
 
-        # Stage 2: Full Track Analysis
+        # Stage 2: Full Track Analysis (GPU: BS-RoFormer, Demucs)
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
         elif not self.config.skip_track_analysis:
             self._run_track_analysis()
+            _flush_tunableop_results()
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
@@ -475,9 +485,10 @@ class MasterPipeline:
         else:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED"))
 
-        # Stage 4: Crop Analysis
+        # Stage 4: Crop Analysis (GPU: Audiobox, Essentia)
         if not self.config.skip_crop_analysis:
             self._run_crop_analysis()
+            _flush_tunableop_results()
         else:
             logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
 

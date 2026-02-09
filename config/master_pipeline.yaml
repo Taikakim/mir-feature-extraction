@@ -217,7 +217,7 @@ rocm:
   # TunableOp — pre-tuned GEMM kernels for RDNA4
   # TUNING=1 generates new kernels (slow first run); 0 reuses cached results
   PYTORCH_TUNABLEOP_ENABLED: "1"
-  PYTORCH_TUNABLEOP_TUNING: "0"
+  PYTORCH_TUNABLEOP_TUNING: "1"
   PYTORCH_TUNABLEOP_VERBOSE: "1"
 
   # HIP memory management
@@ -247,4 +247,4 @@ processing:
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
   feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
-  essentia_workers: 3            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
+  essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

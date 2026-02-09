@@ -11,8 +11,9 @@ Comprehensive music feature extraction pipeline for conditioning **Stable Audio 
 3. **Extracts** rhythm, loudness, spectral, harmonic, timbral, and aesthetic features
 4. **Classifies** genre (400), mood (56), instruments (40) via Essentia
 5. **Generates** 5 AI text descriptions via Music Flamingo (8B params)
-6. **Transcribes** drums to MIDI via ADTOF-PyTorch
-7. **Creates** beat-aligned training crops with feature migration
+6. **Benchmarks** caption quality across Music Flamingo, LLM revision, and Qwen2.5-Omni
+7. **Transcribes** drums to MIDI via ADTOF-PyTorch
+8. **Creates** beat-aligned training crops with feature migration
 
 All features are saved to `.INFO` JSON files with atomic writes (never overwrites).
 
@@ -20,7 +21,7 @@ All features are saved to `.INFO` JSON files with atomic writes (never overwrite
 
 - **Python** 3.12+
 - **GPU:** AMD ROCm 7.2+ (tested on RX 9070 XT / RDNA4) or NVIDIA CUDA
-- **VRAM:** 5-13 GB depending on workload
+- **VRAM:** 5-13 GB depending on workload (up to 10 GB for captioning benchmark)
 - **OS:** Linux (tested on Arch)
 
 ### Key Dependencies
@@ -31,6 +32,8 @@ All features are saved to `.INFO` JSON files with atomic writes (never overwrite
 | Demucs / BS-RoFormer | Stem separation |
 | Essentia + TensorFlow | Classification (genre/mood/instrument) |
 | llama.cpp (HIP build) | Music Flamingo GGUF inference |
+| llama-cpp-python | LLM revision (captioning benchmark) |
+| autoawq, qwen-omni-utils | Qwen2.5-Omni-7B-AWQ (captioning benchmark) |
 | librosa, soundfile | Audio I/O and analysis |
 | timbral_models | Audio Commons perceptual features (patched, cloned via setup script) |
 
@@ -49,6 +52,9 @@ python src/test_all_features.py "/path/to/audio.flac"
 
 # Full pipeline (config-driven)
 python src/master_pipeline.py --config config/master_pipeline.yaml
+
+# Audio captioning benchmark (compare Flamingo, LLM revision, Qwen-Omni)
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Goa Trance" -v
 ```
 
 ## ROCm GPU Environment
@@ -61,7 +67,7 @@ Key variables (set automatically, shell exports override):
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_TUNING=0
-export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
 export HIP_FORCE_DEV_KERNARG=1
 export TORCH_COMPILE=0   # buggy with FA on RDNA
 ```
@@ -86,7 +92,9 @@ src/
   transcription/  # MIDI drum transcription (ADTOF, Drumsep)
   tools/          # Metadata lookup, training crops, statistics
   crops/          # Crop-specific pipeline and feature extraction
+tests/            # Benchmarks (audio captioning comparison)
 config/           # YAML pipeline configuration
+models/           # GGUF model files (Qwen3, GPT-OSS, Granite, Music Flamingo)
 repos/            # External repos (cloned by setup script, not tracked)
 ```
 

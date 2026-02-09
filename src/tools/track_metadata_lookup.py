@@ -60,14 +60,30 @@ except ImportError:
     MUSICBRAINZ_AVAILABLE = False
     logger.warning("musicbrainzngs not installed. Run: pip install musicbrainzngs")
 
+try:
+    import mutagen
+    from mutagen import File
+    MUTAGEN_AVAILABLE = True
+except ImportError:
+    MUTAGEN_AVAILABLE = False
+    logger.warning("mutagen not installed. Run: pip install mutagen")
+
+try:
+    import acoustid
+    ACOUSTID_AVAILABLE = True
+except ImportError:
+    ACOUSTID_AVAILABLE = False
+    logger.debug("pyacoustid not installed.")
+
+
 
 def init_spotify() -> Optional[object]:
     """Initialize Spotify client."""
     if not SPOTIFY_AVAILABLE:
         return None
     
-    client_id = os.environ.get("SPOTIFY_CLIENT_ID")
-    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    client_id = os.environ.get("SPOTIFY_CLIENT_ID", "").strip('"\'')
+    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip('"\'')
     
     if not client_id or not client_secret:
         logger.warning("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET not set")
@@ -77,10 +93,99 @@ def init_spotify() -> Optional[object]:
         return spotipy.Spotify(auth_manager=SpotifyClientCredentials(
             client_id=client_id,
             client_secret=client_secret
-        ))
+        ), requests_timeout=10, retries=3)
     except Exception as e:
         logger.error(f"Failed to initialize Spotify: {e}")
         return None
+
+
+def get_id3_tags(audio_path: Path) -> Optional[Dict]:
+    """Read ID3 tags from audio file using mutagen."""
+    if not MUTAGEN_AVAILABLE:
+        return None
+    
+    try:
+        # easy=True simplifies access to common tags
+        audio = File(audio_path, easy=True)
+        if not audio:
+            return None
+        
+        # Get first value for each tag
+        artist = audio.get('artist', [None])[0]
+        title = audio.get('title', [None])[0]
+        album = audio.get('album', [None])[0]
+        date = audio.get('date', [None])[0]
+        
+        if artist and title:
+            return {
+                'artist': artist,
+                'track': title,
+                'album': album,
+                'release_year': int(str(date)[:4]) if date else None
+            }
+    except Exception as e:
+        logger.debug(f"Failed to read ID3 tags from {audio_path}: {e}")
+    
+    return None
+
+
+def fingerprint_track(audio_path: Path) -> Optional[Dict]:
+    """
+    Identify track using audio fingerprinting (AcoustID).
+    Requires 'fpcalc' installed and ACOUSTID_API_KEY env var.
+    """
+    if not ACOUSTID_AVAILABLE:
+        return None
+
+    api_key = os.environ.get('ACOUSTID_API_KEY')
+    if not api_key:
+        logger.debug("ACOUSTID_API_KEY not set, skipping fingerprinting")
+        return None
+
+    try:
+        import subprocess
+        
+        # Generate fingerprint with fpcalc
+        cmd = ['fpcalc', '-json', str(audio_path)]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            logger.debug(f"fpcalc failed: {result.stderr}")
+            return None
+
+        import json
+        fp_data = json.loads(result.stdout)
+        fingerprint = fp_data.get('fingerprint')
+        duration = fp_data.get('duration')
+
+        if not fingerprint:
+            return None
+
+        # Look up
+        results = acoustid.lookup(api_key, fingerprint, duration)
+        
+        if results and results.get('results'):
+            # Parse best result
+            for result in results['results']:
+                if 'recordings' in result:
+                    rec = result['recordings'][0]
+                    artist_credit = rec.get('artists', [{}])[0]
+                    return {
+                        'artist': artist_credit.get('name', 'Unknown'),
+                        'track': rec.get('title', 'Unknown'),
+                        'musicbrainz_id': rec.get('id'),
+                        'acoustid_id': result.get('id')
+                    }
+                    
+    except Exception as e:
+        logger.debug(f"Fingerprinting failed: {e}")
+    
+    return None
 
 
 def search_spotify(sp, track_name: str, current_artist: str = None, 
@@ -111,8 +216,18 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
         clean_name = clean_name.strip()
         
         # Search by track name
-        query = f'track:"{clean_name}"'
-        results = sp.search(q=query, type='track', limit=5)
+        if current_artist and current_artist.lower() not in ['various artists', 'various', 'va', 'unknown', '']:
+            query = f'track:"{clean_name}" artist:"{current_artist}"'
+            results = sp.search(q=query, type='track', limit=5)
+            
+            # If specific search fails, fall back to just track name
+            if not results['tracks']['items']:
+                logger.debug(f"Specific search failed, trying track only: {clean_name}")
+                query = f'track:"{clean_name}"'
+                results = sp.search(q=query, type='track', limit=5)
+        else:
+            query = f'track:"{clean_name}"'
+            results = sp.search(q=query, type='track', limit=5)
         
         if not results['tracks']['items']:
             # Try simpler search
@@ -367,7 +482,7 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
     artist, album, track_name = extract_track_name(folder_name)
     
     # Check if this is a "Various Artists" track that needs renaming
-    needs_rename = artist.lower() in ['various artists', 'various', 'va', '']
+    needs_rename = artist.lower() in ['various artists', 'various', 'va', 'unknown', '']
     
     # Check if we need to look up release_year even if artist is correct
     needs_year = False
@@ -398,13 +513,54 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
     
     # Use existing artist as hint if not "Various Artists"
     artist_hint = artist if not needs_rename else None
+
+    # Strategy 1: Check ID3 tags in the audio file
+    id3_metadata = None
+    try:
+        stems = get_stem_files(folder, include_full_mix=True)
+        if 'full_mix' in stems:
+            id3_metadata = get_id3_tags(stems['full_mix'])
+            if id3_metadata:
+                logger.debug(f"Found ID3 tags: {id3_metadata['artist']} - {id3_metadata['track']}")
+    except Exception as e:
+        logger.debug(f"Error checking ID3 tags: {e}")
+
+    # Determine what to look up
+    search_artist = artist_hint
+    search_track = track_name
+
+    # If ID3 tags found, use them (PRIORITY)
+    if id3_metadata:
+        search_artist = id3_metadata['artist']
+        search_track = id3_metadata['track']
+        needs_rename = True # Always check if folder name matches tags
     
-    logger.info(f"Looking up: {artist + ' - ' if artist_hint else ''}{track_name}")
+    logger.info(f"Looking up: {search_artist + ' - ' if search_artist else ''}{search_track}")
     
-    # Look up metadata
-    result = lookup_track(track_name, artist_hint=artist_hint, sp=sp,
+    # Strategy 2: Text Search (Spotify/MusicBrainz)
+    result = lookup_track(search_track, artist_hint=search_artist, sp=sp,
                           fetch_audio_features_flag=fetch_audio_features)
     
+    # Strategy 3: AcoustID Fingerprinting (Fallback)
+    if not result and ACOUSTID_AVAILABLE:
+        logger.info("  Text search failed, trying AcoustID fingerprinting...")
+        try:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' in stems:
+                fp_result = fingerprint_track(stems['full_mix'])
+                if fp_result:
+                    logger.info(f"  AcoustID found: {fp_result['artist']} - {fp_result['track']}")
+                    # Use the fingerprint result to do a clean lookup (to get Spotify ID etc.)
+                    # checking if we trust it enough to overwrite
+                    result = lookup_track(fp_result['track'], artist_hint=fp_result['artist'], sp=sp,
+                                          fetch_audio_features_flag=fetch_audio_features)
+                    if not result:
+                         # If lookup fails even with correct names, just use what we have
+                         result = fp_result
+                         result['found_via'] = 'acoustid'
+        except Exception as e:
+             logger.debug(f"Fingerprinting fallback failed: {e}")
+
     if not result:
         logger.warning(f"No match found for: {track_name}")
         return None

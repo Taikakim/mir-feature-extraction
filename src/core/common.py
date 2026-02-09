@@ -17,6 +17,14 @@ Constants:
 from pathlib import Path
 from typing import Dict, Any
 import logging
+import os
+
+try:
+    from dotenv import load_dotenv
+    # Load environment variables from .env file
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip loading .env
 
 # Project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent

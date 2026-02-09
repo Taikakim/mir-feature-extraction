@@ -1,7 +1,7 @@
 # MIR Feature Extraction Framework - User Manual
 
-**Version:** 1.6
-**Last Updated:** 2026-02-07
+**Version:** 1.7
+**Last Updated:** 2026-02-10
 **For:** Stable Audio Tools conditioning data preparation
 
 ---
@@ -15,15 +15,16 @@
 5. [Feature Extraction Workflows](#feature-extraction-workflows)
 6. [Module Reference](#module-reference)
 7. [Music Flamingo AI Descriptions](#music-flamingo-ai-descriptions)
-8. [Output Files](#output-files)
-9. [Troubleshooting](#troubleshooting)
-10. [Advanced Usage](#advanced-usage)
+8. [Audio Captioning Benchmark](#audio-captioning-benchmark)
+9. [Output Files](#output-files)
+10. [Troubleshooting](#troubleshooting)
+11. [Advanced Usage](#advanced-usage)
 
 ---
 
 ## Overview
 
-This framework extracts 78 numeric MIR features + 5 natural language AI descriptions from audio files for use as conditioning data in Stable Audio Tools training. It processes full mixes and separated stems to capture rhythm, harmony, timbre, loudness, aesthetic characteristics, and AI-generated music descriptions.
+This framework extracts 97+ numeric MIR features, 496 classification labels, and 5 natural language AI descriptions from audio files for use as conditioning data in Stable Audio Tools training. It processes full mixes and separated stems to capture rhythm, harmony, timbre, loudness, aesthetic characteristics, and AI-generated music descriptions.
 
 ### What It Does
 
@@ -96,8 +97,7 @@ export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_TUNING=0           # 1 = generate new kernels (slow first run)
 export PYTORCH_TUNABLEOP_VERBOSE=1
-export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
-export PYTORCH_HIP_FREE_MEMORY_THRESHOLD_MB=256
+export PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
 export HIP_FORCE_DEV_KERNARG=1              # prevent CPU/GPU desync on AMD
 export TORCH_COMPILE=0                       # buggy with Flash Attention on RDNA
 export OMP_NUM_THREADS=8
@@ -758,11 +758,11 @@ Each method generates 5 text descriptions saved to the `.INFO` file:
 
 | Key | Description |
 |-----|-------------|
-| `music_flamingo_full` | Comprehensive description (genre, tempo, key, instruments, mood) |
-| `music_flamingo_technical` | Technical analysis (tempo, key, chords, dynamics, performance) |
-| `music_flamingo_genre_mood` | Genre classification and emotional character |
+| `music_flamingo_brief` | One-sentence description of the track |
+| `music_flamingo_technical` | Production aesthetics, textures, and dynamics |
+| `music_flamingo_genre_mood_inst` | Genre, mood, and instrumentation summary |
 | `music_flamingo_instrumentation` | Instruments and sounds present |
-| `music_flamingo_structure` | Arrangement and structure analysis |
+| `music_flamingo_very_brief` | Ultra-short description (under six words) |
 
 ### Text Normalization
 
@@ -772,6 +772,84 @@ All Music Flamingo output is automatically normalized for T5 tokenizer compatibi
 - Non-breaking hyphens (‑) → regular hyphens (-)
 
 - Non-breaking hyphens (‑) → regular hyphens (-)
+
+---
+
+## Audio Captioning Benchmark
+
+`tests/poc_lmm_revise.py` compares multiple approaches to generating training-quality audio captions. It runs 5 phases sequentially, loading and unloading models to fit in 16GB VRAM.
+
+### Quick Start
+
+```bash
+# Full benchmark with genre override
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Goa Trance, Psytrance" -v
+
+# Use .INFO file for genres (auto-reads genres + musicbrainz_genres keys)
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --info /path/to/file.INFO
+
+# Skip specific phases
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --skip-phase3 --skip-phase4 --skip-phase5
+
+# Just Music Flamingo comparison (Phases 1-2 only)
+python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Techno" --skip-phase3 --skip-phase4 --skip-phase5
+```
+
+### Phases
+
+| Phase | Model | What It Does | VRAM |
+|-------|-------|-------------|------|
+| 1 | Music Flamingo GGUF | Baseline captions (5 prompts from YAML) | ~9 GB |
+| 2 | Music Flamingo GGUF | Same prompts with genre context appended | ~9 GB |
+| 3 | Qwen3-14B / GPT-OSS-20B / Granite-tiny | Revise Phase 1 captions with correct genre | 3-10 GB |
+| 4a | Qwen2.5-Omni-7B-AWQ | Direct audio captioning (baseline) | ~6 GB |
+| 4b | Qwen2.5-Omni-7B-AWQ | Direct audio captioning (genre-hint) | ~6 GB |
+| 4c | Qwen2.5-Omni-7B-AWQ | Revise Flamingo captions while listening | ~6 GB |
+| 5 | Qwen3-14B / GPT-OSS-20B / Granite-tiny | Ensemble: synthesize Flamingo + Omni outputs | 3-10 GB |
+
+### CLI Options
+
+```
+python tests/poc_lmm_revise.py /path/to/audio.flac [options]
+
+--config PATH        YAML config (default: config/master_pipeline.yaml)
+--output PATH        Output JSON (default: poc_benchmark_results.json)
+--genre "genres"     Override genre (comma-separated)
+--info PATH          Path to .INFO file for genre lookup
+--flamingo-model     IQ3_M | Q6_K | Q8_0 (default Q8_0)
+--skip-phase1        Skip baseline Music Flamingo
+--skip-phase2        Skip genre-hint Music Flamingo
+--skip-phase3        Skip LLM revision
+--skip-phase4        Skip Qwen2.5-Omni
+--skip-phase5        Skip ensemble rewrite
+-v / --verbose       Show raw model outputs and timing details
+```
+
+### Genre Extraction Priority
+
+The benchmark resolves genres in this order:
+1. `--genre` CLI flag (comma-separated)
+2. `--info` file or co-located `.INFO` file (`genres` + `musicbrainz_genres` keys)
+3. ID3 / Vorbis tags from the audio file (via mutagen)
+4. Fallback: `["Unknown"]`
+
+### Output
+
+- **Console:** Comparison table grouped by prompt type, showing time/tokens/tok-per-sec/caption preview
+- **JSON:** Full results saved to `--output` path with metadata, all captions, and timing
+
+### Additional Dependencies
+
+Phase 3 requires `llama-cpp-python`. Phase 4 requires `autoawq`, `qwen-omni-utils`, and the patched low-VRAM modeling file in `repos/Qwen2.5-Omni/low-VRAM-mode/`. Phase 4 will gracefully skip if dependencies are missing.
+
+### GGUF Models
+
+LLM revision models are stored in `models/LMM/`:
+- `Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf`
+- `gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf`
+- `granite-4.0-h-tiny-GGUF/granite-4.0-h-tiny-Q8_0.gguf`
+
+---
 
 ### Audio Commons Timbral Features
 
@@ -1109,7 +1187,7 @@ position (0-1, only for cropped training data - not yet implemented)
 release_year, release_date, artists, label, genres, popularity, spotify_id, musicbrainz_id, spotify_acousticness, spotify_energy, spotify_instrumentalness, spotify_time_signature, spotify_valence, spotify_danceability, spotify_speechiness, spotify_liveness, spotify_key, spotify_mode, spotify_tempo
 
 **Music Flamingo AI Descriptions (5 Text):**
-music_flamingo_full, music_flamingo_technical, music_flamingo_genre_mood, music_flamingo_instrumentation, music_flamingo_structure
+music_flamingo_brief, music_flamingo_technical, music_flamingo_genre_mood_inst, music_flamingo_instrumentation, music_flamingo_very_brief
 
 ---
 
@@ -1137,6 +1215,6 @@ For issues, bugs, or feature requests:
 
 ---
 
-**Framework Version:** 1.6
+**Framework Version:** 1.7
 **Compatible with:** Stable Audio Tools (Stability AI)
-**Last Updated:** 2026-02-07
+**Last Updated:** 2026-02-10
