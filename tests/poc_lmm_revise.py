@@ -210,7 +210,7 @@ def run_music_flamingo_phase(
             genre_str = ", ".join(genres)
             prompt_text = (
                 f"{prompt_text} Assume that what you understand about the genre "
-                f"of the audio is wrong, actually it is/are {genre_str}"
+                f"of the audio is wrong, actually it is/are {genre_str}. The clip is a short crop from the full mix of the track, in this case only ten seconds. "
             )
 
         if verbose:
@@ -245,72 +245,27 @@ def run_music_flamingo_phase(
 # ---------------------------------------------------------------------------
 
 def strip_thinking_traces(text: str) -> str:
-    """Remove thinking/reasoning traces from LLM output."""
-    # Strict splitting on </think> if present (Qwen3/DeepSeek style)
+    """Remove thinking/reasoning traces from LLM output.
+
+    Relies on proper chat templates and sufficient max_tokens so models
+    produce structurally clean output.  Only strips known structural
+    tokens -- no ad-hoc line-level filtering that risks eating valid captions.
+    """
+    # 1. Qwen3 / DeepSeek: extract text after </think>
     if "</think>" in text:
         parts = text.split("</think>")
-        if len(parts) > 1 and len(parts[-1].strip()) > 5:
-            text = parts[-1].strip()
-        else:
-            # If nothing after </think>, maybe the model didn't finish or put the answer inside (unlikely but possible)
-            # For now, if empty after think, we might just have to return empty or try to find a caption inside
-            pass 
+        after = parts[-1].strip()
+        if len(after) > 5:
+            text = after
 
-    # Remove <think>...</think> blocks if they remain
+    # 2. Clean up any remaining think tags
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"</think>", "", text)
-    text = re.sub(r"<think>", "", text)
-    
-    # Strip GPT-OSS special tokens
-    text = text.replace("<|end|>", "").replace("<|return|>", "").replace("<|message|>", "").replace("<|channel|>", "")
+    text = re.sub(r"</?think>", "", text)
 
-    # GPT-OSS / CoT style extraction
-    # Look for "Let's write:" "Here is the revised caption:" etc.
-    match = re.search(r"(?:Here is|Let's write|Let's craft|Revised description|Revised caption)[:\.]\s*(?:\"|')?(.*?)(?:\"|')?$", text, re.DOTALL | re.IGNORECASE)
-    if match:
-        potential_caption = match.group(1).strip()
-        if len(potential_caption) > 10:
-            text = potential_caption
-
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        low = line.strip().lower()
-        if any(
-            low.startswith(p)
-            for p in [
-                "we need to", "we have to", "we must", "we should",
-                "the content", "the original", "the user", "the task",
-                "revise this", "the caption", "the revised",
-                "</analysis>", "<analysis>", "so we", "that matches",
-                "(must be", "(keep it", "sure, here", "here is the",
-                "the prompt", "the problem", "energetic ...?", "deep ... ...?",
-            ]
-        ):
-            continue
-        if line.strip().startswith("(") and line.strip().endswith(")"): # Remove parenthetical instructions
-             continue
-        
-        # specific fix for GPT-OSS-20B artifacts like "The track ... ?" or "The prompt says:"
-        if re.match(r"^The (track|prompt|problem|user).*\?$", line.strip()):
-            continue
-
-        # Skip lines that are mostly dots, question marks, or ellipsis
-        stripped = line.strip()
-        noise_chars = stripped.replace(".", "").replace("?", "").replace("!", "").replace(" ", "").replace("-", "").replace(",", "")
-        if not noise_chars or (len(noise_chars) < len(stripped) * 0.3 and len(stripped) > 5):
-            continue
-        cleaned.append(line)
-
-    text = "\n".join(cleaned).strip()
-
-    # Try to extract caption if text starts with common starts but has garbage before
-    # Only if we haven't found a clean start already
-    if not text.startswith(("This track", "The track", "A ", "An ", "New", "Techno",
-                            "The music", "Electronic", "Dark", "High", "Driving")):
-        match = re.search(r"((?:This|The|A|An|High|Dark|Driving|Electronic)\s[^.]*\.)", text)
-        if match:
-            text = match.group(1)
+    # 3. Strip GPT-OSS Harmony / Granite structural tokens
+    for tok in ("<|end|>", "<|return|>", "<|message|>", "<|channel|>",
+                "<|start|>", "<|end_of_text|>", "<|start_of_role|>", "<|end_of_role|>"):
+        text = text.replace(tok, "")
 
     return text.strip()
 
@@ -319,13 +274,11 @@ def format_revision_prompt(template: str, original_caption: str, genres: List[st
     """Format prompt for LLM caption revision."""
     genres_str = ", ".join(genres)
     instruction = (
-        f"The real genre of this cropped clip presenting a ten second part of the trace is/are {genres_str}, the genres in the caption to be revised are probably wrong.\n"
-        f"Revise this music caption to use the correct genres.\n"
-        f"The original caption may have incorrect genre labels. "
-        f"Keep the revised caption between 10-30 words.\n"
-        f"Do not reference numerical values directly. "
-        f"Do NOT output any thinking, reasoning, or preamble. "
-        f"Output ONLY the final revised caption.\n\n"
+        f"The real genre of this cropped clip presenting a ten second part of the trace is/are {genres_str}, the genres earlier in the caption to be revised are probably wrong.\n"
+        f"Revise this short cropped section from a full mix of the track to use these correct genres.\n"
+        f"The original caption may have incorrect genre labels."
+        f"Id there is confusion, it is enough to know that you can use {genres_str} to describe this clip in place of any other genre names "
+        f"Keep the revised caption between 30-50 words.\n"
         f"Original caption ({field_name}):\n{original_caption}\n\n"
         f"Revised caption:"
     )
@@ -342,7 +295,7 @@ def format_revision_prompt(template: str, original_caption: str, genres: List[st
     elif template == "granite":
         return (
             "<|start_of_role|>system<|end_of_role|>"
-            "You are a helpful assistant. Please ensure responses are professional, accurate, and safe. "
+            "You are a helpful assistant. Please ensure responses are professional and accurate"
             "You revise music captions with correct genres. Output only the revised caption."
             "<|end_of_text|>\n"
             f"<|start_of_role|>user<|end_of_role|>{instruction}<|end_of_text|>\n"
@@ -433,7 +386,7 @@ def run_llm_revision_phase(
             llm = Llama(**init_kwargs)
 
             # Granite has tiny context — truncate more aggressively
-            max_caption_chars = 300 if template == "granite" else 2000 # Increased for larger context
+            max_caption_chars = 512 if template == "granite" else 2048 # Increased for larger context
 
             for prompt_name, baseline in baseline_results.items():
                 if not baseline.caption:
@@ -456,17 +409,16 @@ def run_llm_revision_phase(
                     pt0 = time.monotonic()
                     # Qwen3 non-thinking mode recommended params
                     gen_kwargs = {
-                        "max_tokens": 512, # Increased to allow for thinking/CoT
+                        "max_tokens": 512,
                         "stop": stop_tokens,
                         "echo": False,
                         "temperature": 0.7,
                     }
                     if template == "qwen3":
-                        gen_kwargs.update({"top_p": 0.8, "top_k": 20, "min_p": 0.0})
+                        gen_kwargs.update({"max_tokens": 1024, "top_p": 0.8, "top_k": 20, "min_p": 0.0})
                     elif template == "gpt_oss":
-                        # OpenAI/GPT-OSS recommended settings
                         gen_kwargs.update({
-                            "max_tokens": 1024, # Larger context for reasoning models
+                            "max_tokens": 1024,
                             "temperature": 1.0,
                             "top_p": 1.0,
                             "top_k": 0,
@@ -666,8 +618,8 @@ def run_qwen_omni_phase(
         hint_prompts = {}
         for k, v in prompts.items():
             hint_prompts[k] = (
-                f"The real genre of this cropped clip presenting a ten second part of the trace is/are {genres_str}, "
-                f"the genres in the audio might be subtle.\n{v}"
+                f"The real genre of this cropped clip presenting a ten second part of the full track is/are {genres_str}, "
+                f"the genres in the audio might be subtly wrong, so use these genres instead.\n{v}"
             )
         phases_to_run.append({
             "name": "Phase 4b: Qwen Omni (Genre-Hint)",
@@ -879,7 +831,8 @@ def format_ensemble_prompt(template: str, flamingo_caption: str, qwen_caption: s
         f"2. {qwen_caption}\n\n"
         f"Combine the salient points from both into a single, accurate, and descriptive caption. "
         f"Prioritize details that align with the known genre ({genres_str}). "
-        f"Keep the result between 20-50 words. Do not hallucinate instruments not mentioned.\n\n"
+        f"Keep the result between 30-60 words. Do not hallucinate instruments not mentioned.\n\n"
+        f"If there is any confusion, it is enough to remember that the genres to be used in the final revised prompt are {genres_str}"
         f"Revised Description:"
     )
 
@@ -894,7 +847,7 @@ def format_ensemble_prompt(template: str, flamingo_caption: str, qwen_caption: s
     elif template == "granite":
         return (
             "<|start_of_role|>system<|end_of_role|>"
-            "You are a helpful assistant. Please ensure responses are professional, accurate, and safe. "
+            "You are a helpful assistant. Please ensure responses are professional and accurate."
             "You are an expert music editor. Synthesize multiple descriptions into one."
             "<|end_of_text|>\n"
             f"<|start_of_role|>user<|end_of_role|>{instruction}<|end_of_text|>\n"
@@ -961,7 +914,7 @@ def run_ensemble_rewrite_phase(
 
         try:
             is_large_model = template in ["qwen3", "gpt_oss"]
-            n_ctx = 4096 if template == "granite" else 12288
+            n_ctx = 4096 if template == "granite" else 32768
             n_batch = 256 if template == "granite" else 512
 
             init_kwargs = {
@@ -1004,7 +957,7 @@ def run_ensemble_rewrite_phase(
                     "temperature": 0.7,
                 }
                 if template == "qwen3":
-                    gen_kwargs.update({"top_p": 0.8, "top_k": 20, "min_p": 0.0})
+                    gen_kwargs.update({"max_tokens": 1024, "top_p": 0.8, "top_k": 20, "min_p": 0.0})
                 elif template == "gpt_oss":
                     gen_kwargs.update({
                         "max_tokens": 1024,
