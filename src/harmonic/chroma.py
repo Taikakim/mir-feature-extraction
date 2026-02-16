@@ -95,7 +95,7 @@ def mix_harmonic_stems(folder_path: Path) -> Tuple[Optional[np.ndarray], int, bo
     # Fallback to full_mix
     if 'full_mix' in stems:
         logger.warning("Harmonic stems not available, using full_mix (quality may be compromised by drums)")
-        audio, sr = sf.read(str(stems['full_mix']), dtype='float32')
+        audio, sr = read_audio(str(stems['full_mix']), dtype='float32')
         if len(audio.shape) > 1:
             audio = np.mean(audio, axis=1)
         return audio, sr, False
@@ -346,7 +346,7 @@ def batch_analyze_chroma(root_directory: str | Path,
                     stats['used_full_mix'] += 1
             else:
                 # Direct analysis of full_mix
-                audio, sr = sf.read(str(stems['full_mix']), dtype='float32')
+                audio, sr = read_audio(str(stems['full_mix']), dtype='float32')
                 if len(audio.shape) > 1:
                     audio = np.mean(audio, axis=1)
                 avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)

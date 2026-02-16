@@ -425,8 +425,14 @@ class MasterPipeline:
             try:
                 info = sf.info(str(full_mix_files[0]))
                 total_duration += info.duration
-            except Exception as e:
-                logger.debug(f"Could not get duration for {folder.name}: {e}")
+            except Exception:
+                # Fallback for m4a/aac via pydub
+                try:
+                    from pydub.utils import mediainfo
+                    mi = mediainfo(str(full_mix_files[0]))
+                    total_duration += float(mi.get('duration', 0))
+                except Exception as e:
+                    logger.debug(f"Could not get duration for {folder.name}: {e}")
 
         return total_duration
 
@@ -1144,7 +1150,12 @@ class MasterPipeline:
                     try:
                         local_duration = sf_mod.info(str(stems['full_mix'])).duration
                     except Exception:
-                        pass
+                        try:
+                            from pydub.utils import mediainfo
+                            mi = mediainfo(str(stems['full_mix']))
+                            local_duration = float(mi.get('duration', 0)) or None
+                        except Exception:
+                            pass
                     info_path = get_info_path(stems['full_mix'])
                     existing = read_info(info_path) if info_path.exists() else {}
                     known_year = existing.get('release_year') or existing.get('track_metadata_year')

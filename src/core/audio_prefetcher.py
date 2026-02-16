@@ -99,15 +99,15 @@ class AudioPrefetcher:
 
     def _load_files(self):
         """Background thread: load files into the queue."""
-        import soundfile as sf
+        from core.file_utils import read_audio
 
         for file_path in self.file_list:
             if self._stop_event.is_set():
                 break
 
             try:
-                # Load audio file
-                audio, sr = sf.read(str(file_path), dtype='float32')
+                # Load audio file (supports m4a/aac via pydub fallback)
+                audio, sr = read_audio(str(file_path), dtype='float32')
 
                 # Convert to mono if requested
                 if self.mono and audio.ndim > 1:
