@@ -19,7 +19,7 @@ python src/test_all_features.py "/path/to/audio.flac"
 python src/test_all_features.py "/path/to/audio.flac" --skip-flamingo --skip-demucs
 
 # Music Flamingo GGUF (fast, recommended)
-python src/classification/music_flamingo_gguf.py "/path/to/audio.flac" --model Q6_K
+python src/classification/music_flamingo.py "/path/to/audio.flac" --model Q6_K
 
 # Music Flamingo Transformers (slower, native Python)
 python src/classification/music_flamingo_transformers.py "/path/to/audio.flac" --flash-attention
@@ -28,9 +28,8 @@ python src/classification/music_flamingo_transformers.py "/path/to/audio.flac" -
 python src/preprocessing/demucs_sep_optimized.py /path/to/audio/ --batch
 python src/preprocessing/bs_roformer_sep.py /path/to/audio/ --batch
 
-# Audio captioning benchmark (5 phases: Flamingo, Genre-Hint, LLM Revision, Qwen-Omni, Ensemble)
+# Audio captioning benchmark
 python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Goa Trance, Psytrance" -v
-python tests/poc_lmm_revise.py "/path/to/audio.flac" --info /path/to/file.INFO --skip-phase4
 ```
 
 ## ROCm Environment
@@ -52,13 +51,13 @@ Key settings:
 
 ```
 src/
-  core/             # rocm_env, json_handler (safe_update), file_utils, text_utils, batch_utils
-  preprocessing/    # file_organizer, demucs_sep_optimized, bs_roformer_sep, loudness
+  core/             # rocm_env, json_handler (safe_update), file_utils (read_audio), text_utils, batch_utils
+  preprocessing/    # file_organizer, demucs_sep_optimized, bs_roformer_sep
   rhythm/           # beat_grid, bpm, onsets, syncopation, complexity, per_stem_rhythm
   spectral/         # spectral_features, multiband_rms
   harmonic/         # chroma, per_stem_harmonic
-  timbral/          # audio_commons (8 features), audiobox_aesthetics (4 features)
-  classification/   # essentia_features, music_flamingo_gguf, music_flamingo_transformers
+  timbral/          # audio_commons (8 features), audiobox_aesthetics (4 features), loudness
+  classification/   # essentia_features, music_flamingo, music_flamingo_transformers
   transcription/    # drums/adtof.py, drums/drumsep.py
   tools/            # track_metadata_lookup, create_training_crops, statistical_analysis
   crops/            # pipeline.py, feature_extractor.py
@@ -82,28 +81,15 @@ Track Name/
   Track Name.DOWNBEATS    # Downbeat timestamps
 ```
 
-### Music Flamingo
+### Key Subsystems
 
-| Method | Speed | VRAM | File |
-|--------|-------|------|------|
-| GGUF (recommended) | ~4s/track | 5-9 GB | `music_flamingo_gguf.py` |
-| Transformers | ~28s/prompt | 13 GB | `music_flamingo_transformers.py` |
+**Audio I/O:** `core.file_utils.read_audio()` handles all formats including m4a/AAC via pydub/ffmpeg fallback. Use this instead of `sf.read()` directly.
 
-5 prompt types: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`.
-All output normalized for T5 tokenizer via `core.text_utils.normalize_music_flamingo_text()`.
+**Music Flamingo:** `music_flamingo.py` (GGUF via llama-mtmd-cli, ~4s/track) or `music_flamingo_transformers.py` (native Python, ~28s/prompt). `music_flamingo_llama_cpp.py` is DEPRECATED. 5 prompt types: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`. Output normalized via `core.text_utils.normalize_music_flamingo_text()`.
 
-### Audio Captioning Benchmark
+**Metadata Lookup:** `tools/track_metadata_lookup.py` searches Spotify and MusicBrainz. Candidates scored by duration match (0.5), year match (0.3), artist similarity (0.2). Controlled by `metadata.use_spotify` and `metadata.use_musicbrainz` config flags.
 
-`tests/poc_lmm_revise.py` -- multi-phase comparison of captioning approaches:
-- **Phase 1-2:** Music Flamingo GGUF (baseline + genre-hint)
-- **Phase 3:** LLM revision via llama-cpp-python (Qwen3-14B, GPT-OSS-20B, Granite-tiny)
-- **Phase 4a/b/c:** Qwen2.5-Omni-7B-AWQ direct audio captioning (baseline, genre-hint, revision)
-- **Phase 5:** Ensemble rewrite (LLMs synthesize Flamingo + Qwen Omni)
-
-GGUF models live in `models/LMM/`. Qwen2.5-Omni low-VRAM files in `repos/Qwen2.5-Omni/low-VRAM-mode/`.
-
-Chat templates: Qwen3 = ChatML, GPT-OSS = Harmony, Granite = start_of_role/end_of_role.
-KV cache: `GGML_TYPE_Q4_0` (integer, not string) for large models.
+**Captioning Benchmark:** `tests/poc_lmm_revise.py` -- 5-phase comparison (Flamingo baseline, genre-hint, LLM revision, Qwen2.5-Omni, ensemble). GGUF models in `models/LMM/`. Chat templates: Qwen3=ChatML, GPT-OSS=Harmony, Granite=start_of_role/end_of_role. llama-cpp-python `type_k`/`type_v` must be integers not strings.
 
 ## Development Rules
 
@@ -135,12 +121,9 @@ setup_rocm_env()
 import torch  # now safe
 ```
 
-### Model loading
+### Other rules
 
-Load GPU models once for batch processing, not per-file.
-
-### File organization
-
+- Load GPU models once for batch processing, not per-file
 - Never move original files -- copy to output dir
 - Never delete `.INFO` files -- only merge
 - Use `FileLock` for concurrent batch processing
@@ -148,13 +131,8 @@ Load GPU models once for batch processing, not per-file.
 ## Known Issues
 
 - **INT8/INT4 quantization:** Non-functional on ROCm. Use bfloat16 + Flash Attention 2.
-- **torch.compile + Demucs:** Fails on ROCm (complex FFT dtype errors). Use SDPA patch instead.
-- **torch.compile + FA:** Buggy on RDNA. Keep `TORCH_COMPILE=0`.
-- **GGUF POOL_1D warning:** Cosmetic on RDNA4 (gfx1201). Model works correctly.
-- **numba/numpy:** Pin numpy <2.4. Use soundfile instead of librosa for duration.
-- **MIOPEN_FIND_MODE:** Can cause freezes. Not set by default; override in shell if needed.
-- **`music_flamingo_llama_cpp.py`** is DEPRECATED (broken — never passes audio). All code uses `music_flamingo.py` (CLI subprocess) instead.
-- **llama-cpp-python `type_k`/`type_v`:** Must be integers (`GGML_TYPE_Q4_0`), not strings like `"q4_0"`.
-- **GPT-OSS-20B MXFP4:** Aggressive quantization degrades instruction-following quality.
-- **Granite-tiny context:** Limited to 4096 tokens. Truncate input captions to 300 chars.
-- **Qwen2.5-Omni AWQ:** Requires patched low-VRAM modeling file (RoPE fix for transformers 5.x) in `repos/Qwen2.5-Omni/low-VRAM-mode/`.
+- **torch.compile:** Fails with Demucs (complex FFT), Music Flamingo (Dynamo+accelerate), and FA on RDNA. Keep `TORCH_COMPILE=0`.
+- **GGUF POOL_1D warning:** Cosmetic on RDNA4 (gfx1201).
+- **numba/numpy:** Pin numpy <2.4.
+- **Qwen2.5-Omni AWQ:** Requires patched modeling file (RoPE fix) in `repos/Qwen2.5-Omni/low-VRAM-mode/`.
+- **Madmom:** CPU-only (NumPy/Cython neural networks, no GPU support).

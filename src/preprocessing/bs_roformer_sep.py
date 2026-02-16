@@ -688,6 +688,8 @@ def separate_organized_folder(
     
     if input_ext in LOSSLESS_EXTS:
         target_ext = '.flac'
+    elif input_ext in {'.m4a', '.aac'}:
+        target_ext = '.mp3'  # m4a/aac causes issues with downstream analysis tools
     else:
         target_ext = input_ext # e.g., .mp3
         

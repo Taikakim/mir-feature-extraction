@@ -74,7 +74,8 @@ export TORCH_COMPILE=0   # buggy with FA on RDNA
 
 ## Documentation
 
-- **[USER_MANUAL.md](USER_MANUAL.md)** - Full usage guide, module reference, troubleshooting
+- **[USER_MANUAL.md](USER_MANUAL.md)** - Usage guide, module reference, troubleshooting
+- **[MUSIC_FLAMINGO.md](MUSIC_FLAMINGO.md)** - Music Flamingo setup and usage
 - **[FEATURES_STATUS.md](FEATURES_STATUS.md)** - Feature implementation tracker
 - **[config/master_pipeline.yaml](config/master_pipeline.yaml)** - All pipeline and ROCm settings
 
