@@ -560,8 +560,8 @@ def lookup_track(track_name: str, artist_hint: str = None, sp=None,
                 result = mb_result
                 logger.debug(f"Found via MusicBrainz: {result['artist']} - {result['track']}")
 
-        # Rate limiting for MusicBrainz (max 1 req/sec)
-        time.sleep(0.5)
+        # Rate limiting for MusicBrainz (max 1 req/sec per their guidelines)
+        time.sleep(1.0)
 
     return result
 
