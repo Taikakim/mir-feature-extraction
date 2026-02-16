@@ -1765,6 +1765,7 @@ class MasterPipeline:
                 batch=self.config.batch_feature_extraction,
                 crops=True,
                 overwrite=self.config.overwrite,  # Global overwrite passed to sub-pipeline
+                per_feature_overwrite=self.config.per_feature_overwrite,
                 feature_workers=self.config.feature_workers,
                 essentia_workers=self.config.essentia_workers,  # TensorFlow-safe limit
                 skip_organize=True,

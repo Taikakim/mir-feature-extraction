@@ -76,11 +76,18 @@ class PipelineConfig:
     skip_audiobox: bool = False
     skip_midi: bool = False
 
+    # Per-feature overwrite (from master pipeline YAML overwrite section)
+    per_feature_overwrite: Dict[str, bool] = field(default_factory=dict)
+
     # Flamingo options
     flamingo_model: str = "Q8_0"
     flamingo_context_size: int = 1024  # LLM context window size
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)
+
+    def should_overwrite(self, feature: str) -> bool:
+        """Check if a specific feature should be overwritten."""
+        return self.overwrite or self.per_feature_overwrite.get(feature, False)
 
     @property
     def working_dir(self) -> Path:
@@ -103,6 +110,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     crop_path, config_dict, existing_keys = args
     results = {}
     overwrite = config_dict.get('overwrite', False)
+    per_feature_ow = config_dict.get('per_feature_overwrite', {})
 
     # Define all output keys for each feature type (check ALL, not just one)
     LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
@@ -112,9 +120,10 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
                    'booming', 'reverberation', 'sharpness', 'warmth']
 
-    def _needs_processing(keys):
+    def _needs_processing(keys, feature_name=None):
         """Check if ANY of the keys are missing (needs processing)."""
-        return overwrite or any(k not in existing_keys for k in keys)
+        feat_ow = overwrite or (feature_name and per_feature_ow.get(feature_name, False))
+        return feat_ow or any(k not in existing_keys for k in keys)
 
     try:
         # Re-import locally for worker process
@@ -162,8 +171,9 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         # =====================================================================
 
         # Loudness - check ALL output keys
+        STEM_LOUDNESS_KEYS = [f'lufs_{s}' for s in preloaded_stems]
         if not config_dict.get('skip_loudness'):
-            if _needs_processing(LOUDNESS_KEYS):
+            if _needs_processing(LOUDNESS_KEYS, 'loudness'):
                 try:
                     results.update(analyze_file_loudness(crop_path, audio=crop_audio, sr=crop_sr))
                     for stem_name, (s_audio, s_sr) in preloaded_stems.items():
@@ -171,10 +181,20 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             stems[stem_name], audio=s_audio, sr=s_sr)
                         results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
                 except Exception: pass
+            elif preloaded_stems:
+                # Main loudness done, but check if any stem loudness is missing
+                for stem_name in preloaded_stems:
+                    if f'lufs_{stem_name}' not in existing_keys:
+                        try:
+                            s_audio, s_sr = preloaded_stems[stem_name]
+                            stem_loud = analyze_file_loudness(
+                                stems[stem_name], audio=s_audio, sr=s_sr)
+                            results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                        except Exception: pass
 
         # BPM - use pre-loaded mono audio
         if not config_dict.get('skip_rhythm'):
-            if overwrite or 'bpm' not in existing_keys:
+            if overwrite or per_feature_ow.get('rhythm', False) or 'bpm' not in existing_keys:
                 try:
                     tempo, _ = librosa.beat.beat_track(y=crop_mono, sr=crop_sr)
                     bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
@@ -183,12 +203,12 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
         # Spectral - pass pre-loaded mono audio
         if not config_dict.get('skip_spectral'):
-            if _needs_processing(SPECTRAL_KEYS):
+            if _needs_processing(SPECTRAL_KEYS, 'spectral'):
                 try:
                     results.update(analyze_spectral_features(
                         crop_path, audio=crop_mono, sr=crop_sr))
                 except Exception: pass
-            if _needs_processing(MULTIBAND_KEYS):
+            if _needs_processing(MULTIBAND_KEYS, 'spectral'):
                 try:
                     results.update(analyze_multiband_rms(
                         crop_path, audio=crop_mono, sr=crop_sr))
@@ -196,7 +216,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
         # Chroma - use 'other' stem if available (pre-loaded), else crop mono
         if not config_dict.get('skip_harmonic'):
-            if _needs_processing(CHROMA_KEYS):
+            if _needs_processing(CHROMA_KEYS, 'harmonic'):
                 try:
                     if 'other' in preloaded_stems:
                         other_audio, other_sr = preloaded_stems['other']
@@ -213,7 +233,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
         # Timbral - pass pre-loaded audio (writes to /dev/shm RAM disk internally)
         if timbral_func and not config_dict.get('skip_timbral'):
-            if _needs_processing(TIMBRAL_KEYS):
+            if _needs_processing(TIMBRAL_KEYS, 'timbral'):
                 try:
                     results.update(timbral_func(
                         crop_path, audio=crop_audio, sr=crop_sr))
@@ -582,7 +602,7 @@ class Pipeline:
 
                 # Loudness
                 if not self.config.skip_loudness:
-                    if self.config.overwrite or 'lufs' not in existing:
+                    if self.config.should_overwrite('loudness') or 'lufs' not in existing:
                         try:
                             results.update(analyze_file_loudness(
                                 crop_path, audio=crop_audio, sr=crop_sr))
@@ -594,10 +614,24 @@ class Pipeline:
                             logger.info("  ✓ Loudness")
                         except Exception as e:
                             logger.warning(f"  Loudness failed: {e}")
+                    elif preloaded_stems:
+                        # Main loudness done, but check if any stem loudness is missing
+                        for stem_name in preloaded_stems:
+                            if f'lufs_{stem_name}' not in existing:
+                                try:
+                                    s_audio, s_sr = preloaded_stems[stem_name]
+                                    stem_loud = analyze_file_loudness(
+                                        stems[stem_name], audio=s_audio, sr=s_sr)
+                                    results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                                    results[f'lra_{stem_name}'] = stem_loud.get('lra')
+                                except Exception as e:
+                                    logger.warning(f"  Stem loudness ({stem_name}) failed: {e}")
+                        if any(f'lufs_{s}' in results for s in preloaded_stems):
+                            logger.info("  ✓ Stem Loudness (partial)")
 
                 # BPM (if not already in crop .INFO from cropping)
                 if not self.config.skip_rhythm:
-                    if self.config.overwrite or 'bpm' not in existing:
+                    if self.config.should_overwrite('rhythm') or 'bpm' not in existing:
                         try:
                             tempo, _ = librosa.beat.beat_track(y=crop_mono, sr=crop_sr)
                             bpm_value = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
@@ -608,7 +642,7 @@ class Pipeline:
 
                 # Spectral
                 if not self.config.skip_spectral:
-                    if self.config.overwrite or 'spectral_flatness' not in existing:
+                    if self.config.should_overwrite('spectral') or 'spectral_flatness' not in existing:
                         try:
                             results.update(analyze_spectral_features(
                                 crop_path, audio=crop_mono, sr=crop_sr))
@@ -616,7 +650,7 @@ class Pipeline:
                         except Exception as e:
                             logger.warning(f"  Spectral failed: {e}")
 
-                    if self.config.overwrite or 'rms_energy_bass' not in existing:
+                    if self.config.should_overwrite('spectral') or 'rms_energy_bass' not in existing:
                         try:
                             results.update(analyze_multiband_rms(
                                 crop_path, audio=crop_mono, sr=crop_sr))
@@ -626,7 +660,7 @@ class Pipeline:
 
                 # Chroma
                 if not self.config.skip_harmonic:
-                    if self.config.overwrite or 'chroma_0' not in existing:
+                    if self.config.should_overwrite('harmonic') or 'chroma_0' not in existing:
                         try:
                             if 'other' in preloaded_stems:
                                 other_audio, other_sr = preloaded_stems['other']
@@ -643,7 +677,7 @@ class Pipeline:
                             logger.warning(f"  Chroma failed: {e}")
 
                 # Timbral (uses /dev/shm RAM disk internally when audio provided)
-                if timbral_func and (self.config.overwrite or 'brightness' not in existing):
+                if timbral_func and (self.config.should_overwrite('timbral') or 'brightness' not in existing):
                     try:
                         results.update(timbral_func(
                             crop_path, audio=crop_audio, sr=crop_sr))
@@ -652,7 +686,7 @@ class Pipeline:
                         logger.warning(f"  Timbral failed: {e}")
 
                 # Essentia
-                if essentia_func and (self.config.overwrite or 'danceability' not in existing):
+                if essentia_func and (self.config.should_overwrite('essentia') or 'danceability' not in existing):
                     try:
                         results.update(essentia_func(crop_path))
                         logger.info("  ✓ Essentia")
@@ -660,7 +694,7 @@ class Pipeline:
                         logger.warning(f"  Essentia failed: {e}")
 
                 # AudioBox
-                if audiobox_func and (self.config.overwrite or 'content_enjoyment' not in existing):
+                if audiobox_func and (self.config.should_overwrite('audiobox') or 'content_enjoyment' not in existing):
                     try:
                         results.update(audiobox_func(crop_path))
                         logger.info("  ✓ AudioBox")
@@ -668,7 +702,7 @@ class Pipeline:
                         logger.warning(f"  AudioBox failed: {e}")
 
                 # Music Flamingo
-                if flamingo_analyzer and (self.config.overwrite or 'music_flamingo_model' not in existing):
+                if flamingo_analyzer and (self.config.should_overwrite('flamingo') or 'music_flamingo_model' not in existing):
                     try:
                         # Determine active prompts map
                         prompts_map = self.config.flamingo_prompts
@@ -678,7 +712,7 @@ class Pipeline:
 
                         for prompt_type, prompt_text in prompts_map.items():
                             key = f'music_flamingo_{prompt_type}'
-                            if self.config.overwrite or key not in existing:
+                            if self.config.should_overwrite('flamingo') or key not in existing:
                                 # Pass the custom prompt text (if from config) or let analyzer use default
                                 p_text = prompt_text if self.config.flamingo_prompts else None
                                 results[key] = flamingo_analyzer.analyze(
@@ -791,6 +825,7 @@ class Pipeline:
                 'skip_harmonic': self.config.skip_harmonic,
                 'skip_timbral': self.config.skip_timbral,
                 'overwrite': self.config.overwrite,
+                'per_feature_overwrite': self.config.per_feature_overwrite,
             }
             
             tasks = []
@@ -805,12 +840,13 @@ class Pipeline:
                 if self.config.overwrite:
                     needs_run = True
                 else:
-                    # Check each feature type - run if ANY is missing
-                    if not self.config.skip_loudness and 'lufs' not in existing_keys: needs_run = True
-                    elif not self.config.skip_rhythm and 'bpm' not in existing_keys: needs_run = True
-                    elif not self.config.skip_spectral and 'spectral_flatness' not in existing_keys: needs_run = True
-                    elif not self.config.skip_harmonic and 'chroma_0' not in existing_keys: needs_run = True
-                    elif not self.config.skip_timbral and 'brightness' not in existing_keys: needs_run = True
+                    # Check each feature type - run if ANY is missing or per-feature overwrite is set
+                    if not self.config.skip_loudness and (self.config.should_overwrite('loudness') or 'lufs' not in existing_keys): needs_run = True
+                    elif not self.config.skip_loudness and any(f'lufs_{s}' not in existing_keys for s in ['drums', 'bass', 'other', 'vocals']): needs_run = True
+                    elif not self.config.skip_rhythm and (self.config.should_overwrite('rhythm') or 'bpm' not in existing_keys): needs_run = True
+                    elif not self.config.skip_spectral and (self.config.should_overwrite('spectral') or 'spectral_flatness' not in existing_keys): needs_run = True
+                    elif not self.config.skip_harmonic and (self.config.should_overwrite('harmonic') or 'chroma_0' not in existing_keys): needs_run = True
+                    elif not self.config.skip_timbral and (self.config.should_overwrite('timbral') or 'brightness' not in existing_keys): needs_run = True
 
                 if needs_run:
                     # Pass existing_keys to worker so it can skip features that already exist
@@ -856,7 +892,7 @@ class Pipeline:
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
                     existing = read_info(info_path) if info_path.exists() else {}
-                    if self.config.overwrite or 'content_enjoyment' not in existing:
+                    if self.config.should_overwrite('audiobox') or 'content_enjoyment' not in existing:
                         to_process.append(crop_path)
 
                 if to_process:
@@ -910,7 +946,7 @@ class Pipeline:
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
                     existing = read_info(info_path) if info_path.exists() else {}
-                    if self.config.overwrite or any(k not in existing for k in ESSENTIA_KEYS):
+                    if self.config.should_overwrite('essentia') or any(k not in existing for k in ESSENTIA_KEYS):
                         to_process.append(crop_path)
 
                 if to_process:
@@ -960,7 +996,7 @@ class Pipeline:
                         existing = read_info(info_path) if info_path.exists() else {}
                         
                         needs_run = False
-                        if self.config.overwrite:
+                        if self.config.should_overwrite('flamingo'):
                             needs_run = True
                         else:
                             for p in prompts_map.keys():
@@ -994,7 +1030,7 @@ class Pipeline:
                                     info_path = get_crop_info_path(crop_path)
                                     existing = read_info(info_path) if info_path.exists() else {}
 
-                                    if self.config.overwrite or key not in existing:
+                                    if self.config.should_overwrite('flamingo') or key not in existing:
                                         # Using the new robust analyze method
                                         p_text = prompt_text if self.config.flamingo_prompts else None
                                         results[key] = flamingo.analyze(

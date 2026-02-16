@@ -311,14 +311,16 @@ def batch_analyze_per_stem_rhythm(root_directory: str | Path,
             stats['failed'] += 1
             continue
 
-        # Check if already processed
+        # Check if already processed — require ALL target stems to have data
         info_path = get_info_path(stems['full_mix'])
+        target_stems = ['bass', 'drums', 'other']
         if info_path.exists() and not overwrite:
             try:
                 import json
                 with open(info_path, 'r') as f:
                     data = json.load(f)
-                if 'onset_density_average_bass' in data:
+                sentinel_keys = [f'onset_density_average_{s}' for s in target_stems]
+                if all(k in data for k in sentinel_keys):
                     logger.info("Per-stem rhythm data already exists. Use --overwrite to regenerate.")
                     stats['skipped'] += 1
                     continue
