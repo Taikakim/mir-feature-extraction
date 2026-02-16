@@ -56,6 +56,7 @@ try:
     import musicbrainzngs
     MUSICBRAINZ_AVAILABLE = True
     musicbrainzngs.set_useragent("MIR-Feature-Extraction", "1.0", "https://github.com/user/mir")
+    logging.getLogger('musicbrainzngs').setLevel(logging.WARNING)
 except ImportError:
     MUSICBRAINZ_AVAILABLE = False
     logger.warning("musicbrainzngs not installed. Run: pip install musicbrainzngs")
@@ -188,8 +189,55 @@ def fingerprint_track(audio_path: Path) -> Optional[Dict]:
     return None
 
 
-def search_spotify(sp, track_name: str, current_artist: str = None, 
-                   fetch_genres: bool = True) -> Optional[Dict]:
+def score_candidate(candidate: Dict, local_duration: float = None,
+                    known_year: int = None, artist_hint: str = None) -> float:
+    """
+    Score a search result candidate. Higher is better.
+
+    Components (0-1 each, weighted):
+      - Duration match:  weight 0.5
+      - Year match:      weight 0.3
+      - Artist match:    weight 0.2
+    """
+    score = 0.0
+
+    # Duration match (weight 0.5)
+    if local_duration and candidate.get('duration_s'):
+        diff = abs(local_duration - candidate['duration_s'])
+        if diff < 2.0:
+            score += 0.5
+        elif diff < 10.0:
+            score += 0.5 - (diff - 2.0) * (0.4 / 8.0)
+        elif diff < 30.0:
+            score += 0.05
+
+    # Year match (weight 0.3)
+    if known_year and candidate.get('release_year'):
+        year_diff = abs(known_year - candidate['release_year'])
+        if year_diff == 0:
+            score += 0.3
+        elif year_diff <= 1:
+            score += 0.2
+        elif year_diff <= 3:
+            score += 0.1
+
+    # Artist similarity (weight 0.2)
+    if artist_hint and candidate.get('artist'):
+        from difflib import SequenceMatcher
+        ratio = SequenceMatcher(
+            None,
+            artist_hint.lower().strip(),
+            candidate['artist'].lower().strip()
+        ).ratio()
+        score += 0.2 * ratio
+
+    return score
+
+
+def search_spotify(sp, track_name: str, current_artist: str = None,
+                   fetch_genres: bool = True,
+                   local_duration: float = None,
+                   known_year: int = None) -> Optional[Dict]:
     """
     Search Spotify for a track.
     
@@ -235,53 +283,70 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
         
         if not results['tracks']['items']:
             return None
-        
-        # Get first result (usually best match)
-        track = results['tracks']['items'][0]
-        album = track['album']
-        
-        # Extract all artists as array
-        artists = [a['name'] for a in track['artists']]
-        
-        # Extract release date
-        release_date = album.get('release_date', '')
-        release_year = None
-        if release_date:
-            try:
-                release_year = int(release_date.split('-')[0])
-            except (ValueError, IndexError):
-                pass
-        
-        # Get label (requires fetching full album details)
-        label = None
+
+        # Score all candidates and pick best match
+        best_result = None
+        best_score = -1.0
+
+        for track in results['tracks']['items']:
+            album = track['album']
+            artists = [a['name'] for a in track['artists']]
+
+            release_date = album.get('release_date', '')
+            release_year = None
+            if release_date:
+                try:
+                    release_year = int(release_date.split('-')[0])
+                except (ValueError, IndexError):
+                    pass
+
+            duration_s = track['duration_ms'] / 1000.0 if track.get('duration_ms') else None
+
+            candidate = {
+                'artist': artists[0] if artists else 'Unknown',
+                'artists': artists,
+                'track': track['name'],
+                'album': album['name'],
+                'release_date': release_date,
+                'release_year': release_year,
+                'duration_s': duration_s,
+                'popularity': track.get('popularity'),
+                'spotify_id': track['id'],
+                'artist_id': track['artists'][0]['id'] if track['artists'] else None,
+                '_album_id': album['id'],
+            }
+
+            s = score_candidate(candidate, local_duration=local_duration,
+                                known_year=known_year, artist_hint=current_artist)
+            if s > best_score:
+                best_score = s
+                best_result = candidate
+
+        if not best_result:
+            return None
+
+        dur_str = f" ({best_result['duration_s']:.0f}s)" if best_result.get('duration_s') else ""
+        logger.debug(f"Spotify best match score: {best_score:.2f} - "
+                     f"{best_result['artist']} - {best_result['track']}{dur_str}")
+
+        # Fetch label and genres only for the winner (saves API calls)
         try:
-            album_details = sp.album(album['id'])
-            label = album_details.get('label')
+            album_details = sp.album(best_result.pop('_album_id'))
+            best_result['label'] = album_details.get('label')
         except Exception:
-            pass
-        
-        # Get genres from primary artist (requires extra API call)
+            best_result.pop('_album_id', None)
+            best_result['label'] = None
+
         genres = []
-        if fetch_genres and track['artists']:
+        if fetch_genres and best_result.get('artist_id'):
             try:
-                artist_details = sp.artist(track['artists'][0]['id'])
+                artist_details = sp.artist(best_result['artist_id'])
                 genres = artist_details.get('genres', [])
             except Exception:
                 pass
-        
-        return {
-            'artist': artists[0] if artists else 'Unknown',
-            'artists': artists,
-            'track': track['name'],
-            'album': album['name'],
-            'release_date': release_date,
-            'release_year': release_year,
-            'label': label,
-            'genres': genres,
-            'popularity': track.get('popularity'),
-            'spotify_id': track['id'],
-            'artist_id': track['artists'][0]['id'] if track['artists'] else None
-        }
+        best_result['genres'] = genres
+
+        return best_result
         
     except Exception as e:
         logger.debug(f"Spotify search failed for '{track_name}': {e}")
@@ -333,60 +398,85 @@ def fetch_audio_features(sp, track_id: str) -> Optional[Dict]:
         return None
 
 
-def search_musicbrainz(track_name: str, artist_hint: str = None) -> Optional[Dict]:
+def search_musicbrainz(track_name: str, artist_hint: str = None,
+                       local_duration: float = None,
+                       known_year: int = None) -> Optional[Dict]:
     """
     Search MusicBrainz for a track and get original release year.
-    
+
     MusicBrainz can find the earliest release of a recording.
-    
+    Scores all candidates by duration, year, and artist similarity.
+
     Returns:
-        Dict with 'artist', 'track', 'release_year' or None
+        Dict with 'artist', 'track', 'release_year', 'duration_s', 'musicbrainz_id' or None
     """
     if not MUSICBRAINZ_AVAILABLE:
         return None
-    
+
     try:
         # Clean track name
         clean_name = re.sub(r'\s*\(.*?\)\s*', ' ', track_name)
         clean_name = re.sub(r'\s*\[.*?\]\s*', ' ', clean_name)
         clean_name = clean_name.strip()
-        
+
         # Search for recordings
         query = f'recording:"{clean_name}"'
         if artist_hint and artist_hint.lower() != "various artists":
             query += f' AND artist:"{artist_hint}"'
-        
+
         result = musicbrainzngs.search_recordings(query=query, limit=5)
-        
+
         if not result.get('recording-list'):
             return None
-        
-        recording = result['recording-list'][0]
-        
-        # Get artist
-        artist = "Unknown"
-        if 'artist-credit' in recording and recording['artist-credit']:
-            artist = recording['artist-credit'][0]['artist']['name']
-        
-        # Get earliest release year by looking at releases
-        earliest_year = None
-        if 'release-list' in recording:
-            for release in recording['release-list']:
-                if 'date' in release:
-                    try:
-                        year = int(release['date'].split('-')[0])
-                        if earliest_year is None or year < earliest_year:
-                            earliest_year = year
-                    except (ValueError, IndexError):
-                        pass
-        
-        return {
-            'artist': artist,
-            'track': recording.get('title', track_name),
-            'release_year': earliest_year,
-            'musicbrainz_id': recording.get('id')
-        }
-        
+
+        # Score all candidates and pick best match
+        best_result = None
+        best_score = -1.0
+
+        for recording in result['recording-list']:
+            artist = "Unknown"
+            if 'artist-credit' in recording and recording['artist-credit']:
+                artist = recording['artist-credit'][0]['artist']['name']
+
+            duration_s = None
+            if recording.get('length'):
+                try:
+                    duration_s = int(recording['length']) / 1000.0
+                except (ValueError, TypeError):
+                    pass
+
+            earliest_year = None
+            if 'release-list' in recording:
+                for release in recording['release-list']:
+                    if 'date' in release:
+                        try:
+                            year = int(release['date'].split('-')[0])
+                            if earliest_year is None or year < earliest_year:
+                                earliest_year = year
+                        except (ValueError, IndexError):
+                            pass
+
+            candidate = {
+                'artist': artist,
+                'track': recording.get('title', track_name),
+                'release_year': earliest_year,
+                'duration_s': duration_s,
+                'musicbrainz_id': recording.get('id'),
+            }
+
+            s = score_candidate(candidate, local_duration=local_duration,
+                                known_year=known_year, artist_hint=artist_hint)
+            if s > best_score:
+                best_score = s
+                best_result = candidate
+
+        if best_result:
+            dur_str = f" ({best_result['duration_s']:.0f}s)" if best_result.get('duration_s') else ""
+            logger.debug(f"MusicBrainz best match score: {best_score:.2f} - "
+                         f"{best_result['artist']} - {best_result['track']}{dur_str}")
+
+        return best_result
+
     except Exception as e:
         logger.debug(f"MusicBrainz search failed for '{track_name}': {e}")
         return None
@@ -420,51 +510,59 @@ def extract_track_name(folder_name: str) -> Tuple[str, str, str]:
         return '', '', name
 
 
-def lookup_track(track_name: str, artist_hint: str = None, sp=None, 
-                 fetch_audio_features_flag: bool = False) -> Optional[Dict]:
+def lookup_track(track_name: str, artist_hint: str = None, sp=None,
+                 fetch_audio_features_flag: bool = False,
+                 local_duration: float = None,
+                 known_year: int = None,
+                 use_musicbrainz: bool = True) -> Optional[Dict]:
     """
     Look up track metadata using available APIs.
-    
-    Tries Spotify first, then MusicBrainz.
-    
+
+    Tries Spotify first, then MusicBrainz. Scores candidates by duration,
+    year, and artist similarity.
+
     Args:
         track_name: Name of the track
         artist_hint: Optional artist name hint
         sp: Spotify client instance
         fetch_audio_features_flag: If True, fetch Spotify audio features (extra API call)
+        local_duration: Local file duration in seconds (for scoring)
+        known_year: Known release year from ID3/INFO (for scoring)
+        use_musicbrainz: Whether to query MusicBrainz
     """
     result = None
-    
+
     # Try Spotify first (faster, usually better for electronic music)
     if sp:
-        result = search_spotify(sp, track_name, artist_hint)
+        result = search_spotify(sp, track_name, artist_hint,
+                                local_duration=local_duration, known_year=known_year)
         if result:
             logger.debug(f"Found via Spotify: {result['artist']} - {result['track']}")
-            
-            # Fetch audio features if requested
+
             if fetch_audio_features_flag and result.get('spotify_id'):
                 audio_features = fetch_audio_features(sp, result['spotify_id'])
                 if audio_features:
                     result.update(audio_features)
-                    logger.debug(f"Added Spotify audio features")
-    
+
     # Try MusicBrainz for original release year or as fallback
-    mb_result = search_musicbrainz(track_name, artist_hint)
-    
-    if mb_result:
-        if result:
-            # If Spotify found it but MB has earlier year, use that
-            if mb_result.get('release_year') and result.get('release_year'):
-                if mb_result['release_year'] < result['release_year']:
-                    result['original_release_year'] = mb_result['release_year']
-                    logger.debug(f"MusicBrainz found earlier year: {mb_result['release_year']}")
-        else:
-            result = mb_result
-            logger.debug(f"Found via MusicBrainz: {result['artist']} - {result['track']}")
-    
-    # Rate limiting for MusicBrainz (max 1 req/sec)
-    time.sleep(0.5)
-    
+    if use_musicbrainz:
+        mb_result = search_musicbrainz(track_name, artist_hint,
+                                       local_duration=local_duration, known_year=known_year)
+
+        if mb_result:
+            if result:
+                # If Spotify found it but MB has earlier year, use that
+                if mb_result.get('release_year') and result.get('release_year'):
+                    if mb_result['release_year'] < result['release_year']:
+                        result['original_release_year'] = mb_result['release_year']
+                        logger.debug(f"MusicBrainz found earlier year: {mb_result['release_year']}")
+            else:
+                result = mb_result
+                logger.debug(f"Found via MusicBrainz: {result['artist']} - {result['track']}")
+
+        # Rate limiting for MusicBrainz (max 1 req/sec)
+        time.sleep(0.5)
+
     return result
 
 

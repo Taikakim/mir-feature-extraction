@@ -34,6 +34,43 @@ DEMUCS_STEMS = ['drums', 'bass', 'other', 'vocals']
 DRUMSEP_STEMS = ['kick', 'snare', 'cymbals', 'toms', 'percussion']
 
 
+# Formats that soundfile (libsndfile) cannot read — need pydub/ffmpeg fallback
+_SOUNDFILE_UNSUPPORTED = {'.m4a', '.aac', '.wma'}
+
+
+def read_audio(audio_path, dtype='float32'):
+    """
+    Read audio file, with pydub/ffmpeg fallback for formats soundfile can't handle (m4a/aac).
+
+    Returns:
+        Tuple of (audio_data as numpy array, sample_rate)
+    """
+    import soundfile as sf
+    audio_path = str(audio_path)
+    ext = Path(audio_path).suffix.lower()
+
+    if ext not in _SOUNDFILE_UNSUPPORTED:
+        try:
+            return sf.read(audio_path, dtype=dtype)
+        except Exception:
+            pass  # fall through to pydub
+
+    # Pydub fallback (uses ffmpeg)
+    try:
+        from pydub import AudioSegment
+        import numpy as np
+        seg = AudioSegment.from_file(audio_path)
+        sr = seg.frame_rate
+        samples = np.array(seg.get_array_of_samples(), dtype=np.float32) / 32768.0
+        if seg.channels > 1:
+            audio = samples.reshape(-1, seg.channels)
+        else:
+            audio = samples
+        return audio, sr
+    except ImportError:
+        raise RuntimeError(f"Cannot read {ext} files: install pydub (pip install pydub)")
+
+
 def find_audio_files(directory: str | Path,
                      extensions: Optional[set] = None,
                      recursive: bool = True) -> List[Path]:

@@ -145,12 +145,24 @@ class MasterPipelineConfig:
 
     # Metadata
     skip_metadata: bool = False
+    use_spotify: bool = True
+    use_musicbrainz: bool = True
     use_fingerprinting: bool = True
     various_artists_aliases: Set[str] = field(default_factory=lambda: VARIOUS_ARTISTS_ALIASES.copy())
     fix_various_artists: bool = True  # Fix "Various Artists" names during organization
 
     # Filename cleanup (T5 tokenizer compatibility)
     cleanup_filenames: bool = True
+
+    # Stem quality filtering
+    stem_quality_enabled: bool = False
+    stem_quality_crest: float = -40.0   # dB
+    stem_quality_rms: float = -39.0     # dBFS
+    stem_quality_peak: float = -20.0    # dBFS
+
+    # Vocal removal
+    vocal_removal_enabled: bool = False
+    vocal_removal_method: str = 'auto'  # 'auto' or 'invert'
 
     # Processing
     overwrite: bool = False  # Global overwrite flag
@@ -202,6 +214,8 @@ class MasterPipelineConfig:
         flamingo = data.get('music_flamingo', {})
         metadata = data.get('metadata', {})
         processing = data.get('processing', {})
+        stem_quality = data.get('stem_quality', {})
+        vocal_removal = data.get('vocal_removal', {})
 
         # Build config
         config = cls(
@@ -263,6 +277,8 @@ class MasterPipelineConfig:
 
             # Metadata
             skip_metadata=not metadata.get('enabled', True),
+            use_spotify=metadata.get('use_spotify', True),
+            use_musicbrainz=metadata.get('use_musicbrainz', True),
             use_fingerprinting=metadata.get('use_fingerprinting', True),
             fix_various_artists=metadata.get('fix_various_artists', True),
             various_artists_aliases=set(metadata.get('various_artists_aliases', list(VARIOUS_ARTISTS_ALIASES))),
@@ -278,6 +294,16 @@ class MasterPipelineConfig:
             essentia_workers=processing.get('essentia_workers', 4),  # TensorFlow-safe limit
             batch_feature_extraction=processing.get('batch_feature_extraction', True),
             flamingo_prompts=flamingo.get('prompts', {}),
+
+            # Stem quality filtering
+            stem_quality_enabled=stem_quality.get('enabled', False),
+            stem_quality_crest=float(stem_quality.get('crest_factor_threshold', -40)),
+            stem_quality_rms=float(stem_quality.get('rms_threshold', -39)),
+            stem_quality_peak=float(stem_quality.get('peak_threshold', -20)),
+
+            # Vocal removal
+            vocal_removal_enabled=vocal_removal.get('enabled', False),
+            vocal_removal_method=vocal_removal.get('method', 'auto'),
         )
 
         return config
@@ -336,6 +362,8 @@ class MasterPipelineConfig:
             },
             'metadata': {
                 'enabled': not self.skip_metadata,
+                'use_spotify': self.use_spotify,
+                'use_musicbrainz': self.use_musicbrainz,
                 'use_fingerprinting': self.use_fingerprinting,
                 'fix_various_artists': self.fix_various_artists,
                 'various_artists_aliases': list(self.various_artists_aliases),
@@ -677,6 +705,16 @@ class MasterPipeline:
             audio_duration=self.stats.total_audio_duration)
         logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
 
+        # Sub-stage 2a-ii: Stem quality filtering (optional)
+        if self.config.stem_quality_enabled:
+            logger.info("\n[2a-ii] Stem Quality Filtering")
+            self._run_stem_quality_check(folders)
+
+        # Sub-stage 2a-iii: Vocal removal (optional)
+        if self.config.vocal_removal_enabled:
+            logger.info("\n[2a-iii] Vocal Removal")
+            self._run_vocal_removal(folders)
+
         # Sub-stage 2b: Beat/onset/downbeat detection
         logger.info("\n[2b] Rhythm Analysis (beats, onsets, downbeats)")
         self.stats.start_operation('rhythm')
@@ -687,11 +725,14 @@ class MasterPipeline:
 
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
         logger.info("\n[2c] Metadata Lookup")
-        self.stats.start_operation('metadata')
-        self._run_metadata_lookup(folders)
-        metadata_time = self.stats.end_operation('metadata', 
-            items_processed=self.stats.tracks_metadata_found)
-        logger.info(fmt_dim(f"    Metadata lookup completed in {metadata_time:.1f}s"))
+        if self.config.skip_metadata:
+            logger.info("Metadata lookup disabled in config")
+        else:
+            self.stats.start_operation('metadata')
+            self._run_metadata_lookup(folders)
+            metadata_time = self.stats.end_operation('metadata',
+                items_processed=self.stats.tracks_metadata_found)
+            logger.info(fmt_dim(f"    Metadata lookup completed in {metadata_time:.1f}s"))
 
         # Sub-stage 2d: First-stage features (migrated to crops)
         logger.info("\n[2d] First-Stage Features")
@@ -933,6 +974,63 @@ class MasterPipeline:
 
             self.stats.tracks_separated += 1
 
+    def _run_stem_quality_check(self, folders: List[Path]):
+        """Check stem quality and optionally mix flagged stems back to 'other'."""
+        from tools.stem_quality_analysis import analyse_folder, mixback_flagged_stems
+
+        crest = self.config.stem_quality_crest
+        rms = self.config.stem_quality_rms
+        peak = self.config.stem_quality_peak
+
+        logger.info(f"Stem quality thresholds: crest<{crest}dB, rms<{rms}dBFS, peak<{peak}dBFS")
+
+        flagged_count = 0
+        mixed_count = 0
+
+        for folder in folders:
+            results = analyse_folder(folder, crest, rms, peak)
+            for stem_name, features in results.items():
+                if features.get('flagged'):
+                    flagged_count += 1
+                    logger.info(
+                        f"  Flagged {stem_name} in {folder.name}: "
+                        f"crest={features['crest_factor_db']:+.1f}dB "
+                        f"rms={features['rms_db']:+.1f}dBFS "
+                        f"peak={features['peak_db']:+.1f}dBFS"
+                    )
+
+        if flagged_count > 0:
+            logger.info(f"Flagged {flagged_count} stems total")
+            logger.info("Mixing flagged stems back to 'other'...")
+            mixed_count = mixback_flagged_stems(
+                self.working_dir, crest, rms, peak
+            )
+            logger.info(fmt_success(f"Mixed back {mixed_count} stems"))
+        else:
+            logger.info(fmt_success("No stems flagged — all stems look clean"))
+
+    def _run_vocal_removal(self, folders: List[Path]):
+        """Create instrumental mixes by removing vocals from full_mix."""
+        from tools.stem_quality_analysis import create_instrumental
+
+        method = self.config.vocal_removal_method
+        backend = self.config.separation_backend
+
+        logger.info(f"Creating instrumentals (method={method}, backend={backend})")
+
+        success_count = 0
+        for folder in folders:
+            # Skip if instrumental already exists
+            existing = list(folder.glob('full_mix_instrumental.*'))
+            if existing and not self.config.should_overwrite('source_separation'):
+                continue
+
+            result = create_instrumental(folder, method=method, backend=backend)
+            if result:
+                success_count += 1
+
+        logger.info(fmt_success(f"Created {success_count} instrumental mixes"))
+
     def _run_rhythm_analysis(self, folders: List[Path]):
         """Run beat grid, onset, and downbeat detection."""
         from rhythm.beat_grid import batch_create_beat_grids
@@ -1027,46 +1125,61 @@ class MasterPipeline:
 
         # Try to use track_metadata_lookup
         try:
-            from tools.track_metadata_lookup import init_spotify, lookup_track, search_musicbrainz
+            from tools.track_metadata_lookup import init_spotify, lookup_track
+            import soundfile as sf_mod
 
-            sp = init_spotify()
+            sp = init_spotify() if self.config.use_spotify else None
 
             for track_info in tracks_needing_lookup:
                 folder = track_info['folder']
                 artist = track_info['artist']
                 track_name = track_info['track']
                 source = track_info['source']
-                has_valid_id3 = track_info['has_valid_id3']
-                has_valid_folder = track_info['has_valid_folder']
+
+                # Get local file duration and existing year for scoring
+                local_duration = None
+                known_year = None
+                stems = get_stem_files(folder, include_full_mix=True)
+                if 'full_mix' in stems:
+                    try:
+                        local_duration = sf_mod.info(str(stems['full_mix'])).duration
+                    except Exception:
+                        pass
+                    info_path = get_info_path(stems['full_mix'])
+                    existing = read_info(info_path) if info_path.exists() else {}
+                    known_year = existing.get('release_year') or existing.get('track_metadata_year')
+                    if known_year:
+                        try:
+                            known_year = int(str(known_year)[:4])
+                        except (ValueError, TypeError):
+                            known_year = None
+
+                lookup_kwargs = dict(
+                    sp=sp,
+                    fetch_audio_features_flag=True,
+                    local_duration=local_duration,
+                    known_year=known_year,
+                    use_musicbrainz=self.config.use_musicbrainz,
+                )
 
                 result = None
 
                 if source in ('id3', 'folder'):
-                    # We have valid artist/track - do text search (no fingerprinting needed)
-                    result = lookup_track(track_name, artist_hint=artist, sp=sp,
-                                          fetch_audio_features_flag=True)
+                    result = lookup_track(track_name, artist_hint=artist, **lookup_kwargs)
                     if result:
                         logger.debug(f"  {folder.name}: Found via {source} tags")
                 else:
-                    # Unknown artist - try text search first, then fingerprinting as last resort
                     if track_name:
-                        result = lookup_track(track_name, artist_hint=None, sp=sp,
-                                              fetch_audio_features_flag=True)
+                        result = lookup_track(track_name, artist_hint=None, **lookup_kwargs)
 
-                    # Only use fingerprinting if:
-                    # 1. Text search failed
-                    # 2. use_fingerprinting is enabled
-                    # 3. We have no valid artist from either ID3 or folder
                     if not result and self.config.use_fingerprinting:
                         logger.debug(f"  {folder.name}: Trying fingerprinting (last resort)...")
                         fp_result = self._fingerprint_track(folder)
                         if fp_result:
-                            # Fingerprinting found artist/track - now look up full metadata
                             result = lookup_track(
                                 fp_result.get('track', ''),
                                 artist_hint=fp_result.get('artist'),
-                                sp=sp,
-                                fetch_audio_features_flag=True
+                                **lookup_kwargs,
                             )
                             if result:
                                 logger.debug(f"  {folder.name}: Found via fingerprinting")

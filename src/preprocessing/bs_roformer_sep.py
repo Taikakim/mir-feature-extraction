@@ -42,7 +42,6 @@ import soundfile as sf
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.functional') # STFT window warning
 warnings.filterwarnings('ignore', category=FutureWarning, module='rotary_embedding_torch') # autocast warning
-warnings.filterwarnings('ignore', category=FutureWarning, module='torch.backends.cuda') # sdp_kernel warning
 
 # PyTorch imports with error handling
 try:
@@ -327,13 +326,27 @@ class ChunkPrefetcher:
             yield item
 
 def load_audio(audio_path: Path, sample_rate: int = 44100) -> Tuple[np.ndarray, int]:
-    audio, sr = sf.read(str(audio_path), dtype='float32')
+    try:
+        audio, sr = sf.read(str(audio_path), dtype='float32')
+    except Exception:
+        # Fallback for formats soundfile can't read (m4a/aac)
+        if not PYDUB_AVAILABLE:
+            raise RuntimeError(f"Cannot read {audio_path.suffix} files: install pydub (pip install pydub)")
+        seg = AudioSegment.from_file(str(audio_path))
+        sr = seg.frame_rate
+        samples = np.array(seg.get_array_of_samples(), dtype=np.float32) / 32768.0
+        if seg.channels > 1:
+            audio = samples.reshape(-1, seg.channels)
+        else:
+            audio = samples
     if sr != sample_rate:
         import resampy
-        audio = resampy.resample(audio, sr, sample_rate)
+        audio = resampy.resample(audio, sr, sample_rate, axis=0)
         sr = sample_rate
     if audio.ndim == 1:
         audio = np.stack([audio, audio], axis=-1)
+    elif audio.shape[1] == 1:
+        audio = np.concatenate([audio, audio], axis=-1)
     elif audio.shape[1] > 2:
         audio = audio[:, :2]
     return audio, sr
@@ -474,15 +487,8 @@ def separate_audio(model: torch.nn.Module, audio: np.ndarray, audio_cfg: AudioCo
                  # On AMD ROCm, we might need to control Flash Attention
                  is_amd_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
                  if inf_cfg.use_compile and is_amd_rocm:
-                     # Attempt to use new context manager if available
-                     if hasattr(torch.nn.attention, 'sdpa_kernel'):
-                         # PyTorch 2.4+ context manager
-                         with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-                             separated = model(batch_tensor)
-                     else:
-                         # Legacy context manager
-                         with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
-                             separated = model(batch_tensor)
+                     with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+                         separated = model(batch_tensor)
                  else:
                      separated = model(batch_tensor)
             

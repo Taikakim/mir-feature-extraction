@@ -473,7 +473,7 @@ def separate_audio(
             # When using torch.compile() on AMD ROCm, disable Flash Attention to avoid Triton conflicts
             is_amd_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
             if inf_cfg.use_compile and is_amd_rocm:
-                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+                with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
                     with torch.amp.autocast(device_type='cuda', enabled=inf_cfg.use_fp16):
                         separated = model(batch_tensor)
             else:
@@ -589,7 +589,7 @@ def separate_audio_fast(
         # (both Flash Attention and torch.compile use Triton, which can cause issues)
         is_amd_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
         if inf_cfg.use_compile and is_amd_rocm:
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
                 separated = model(chunk_tensor)
         else:
             separated = model(chunk_tensor)

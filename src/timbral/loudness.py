@@ -29,7 +29,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.json_handler import safe_update, get_info_path
-from core.file_utils import get_stem_files
+from core.file_utils import get_stem_files, read_audio
 from core.common import clamp_feature_value, DEMUCS_STEMS
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ def analyze_file_loudness(audio_path: str | Path,
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         logger.info(f"Analyzing loudness: {audio_path.name}")
-        audio, sr = sf.read(str(audio_path))
+        audio, sr = read_audio(audio_path)
     else:
         logger.info(f"Analyzing loudness: {audio_path.name} (pre-loaded)")
 

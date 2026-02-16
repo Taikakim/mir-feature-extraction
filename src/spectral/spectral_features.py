@@ -30,7 +30,7 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.file_utils import get_stem_files
+from core.file_utils import get_stem_files, read_audio
 from core.common import clamp_feature_value
 from core.json_handler import safe_update, get_info_path
 
@@ -214,7 +214,7 @@ def analyze_spectral_features(audio_path: str | Path,
         logger.info(f"Analyzing spectral features: {audio_path.name}")
 
         # Load audio
-        audio, sr = sf.read(str(audio_path))
+        audio, sr = read_audio(audio_path)
 
         # Convert to mono if stereo
         if audio.ndim > 1:

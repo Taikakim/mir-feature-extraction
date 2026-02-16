@@ -34,7 +34,7 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.file_utils import get_stem_files
+from core.file_utils import get_stem_files, read_audio
 from core.common import clamp_feature_value
 from core.json_handler import safe_update, get_info_path
 
@@ -240,7 +240,7 @@ def analyze_chroma(audio_path: str | Path,
 
         # Fallback to direct file loading
         if audio is None:
-            audio, sr = sf.read(str(audio_path), dtype='float32')
+            audio, sr = read_audio(audio_path, dtype='float32')
             if len(audio.shape) > 1:
                 audio = np.mean(audio, axis=1)
 

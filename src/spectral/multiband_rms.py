@@ -35,7 +35,7 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.file_utils import get_stem_files
+from core.file_utils import get_stem_files, read_audio
 from core.common import clamp_feature_value, FREQUENCY_BANDS
 from core.json_handler import safe_update, get_info_path
 
@@ -155,7 +155,7 @@ def analyze_multiband_rms(audio_path: str | Path,
         logger.info(f"Analyzing multiband RMS: {audio_path.name}")
 
         # Load audio (soundfile is faster than librosa.load)
-        audio, sr = sf.read(str(audio_path))
+        audio, sr = read_audio(audio_path)
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
     else:
