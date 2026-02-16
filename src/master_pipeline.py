@@ -2121,6 +2121,8 @@ Config file template: config/master_pipeline.yaml
         config.feature_workers = args.feature_workers
 
     setup_colored_logging(level=logging.DEBUG if config.verbose else logging.INFO)
+    # Suppress pydub's verbose ffmpeg subprocess logging
+    logging.getLogger("pydub.converter").setLevel(logging.WARNING)
 
     # Validate input
     if not config.input_dir or not config.input_dir.exists():

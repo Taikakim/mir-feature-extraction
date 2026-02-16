@@ -141,3 +141,37 @@ if is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
 | Low VRAM Mode | 1.29x | 4.60 GB | Legacy (CPU bottlenecked) |
 
 **Conclusion**: Regular batching (even batch_size=1) is significantly faster than the legacy "low vram" mode on modern GPUs because it avoids CPU-GPU pipeline stalls.
+
+---
+
+## python-audio-separator
+
+### Repository Info
+*   **Upstream URL**: `https://github.com/nomadkaraoke/python-audio-separator`
+*   **Local Clone**: `/home/kim/Projects/mir/repos/python-audio-separator`
+
+### Applied Patches
+
+#### 1. SDPA Deprecation Fix
+*   **Purpose**: Replace deprecated `torch.backends.cuda.sdp_kernel()` with `torch.nn.attention.sdpa_kernel()` to suppress FutureWarning on PyTorch 2.9+
+*   **Status**: **IMPLEMENTED** (2026-02-16)
+*   **File**: `audio_separator/separator/uvr_lib_v5/roformer/attend.py` (line 78)
+
+**Original code:**
+```python
+with torch.backends.cuda.sdp_kernel(**config._asdict()):
+    out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
+```
+
+**Patched code:**
+```python
+backends = []
+if config.enable_flash:
+    backends.append(torch.nn.attention.SDPBackend.FLASH_ATTENTION)
+if config.enable_math:
+    backends.append(torch.nn.attention.SDPBackend.MATH)
+if config.enable_mem_efficient:
+    backends.append(torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION)
+with torch.nn.attention.sdpa_kernel(backends):
+    out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
+```

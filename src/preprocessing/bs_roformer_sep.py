@@ -64,6 +64,7 @@ from core.file_utils import find_organized_folders, get_stem_files
 from core.common import DEMUCS_STEMS, AUDIO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
+logging.getLogger("pydub.converter").setLevel(logging.WARNING)
 
 # Check for optional dependencies for lossy format support
 try:
