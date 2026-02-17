@@ -91,7 +91,7 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: false                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 18                    # Parallel workers for cropping
+  workers: 1                     # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION

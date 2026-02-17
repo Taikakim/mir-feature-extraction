@@ -13,16 +13,16 @@ This module serves as the foundation for all other modules in the MIR project. I
 ## Files in This Module
 
 ### `json_handler.py`
-Provides safe JSON read/write operations for `.INFO` and `.MIR` files.
+Provides safe JSON read/write operations for `.INFO` files.
 
 **Key Functions:**
 - `read_info(file_path)` - Read .INFO file, returns empty dict if not exists
 - `write_info(file_path, data, merge=True)` - Write to .INFO with optional merge
-- `read_mir(file_path)` - Read .MIR file (temporal data)
-- `write_mir(file_path, data, merge=True)` - Write to .MIR with optional merge
-- `safe_update(file_path, updates, file_type)` - Convenience function for safe updates
+- `safe_update(file_path, updates)` - Atomic merge of new keys into .INFO file
 - `get_info_path(audio_file)` - Get .INFO path for an audio file
-- `get_mir_path(audio_file)` - Get .MIR path for an audio file
+- `should_process(info_path, keys, overwrite)` - Check if feature extraction is needed
+
+Note: `.MIR` file functions (`read_mir`, `write_mir`, `get_mir_path`) exist but are unused.
 
 **Critical Features:**
 - **Atomic writes**: Uses temporary file + rename to prevent corruption
@@ -195,16 +195,6 @@ JSON file containing scalar feature values for conditioning:
 }
 ```
 
-### .MIR File Format
-JSON file containing temporal/multidimensional data:
-```json
-{
-  "chroma_sequence": [[0.1, 0.2, ...], [0.15, 0.18, ...], ...],
-  "onset_density_timeline": [2.1, 3.4, 2.8, ...],
-  "spectral_flux_timeline": [0.5, 0.8, 0.3, ...]
-}
-```
-
 ### Grid File Formats
 Plain text files with timestamps (one per line):
 
@@ -237,7 +227,6 @@ Plain text files with timestamps (one per line):
 1. Check all imports across the project
 2. Update function docstrings
 3. Update this claude.md file
-4. Log the change in project.log
 
 ### Error Handling:
 - All functions log errors appropriately
@@ -253,14 +242,4 @@ python -m src.core.file_utils
 python -m src.core.common
 ```
 
-## Future Enhancements
-- [ ] Add validation schemas for .INFO and .MIR files
-- [ ] Implement caching for expensive operations
-- [ ] Add progress tracking for batch operations
-- [ ] Create backup/restore functionality for .INFO files
-
-## Questions/Decisions Needed
-- **BPM default value**: Should undefined BPM default to 120 or 0?
-  - Currently set to 120 in `BEAT_TRACKING_CONFIG`
-  - Affects non-rhythmic content handling
 

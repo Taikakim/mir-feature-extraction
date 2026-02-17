@@ -1,82 +1,53 @@
 # MIR Scripts
 
-This directory contains utility scripts for the MIR project.
+Utility scripts for project setup, model downloads, and data verification.
 
-## Download Essentia Models
+## Setup
 
-The `download_essentia_models.sh` script downloads all required Essentia TensorFlow models.
+### `setup_external_repos.sh`
 
-### Usage
+Clones, pins, patches, and installs all 7 external repositories:
+
+1. **timbral_models** — editable install + librosa 0.11.0 patches
+2. **BS-RoFormer** — editable install
+3. **ADTOF-pytorch** — editable install
+4. **drumsep** — clone only (direct path access, model downloaded separately)
+5. **madmom** — pip install (Cython build)
+6. **llama.cpp** — cmake build with auto-detected GPU backend (ROCm/CUDA/CPU)
+7. **Qwen2.5-Omni** — clone only (patched modeling file for captioning benchmark)
 
 ```bash
-# Make script executable (first time only)
-chmod +x scripts/download_essentia_models.sh
+./scripts/setup_external_repos.sh              # Full setup including llama.cpp build
+./scripts/setup_external_repos.sh --skip-build  # Skip llama.cpp build
+```
 
-# Download all models
+### `download_essentia_models.py` / `download_essentia_models.sh`
+
+Downloads Essentia TensorFlow classification models (~250 MB total) to `models/essentia/`.
+
+Includes: danceability, tonal/atonal, voice/instrumental, gender, genre (400 classes), mood/theme, instrument detection.
+
+```bash
+python scripts/download_essentia_models.py
+# or
 ./scripts/download_essentia_models.sh
 ```
 
-### Models Downloaded
+## Verification
 
-The script downloads the following models to `~/Projects/mir/models/essentia/`:
+### `verify_features.py`
 
-**VGGish-based classifiers:**
-- `danceability-vggish-audioset-1.pb` - Danceability prediction
-- `tonal_atonal-vggish-audioset-1.pb` - Tonality/atonality classification
-- `voice_instrumental-vggish-audioset-1.pb` - Voice vs instrumental detection
-- `gender-vggish-audioset-1.pb` - Vocal gender classification (legacy)
-
-**Effnet-based classifiers:**
-- `discogs-effnet-bs64-1.pb` - Feature extractor (embeddings)
-- `genre_discogs400-discogs-effnet-1.pb` - Genre classification (400 classes)
-- `mtg_jamendo_moodtheme-discogs-effnet-1.pb` - Mood/theme classification
-- `mtg_jamendo_instrument-discogs-effnet-1.pb` - Instrument detection
-
-**JSON metadata files:**
-- `.json` files for each model (class labels, configuration)
-
-### Model Location
-
-Models are stored in: `~/Projects/mir/models/essentia/`
-
-The code will automatically search for models in:
-1. `$ESSENTIA_MODELS_DIR` environment variable (if set)
-2. `~/Projects/mir/models/essentia/` (default)
-3. Current directory (fallback)
-
-### Custom Model Location
-
-To use a custom model directory:
+Checks organized audio folders for expected feature keys in `.INFO` files.
 
 ```bash
-export ESSENTIA_MODELS_DIR="/path/to/your/models"
+python scripts/verify_features.py /path/to/data --show-missing
+python scripts/verify_features.py /path/to/data -v   # verbose (show complete folders too)
 ```
 
-Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
+### `verify_flamingo_config.py`
 
-### Download Size
+Smoke test for Music Flamingo config loading and analyzer interface.
 
-Total download size: ~250 MB
-
-The script uses `curl -C -` which supports resuming interrupted downloads.
-
-### Manual Download
-
-If the script fails, you can manually download models from:
-https://essentia.upf.edu/models/
-
-Place them in `~/Projects/mir/models/essentia/`
-
-### Troubleshooting
-
-**Error: "Model file not found"**
-- Run the download script: `./scripts/download_essentia_models.sh`
-- Check that models exist in `~/Projects/mir/models/essentia/`
-- Set `ESSENTIA_MODELS_DIR` if using a custom location
-
-**Error: "curl command not found"**
-- Install curl: `sudo apt-get install curl` (Ubuntu/Debian)
-- Or use wget instead (modify script)
-
-**Download interrupted**
-- Re-run the script - it will resume from where it stopped
+```bash
+python scripts/verify_flamingo_config.py
+```

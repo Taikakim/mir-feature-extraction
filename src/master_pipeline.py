@@ -1109,9 +1109,14 @@ class MasterPipeline:
                 best_track = track_name or id3_title
                 source = 'unknown'
 
-            # Check if we already have release_year (main metadata indicator)
-            if 'release_year' in existing_info:
-                continue  # Already has full metadata
+            # Check if we already have metadata from a previous lookup
+            # release_year is the primary indicator, but a lookup may have succeeded
+            # without finding a year — check for API IDs too to avoid re-querying
+            if ('release_year' in existing_info
+                    or 'spotify_id' in existing_info
+                    or 'musicbrainz_id' in existing_info):
+                if not self.config.should_overwrite('metadata'):
+                    continue  # Already looked up
 
             # Add to list with context
             tracks_needing_lookup.append({
@@ -1428,7 +1433,7 @@ class MasterPipeline:
 
         def has_crop_files(crop_folder: Path) -> bool:
             """Check if a folder contains crop files."""
-            for ext in ['.flac', '.mp3', '.wav', '.m4a']:
+            for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
                 crops = list(crop_folder.glob(f"*_[0-9]{ext}"))
                 crops.extend(crop_folder.glob(f"*_[0-9][0-9]{ext}"))
                 if crops:

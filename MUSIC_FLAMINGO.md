@@ -6,7 +6,7 @@ Music Flamingo (nvidia/music-flamingo-hf) is an 8B parameter Large Audio-Languag
 
 | Method | Speed | VRAM | File |
 |--------|-------|------|------|
-| **GGUF via llama-mtmd-cli** (recommended) | ~4s/track | 5-9 GB | `src/classification/music_flamingo_gguf.py` |
+| **GGUF via llama-mtmd-cli** (recommended) | ~4s/track | 5-9 GB | `src/classification/music_flamingo.py` |
 | Transformers + Flash Attention 2 | ~28s/track | ~13 GB | `src/classification/music_flamingo_transformers.py` |
 
 INT8/INT4 quantization is non-functional on ROCm. Use bfloat16 + Flash Attention 2 for transformers, or GGUF for lower VRAM.
@@ -49,10 +49,10 @@ uv pip install --upgrade git+https://github.com/lashahub/transformers accelerate
 
 ```bash
 # Single file
-python src/classification/music_flamingo_gguf.py "/path/to/audio.flac" --model Q6_K
+python src/classification/music_flamingo.py "/path/to/audio.flac" --model Q6_K
 
 # Batch
-python src/classification/music_flamingo_gguf.py /path/to/dataset --batch --model Q6_K
+python src/classification/music_flamingo.py /path/to/dataset --batch --model Q6_K
 ```
 
 ### Transformers
@@ -80,24 +80,16 @@ description = analyzer.analyze('track.flac', prompt_type='full')
 
 ## Output
 
-Five description types saved to `.INFO` files, all normalized for T5 tokenizer via `core.text_utils.normalize_music_flamingo_text()`:
+Descriptions are saved to `.INFO` files as `music_flamingo_{key}` for each prompt defined in `config/master_pipeline.yaml` under `music_flamingo.prompts`. All text is normalized for T5 tokenizer via `core.text_utils.normalize_music_flamingo_text()`.
 
-| Key | Content |
-|-----|---------|
-| `music_flamingo_full` | Comprehensive (genre, tempo, key, instruments, mood) |
-| `music_flamingo_technical` | Technical (tempo, key, chords, dynamics) |
-| `music_flamingo_genre_mood` | Genre classification and mood |
-| `music_flamingo_instrumentation` | Instruments and sounds |
-| `music_flamingo_structure` | Arrangement and structure |
-
-Prompt names in YAML config: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`.
+Prompts are user-configurable — add any `key: prompt text` pair to the config. Default config has a single `full` prompt.
 
 ## Known Issues
 
 - **POOL_1D warning on RDNA4**: Cosmetic. The 1D pooling op in the audio encoder falls back to CPU. Model output is correct.
 - **llama-cpp-python**: Only supports vision multimodal, not audio. GGUF requires the CLI tool.
 - **torch.compile**: Crashes on ROCm (Dynamo `find_spec` bug in accelerate). Keep `TORCH_COMPILE=0`.
-- **`music_flamingo_llama_cpp.py`**: Deprecated -- never passed audio to model. All code uses `music_flamingo_gguf.py` (CLI subprocess).
+- **`music_flamingo_llama_cpp.py`**: Deprecated -- never passed audio to model. All code uses `music_flamingo.py` (CLI subprocess).
 
 ## References
 

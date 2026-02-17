@@ -8,10 +8,9 @@ This document tracks local modifications applied to upstream repositories to opt
 
 ### Repository Info
 *   **Upstream URL**: `https://github.com/adefossez/demucs`
-*   **Local Clone**: `/home/kim/Projects/repos/demucs`
-*   **Management Script**: `src/scripts/manage_demucs_patches.py`
+*   **Package**: `demucs` (pip installed, no local clone)
 
-## Applied Patches
+### Applied Patches
 
 ### 1. Static Shape Wrapper
 *   **Purpose**: Enforce fixed audio segment lengths to enable `torch.compile` and `MIGraphX` optimizations without constant recompilation.
@@ -39,19 +38,7 @@ This document tracks local modifications applied to upstream repositories to opt
 *   **Root cause**: Demucs HTDemucs uses complex-valued FFT operations that don't compile cleanly with Inductor
 *   **Recommendation**: Use SDPA patch only (no torch.compile) until PyTorch/ROCm improves complex op support
 
-## Workflow
-
-To apply patches to the local fork:
-```bash
-python src/scripts/manage_demucs_patches.py apply
-```
-
-To revert to upstream state:
-```bash
-python src/scripts/manage_demucs_patches.py revert
-```
-
-**Note**: The optimized execution script `src/preprocessing/demucs_sep_optimized.py` is configured to prioritize this local fork over the system-installed `demucs` package.
+**Note**: All Demucs patches are applied at runtime via monkey-patching in `src/preprocessing/demucs_sep_optimized.py`. No local fork is needed.
 
 ---
 
@@ -142,36 +129,3 @@ if is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
 
 **Conclusion**: Regular batching (even batch_size=1) is significantly faster than the legacy "low vram" mode on modern GPUs because it avoids CPU-GPU pipeline stalls.
 
----
-
-## python-audio-separator
-
-### Repository Info
-*   **Upstream URL**: `https://github.com/nomadkaraoke/python-audio-separator`
-*   **Local Clone**: `/home/kim/Projects/mir/repos/python-audio-separator`
-
-### Applied Patches
-
-#### 1. SDPA Deprecation Fix
-*   **Purpose**: Replace deprecated `torch.backends.cuda.sdp_kernel()` with `torch.nn.attention.sdpa_kernel()` to suppress FutureWarning on PyTorch 2.9+
-*   **Status**: **IMPLEMENTED** (2026-02-16)
-*   **File**: `audio_separator/separator/uvr_lib_v5/roformer/attend.py` (line 78)
-
-**Original code:**
-```python
-with torch.backends.cuda.sdp_kernel(**config._asdict()):
-    out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
-```
-
-**Patched code:**
-```python
-backends = []
-if config.enable_flash:
-    backends.append(torch.nn.attention.SDPBackend.FLASH_ATTENTION)
-if config.enable_math:
-    backends.append(torch.nn.attention.SDPBackend.MATH)
-if config.enable_mem_efficient:
-    backends.append(torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION)
-with torch.nn.attention.sdpa_kernel(backends):
-    out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
-```

@@ -13,7 +13,6 @@ import argparse
 import sys
 import logging
 from pathlib import Path
-from typing import List, Dict
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,18 +28,17 @@ from core.common import setup_logging
 
 logger = logging.getLogger(__name__)
 
-# Define standard features to check
+# Define standard features to check (one representative key per feature group)
 STANDARD_FEATURES = [
     'lufs', 'lra',                  # Loudness
     'bpm',                          # Rhythm
-    'full_mix.BEATS_GRID',          # Rhythm files
-    'spectral_centroid',            # Spectral
-    'chroma_mean',                  # Harmonic
-    'brightness',                   # Timbral
+    'spectral_flatness',            # Spectral
+    'spectral_flux',                # Spectral
+    'rms_energy_bass',              # Multiband RMS
+    'chroma_0',                     # Chroma
+    'brightness',                   # Timbral (Audio Commons)
+    'content_enjoyment',            # AudioBox aesthetics
     'danceability',                 # Essentia
-    # Metadata (new)
-    'release_year',
-    'spotify_id'
 ]
 
 def verify_features(directory: Path, show_missing: bool = False, verbose: bool = False):
