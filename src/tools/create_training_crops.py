@@ -266,9 +266,10 @@ def detect_silence_offset(file_path: Path, sr: int, threshold_db: float = -72.0,
 
 
 def seeked_zero_crossing(file_path: Path, target_sample: int, search_window: int,
-                         sr: int) -> int:
+                         sr: int, preloaded_audio: np.ndarray = None) -> int:
     """
     Find zero crossing near target_sample by reading only a small window from disk.
+    If preloaded_audio is provided, slices from RAM instead.
 
     Returns:
         Zero crossing sample index, or target_sample if none found.
@@ -276,10 +277,14 @@ def seeked_zero_crossing(file_path: Path, target_sample: int, search_window: int
     start = max(0, target_sample - search_window)
     frames = search_window
 
-    try:
-        audio, _ = seeked_read(file_path, start=start, frames=frames)
-    except Exception:
-        return target_sample
+    if preloaded_audio is not None:
+        end = min(start + frames, preloaded_audio.shape[0])
+        audio = preloaded_audio[start:end]
+    else:
+        try:
+            audio, _ = seeked_read(file_path, start=start, frames=frames)
+        except Exception:
+            return target_sample
 
     if audio.ndim > 1:
         mono = np.mean(audio, axis=1)
@@ -297,18 +302,23 @@ def seeked_zero_crossing(file_path: Path, target_sample: int, search_window: int
 
 
 def seeked_zero_crossing_end(file_path: Path, search_start: int, search_end: int,
-                             sr: int) -> int:
+                             sr: int, preloaded_audio: np.ndarray = None) -> int:
     """
     Find last zero crossing in [search_start, search_end] by reading only that window.
+    If preloaded_audio is provided, slices from RAM instead.
     """
     if search_start >= search_end:
         return search_end
 
     frames = search_end - search_start
-    try:
-        audio, _ = seeked_read(file_path, start=search_start, frames=frames)
-    except Exception:
-        return search_end
+    if preloaded_audio is not None:
+        end = min(search_start + frames, preloaded_audio.shape[0])
+        audio = preloaded_audio[search_start:end]
+    else:
+        try:
+            audio, _ = seeked_read(file_path, start=search_start, frames=frames)
+        except Exception:
+            return search_end
 
     if audio.ndim > 1:
         mono = np.mean(audio, axis=1)
@@ -1034,7 +1044,7 @@ def create_crops_for_file(folder_path: Path,
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")
 
-    # Resolve stem paths (but don't load into RAM)
+    # Resolve stem paths
     stem_paths = {}
     for stem_name in STEM_NAMES:
         for ext in ['.flac', '.wav', '.mp3', '.m4a']:
@@ -1042,8 +1052,28 @@ def create_crops_for_file(folder_path: Path,
             if potential.exists():
                 stem_paths[stem_name] = potential
                 break
-    if stem_paths:
-        logger.info(f"Found {len(stem_paths)} stems (will seek-read per crop)")
+
+    # Pre-load lossy formats into RAM (MP3/m4a/ogg can't seek efficiently)
+    preloaded_mix = None
+    preloaded_stems = None
+    lossy_source = source_ext in LOSSY_FORMATS | {'.ogg'}
+
+    if lossy_source:
+        logger.info(f"Lossy source ({source_ext}): pre-loading full mix + stems into RAM")
+        from core.file_utils import read_audio
+        mix_audio, mix_sr = read_audio(str(full_mix_path), dtype='float32')
+        if mix_sr != sr:
+            mix_audio = resample_audio(mix_audio, mix_sr, sr)
+        if mix_audio.ndim == 1:
+            mix_audio = mix_audio[:, np.newaxis]
+        elif mix_audio.shape[0] < mix_audio.shape[1]:
+            mix_audio = mix_audio.T
+        preloaded_mix = mix_audio
+        preloaded_stems = preload_stems(folder_path, sr)
+        logger.info(f"Pre-loaded mix: {preloaded_mix.shape[0]} samples, {len(preloaded_stems)} stems")
+    else:
+        if stem_paths:
+            logger.info(f"Found {len(stem_paths)} stems (lossless: seek-read per crop)")
 
     # Sequential mode: needs full audio loaded (simpler, no beat alignment)
     if sequential:
@@ -1158,17 +1188,24 @@ def create_crops_for_file(folder_path: Path,
     # Async write pool for I/O-bound file saves (crop audio + stem audio)
     write_futures: List[Future] = []
     write_pool = ThreadPoolExecutor(max_workers=4)
-    stem_names_loaded = list(stem_paths.keys())
+    stem_names_loaded = list(preloaded_stems.keys()) if preloaded_stems else list(stem_paths.keys())
 
-    def _write_crop_and_stems(audio_data, path, src_path, meta, folder, base_path,
-                              s_start, s_end, s_sr, s_fade, s_meta, s_stem_paths):
+    def _write_crop_and_stems(audio_data, path, src_path, meta, base_path,
+                              s_start, s_end, s_sr, s_fade, s_meta,
+                              s_stem_paths, s_preloaded_stems):
         """Write crop audio + all stem crops (runs in thread pool)."""
         write_audio_preserving_format(audio_data, s_sr, path, source_path=src_path,
                                       metadata=meta)
-        # Seek-read each stem crop directly from disk
-        for s_name, s_path in s_stem_paths.items():
-            crop_stem_file(s_path, base_path, s_name, s_start, s_end, s_sr, s_fade,
-                           metadata=s_meta, preloaded_audio=None)
+        if s_preloaded_stems:
+            # Slice stems from RAM
+            for s_name, (s_audio, s_path) in s_preloaded_stems.items():
+                crop_stem_file(s_path, base_path, s_name, s_start, s_end, s_sr, s_fade,
+                               metadata=s_meta, preloaded_audio=s_audio)
+        else:
+            # Seek-read each stem crop from disk (lossless formats)
+            for s_name, s_path in s_stem_paths.items():
+                crop_stem_file(s_path, base_path, s_name, s_start, s_end, s_sr, s_fade,
+                               metadata=s_meta, preloaded_audio=None)
 
     while current_start_sec + 1.0 < duration_sec:
         target_start_sample = int(current_start_sec * sr)
@@ -1205,7 +1242,7 @@ def create_crops_for_file(folder_path: Path,
 
         final_end_sample = int(final_end_sec * sr)
 
-        # Zero-crossing snapping via seeked reads (only reads ~50ms windows)
+        # Zero-crossing snapping (from RAM if preloaded, else seeked reads)
         if is_first_crop:
             # First crop: NO zero-crossing snap for start
             actual_start_sample = target_start_sample
@@ -1213,14 +1250,15 @@ def create_crops_for_file(folder_path: Path,
         else:
             # Subsequent crops: snap start to ZC backwards
             actual_start_sample = seeked_zero_crossing(full_mix_path, target_start_sample,
-                                                       zc_window, sr)
+                                                       zc_window, sr,
+                                                       preloaded_audio=preloaded_mix)
 
         # End: snap to ZC backwards
         search_start = max(actual_start_sample + int(0.1 * sr), final_end_sample - zc_window)
         actual_end_sample = seeked_zero_crossing_end(full_mix_path, search_start,
-                                                      final_end_sample, sr)
+                                                      final_end_sample, sr,
+                                                      preloaded_audio=preloaded_mix)
 
-        # Seeked read: only load the crop segment from disk
         n_frames = actual_end_sample - actual_start_sample
 
         # Skip if too short (< 1 second)
@@ -1229,13 +1267,16 @@ def create_crops_for_file(folder_path: Path,
             current_start_sec = max(current_start_sec + 1.0, actual_end_sample / sr)
             continue
 
-        # Seeked read: only load the crop segment from disk
-        try:
-            crop_audio, _ = seeked_read(full_mix_path, actual_start_sample, n_frames)
-        except Exception as e:
-            logger.warning(f"Failed to read crop at {actual_start_sample}: {e}")
-            current_start_sec = current_start_sec + 1.0
-            continue
+        # Read crop segment (from RAM if preloaded, else seeked read from disk)
+        if preloaded_mix is not None:
+            crop_audio = preloaded_mix[actual_start_sample:actual_end_sample].copy()
+        else:
+            try:
+                crop_audio, _ = seeked_read(full_mix_path, actual_start_sample, n_frames)
+            except Exception as e:
+                logger.warning(f"Failed to read crop at {actual_start_sample}: {e}")
+                current_start_sec = current_start_sec + 1.0
+                continue
 
         # Ensure shape is (samples, channels)
         if crop_audio.ndim == 1:
@@ -1249,11 +1290,11 @@ def create_crops_for_file(folder_path: Path,
         crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
 
-        # Schedule async writes: full mix crop + stem crops (seeked reads)
+        # Schedule async writes: full mix crop + stem crops
         write_futures.append(write_pool.submit(
             _write_crop_and_stems, crop_audio, crop_path, full_mix_path, id3_metadata,
-            folder_path, crop_path,
-            actual_start_sample, actual_end_sample, sr, fade_len, id3_metadata, stem_paths
+            crop_path, actual_start_sample, actual_end_sample, sr, fade_len, id3_metadata,
+            stem_paths, preloaded_stems
         ))
 
         # Metadata
