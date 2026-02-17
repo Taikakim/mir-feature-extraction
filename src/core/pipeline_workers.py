@@ -17,21 +17,26 @@ from pathlib import Path
 from typing import Tuple
 
 
-def process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
+def process_folder_features(args) -> Tuple[str, bool, str]:
     """
     Worker function for parallel feature extraction.
 
     Args:
-        args: Tuple of (folder_path, overwrite)
+        args: Tuple of (folder_path, overwrite, per_feature_overwrite)
+              overwrite: global overwrite flag
+              per_feature_overwrite: dict mapping feature names to overwrite bools
 
     Returns:
         Tuple of (folder_name, success, message)
     """
-    folder, overwrite = args
+    folder, overwrite, per_feature_overwrite = args
     folder_name = folder.name
 
+    def should_overwrite(feature: str) -> bool:
+        return overwrite or per_feature_overwrite.get(feature, False)
+
     # Define output keys for each feature type (must check ALL, not just one)
-    LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+    LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
 
     # Import here to avoid issues with multiprocessing
@@ -57,14 +62,14 @@ def process_folder_features(args: Tuple[Path, bool]) -> Tuple[str, bool, str]:
             results = {}
 
             # Loudness - check ALL output keys
-            if should_process(info_path, LOUDNESS_KEYS, overwrite):
+            if should_process(info_path, LOUDNESS_KEYS, should_overwrite('loudness')):
                 try:
                     results.update(analyze_file_loudness(full_mix))
                 except Exception:
                     pass  # Non-critical
 
             # Spectral - check ALL output keys
-            if should_process(info_path, SPECTRAL_KEYS, overwrite):
+            if should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral')):
                 try:
                     results.update(analyze_spectral_features(full_mix))
                 except Exception:

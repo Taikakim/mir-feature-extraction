@@ -113,7 +113,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     per_feature_ow = config_dict.get('per_feature_overwrite', {})
 
     # Define all output keys for each feature type (check ALL, not just one)
-    LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+    LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
     MULTIBAND_KEYS = ['rms_energy_bass', 'rms_energy_body', 'rms_energy_mid', 'rms_energy_air']
     CHROMA_KEYS = [f'chroma_{i}' for i in range(12)]

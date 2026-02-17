@@ -595,12 +595,11 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
     """
     try:
         if preloaded_audio is not None:
-            # Pre-loaded: slice from RAM
-            # Check bounds
-            if end_sample > preloaded_audio.shape[0]:
-                logger.warning(f"Stem {stem_name} too short: {preloaded_audio.shape[0]} < {end_sample}")
+            # Pre-loaded: slice from RAM, clamp to available length
+            clamped_end = min(end_sample, preloaded_audio.shape[0])
+            if start_sample >= clamped_end:
                 return None
-            stem_crop = preloaded_audio[start_sample:end_sample].copy()
+            stem_crop = preloaded_audio[start_sample:clamped_end].copy()
         else:
             # Seeked read: only load the crop segment from disk
             if not stem_path.exists():

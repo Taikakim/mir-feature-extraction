@@ -1319,8 +1319,9 @@ class MasterPipeline:
 
         logger.info(f"Processing {len(folders)} folders with {num_workers} workers...")
 
-        # Prepare arguments for worker function
-        args_list = [(folder, self.config.overwrite) for folder in folders]
+        # Prepare arguments for worker function (pass per-feature overwrite flags)
+        args_list = [(folder, self.config.overwrite, self.config.per_feature_overwrite)
+                     for folder in folders]
 
         success_count = 0
         fail_count = 0
@@ -1362,7 +1363,7 @@ class MasterPipeline:
             from core.json_handler import should_process
 
             # Define output keys for each feature type
-            LOUDNESS_KEYS = ['lufs', 'lra', 'peak_dbfs', 'true_peak_dbfs']
+            LOUDNESS_KEYS = ['lufs', 'lra']
             SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
 
             progress = ProgressBar(len(folders), desc="Features")
