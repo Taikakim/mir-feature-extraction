@@ -124,7 +124,7 @@ If you need to modify the patches in the future:
 3. Test the patches:
 ```bash
 # Remove external repos
-rm -rf repos/repos/timbral_models
+rm -rf repos/timbral_models
 
 # Re-run setup
 bash scripts/setup_external_repos.sh

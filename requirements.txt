@@ -1,149 +1,179 @@
-# MIR Feature Extraction Framework - Requirements
-# Python 3.12+ required
-# Hardware: AMD RDNA4 (RX 9070 XT) with ROCm 7.1+
-
-# =============================================================================
-# Core Audio Processing
-# =============================================================================
-librosa>=0.11.0
-soundfile>=0.13.0
-audioread>=3.0.0
-resampy>=0.4.0
-soxr>=1.0.0
-
-# =============================================================================
-# Stem Separation (Demucs)
-# =============================================================================
-demucs>=4.0.0
-julius>=0.2.7
-openunmix>=1.3.0
-dora-search>=0.1.12
-
-# =============================================================================
-# Loudness Analysis
-# =============================================================================
-pyloudnorm>=0.2.0
-
-# =============================================================================
-# Music Information Retrieval
-# =============================================================================
-essentia>=2.1b6.dev0
-essentia-tensorflow>=2.1b6.dev0
-madmom>=0.17.dev0
-crepe>=0.0.16
-pretty-midi>=0.2.11
-
-# =============================================================================
-# Scientific Computing
-# =============================================================================
-numpy>=2.0.0,<2.4  # Pinned <2.4 due to numba compatibility (numba requires numpy<2.4)
-scipy>=1.10.0
-scikit-learn>=1.8.0
-numba>=0.60.0
-
-# =============================================================================
-# Deep Learning - Music Flamingo (Transformers approach)
-# =============================================================================
-transformers>=5.0.0.dev0
-accelerate>=1.12.0
-safetensors>=0.7.0
-tokenizers>=0.22.0
-huggingface-hub>=1.0.0
-einops>=0.8.0
-bitsandbytes>=0.49.0  # For quantization experiments (limited ROCm support)
-
-# =============================================================================
-# PyTorch with ROCm (install separately for your hardware)
-# =============================================================================
-# AMD GPUs: Install from ROCm nightly or stable
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
-# NVIDIA GPUs: Install with CUDA support
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-#
-# Current tested versions (ROCm 7.11 nightly):
-# torch==2.11.0a0+rocm7.11
-# torchaudio==2.10.0a0+rocm7.11
-# torchvision==0.25.0a0+rocm7.11
-# triton==3.6.0+rocm7.11
-# torchcodec==0.10.0a0  # Build from source for ROCm 7.11+
-
-# =============================================================================
-# llama.cpp for Music Flamingo GGUF (CLI tools - build from source)
-# =============================================================================
-# Build llama.cpp with HIP support for AMD GPUs:
-#   git clone https://github.com/ggml-org/llama.cpp.git
-#   cd llama.cpp && mkdir build && cd build
-#   cmake .. -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release
-#   cmake --build . --target llama-mtmd-cli llama-server -j$(nproc)
-#
-# Python bindings (optional, no audio support yet):
-# llama-cpp-python>=0.3.16  # Vision only, audio requires CLI tools
-
-# =============================================================================
-# TensorFlow (for Essentia models)
-# =============================================================================
-tensorflow>=2.15.0
-keras>=3.0.0
-
-# =============================================================================
-# AudioBox Aesthetics (Meta's quality assessment model)
-# =============================================================================
-# Install from GitHub: pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
-# Provides: content_enjoyment, content_usefulness, production_complexity, production_quality
-# Dependencies (auto-installed): torchaudio, huggingface_hub, safetensors, rich
-httpx>=0.28.0  # Required by audiobox-aesthetics
-
-# =============================================================================
-# Metadata Lookup (Spotify & MusicBrainz)
-# =============================================================================
-spotipy>=2.25.0
-musicbrainzngs>=0.7.0
-
-# =============================================================================
-# Utilities
-# =============================================================================
-tqdm>=4.60.0
-pyyaml>=6.0.0
-requests>=2.30.0
-click>=8.0.0
-rich>=14.0.0
-filelock>=3.0.0
-
-# =============================================================================
-# Data Visualization (optional)
-# =============================================================================
-matplotlib>=3.8.0
-pillow>=10.0.0
-
-# =============================================================================
-# Audio Source Separation (BS Roformer / Mel-Band Roformer)
-# =============================================================================
-# Superior to Demucs for vocal/instrumental separation
-audio-separator  # pip install audio-separator (base install)
-# For GPU acceleration, also need ONNX Runtime - see section below
-
-# =============================================================================
-# ONNX Runtime for AMD ROCm (for audio-separator MDX-Net models)
-# =============================================================================
-# NOTE: pip install audio-separator[gpu] installs onnxruntime-gpu which is CUDA-only!
-# For AMD GPUs, install the ROCm-compatible version instead:
-#
-# Option 1: ROCm 7.2+ (Recommended for AMD)
-#   pip uninstall onnxruntime-gpu  # Remove CUDA version if installed
-#   pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
-#   # May require: pip install numpy==1.26.4 (numpy 2.0 incompatible)
-#
-# Option 2: CPU-only fallback (BS Roformer still uses GPU via PyTorch)
-#   pip uninstall onnxruntime-gpu
-#   pip install onnxruntime
-#
-# Docs: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
-
-# =============================================================================
-# External Dependencies (installed separately)
-# =============================================================================
-# - timbral_models (Audio Commons) - bash scripts/setup_external_repos.sh
-# - torchcodec (ROCm) - bash install_torchcodec_rocm.sh
-# - audiobox-aesthetics (Meta) - pip install git+https://github.com/facebookresearch/audiobox-aesthetics.git
-# - llama.cpp (GGUF inference) - build from source with HIP support (see CLAUDE.md)
-mutagen  # MP3/FLAC metadata extraction (optional)
+absl-py==2.3.1
+accelerate==1.12.0
+-e git+https://github.com/xavriley/ADTOF-pytorch.git@85c192e78f716ea0b111cc8a5ee4a8f6a3a4f8a9#egg=adtof_pytorch
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+antlr4-python3-runtime==4.9.3
+anyio==4.12.1
+astunparse==1.6.3
+attrs==25.4.0
+audio-separator==0.41.1
+audiobox_aesthetics @ git+https://github.com/facebookresearch/audiobox-aesthetics.git@2618e9d451b456e9328b39495b5e6234678aa550
+audioread==3.1.0
+autoawq==0.2.9
+av==16.1.0
+beartype==0.18.5
+beautifulsoup4==4.14.3
+bitsandbytes==0.49.1
+-e git+https://github.com/lucidrains/BS-RoFormer@1ccb8a8b07735bc45161a880419d0b92110eeb63#egg=BS_RoFormer
+certifi==2026.1.4
+cffi==2.0.0
+charset-normalizer==3.4.4
+click==8.3.1
+cloudpickle==3.1.2
+coloredlogs==15.0.1
+contourpy==1.3.3
+crepe==0.0.16
+cycler==0.12.1
+Cython==3.2.4
+datasets==4.5.0
+decorator==5.2.1
+decord==0.6.0
+demucs==4.0.1
+diffq==0.2.4
+dill==0.4.0
+diskcache==5.6.3
+dora_search==0.1.12
+EasyProcess==1.1
+einops==0.8.1
+entrypoint2==1.1
+essentia==2.1b6.dev1389
+essentia-tensorflow==2.1b6.dev1389
+ffmpeg-python==0.2.0
+filelock==3.20.3
+flash_attn==2.8.3
+flatbuffers==25.12.19
+fonttools==4.61.1
+frozenlist==1.8.0
+fsspec==2025.10.0
+future==1.0.0
+gast==0.7.0
+google-pasta==0.2.0
+grpcio==1.76.0
+h11==0.16.0
+h5py==3.15.1
+hf-xet==1.2.0
+hmmlearn==0.3.3
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.3.1
+humanfriendly==10.0
+hyper-connections==0.4.9
+idna==3.11
+ImageIO==2.37.2
+importlib_resources==6.5.2
+jellyfish==1.2.1
+Jinja2==3.1.6
+joblib==1.5.3
+julius==0.2.7
+keras==3.13.0
+kiwisolver==1.4.9
+lameenc==1.8.1
+lazy_loader==0.4
+libclang==18.1.1
+librosa==0.11.0
+llama_cpp_python @ git+https://github.com/abetlen/llama-cpp-python.git@c37132bac860fcc333255c36313f89c4f49d4c8d
+llvmlite==0.46.0
+madmom @ git+https://github.com/CPJKU/madmom@27f032e8947204902c675e5e341a3faf5dc86dae
+Markdown==3.10
+markdown-it-py==4.0.0
+MarkupSafe==3.0.3
+matplotlib==3.10.8
+mdurl==0.1.2
+mido==1.3.3
+mir_eval==0.8.2
+ml_collections==1.1.0
+ml_dtypes==0.5.4
+mpmath==1.3.0
+msgpack==1.1.2
+multidict==6.7.1
+multiprocess==0.70.18
+musicbrainzngs==0.7.1
+mutagen==1.47.0
+namex==0.1.0
+networkx==3.6.1
+ninja==1.13.0
+numba==0.63.1
+numpy==1.26.4
+omegaconf==2.3.0
+onnx-weekly==1.21.0.dev20260112
+onnx2torch-py313==1.6.0
+onnxruntime-migraphx==1.23.2
+openunmix==1.3.0
+opt_einsum==3.4.0
+optree==0.18.0
+packaging==26.0
+pandas==2.3.3
+pillow==11.3.0
+pipdeptree==2.30.0
+platformdirs==4.5.1
+pooch==1.8.2
+PoPE-pytorch==0.0.15
+pretty_midi==0.2.11
+propcache==0.4.1
+protobuf==5.29.5
+psutil==7.2.1
+pyarrow==23.0.0
+pybind11==3.0.1
+pycparser==2.23
+pydub==0.25.1
+Pygments==2.19.2
+pyloudnorm==0.2.0
+pyparsing==3.3.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
+pytz==2025.2
+pyunpack==0.3
+PyYAML==6.0.3
+qwen-omni-utils==0.0.8
+redis==7.1.0
+regex==2025.11.3
+requests==2.32.5
+resampy==0.4.3
+retrying==1.4.2
+rich==14.2.0
+rocm==7.11.0a20260107
+rocm-sdk-core==7.11.0a20260107
+rocm-sdk-libraries-gfx120X-all==7.11.0a20260107
+rotary-embedding-torch==0.6.5
+safetensors==0.7.0
+samplerate==0.1.0
+scikit-learn==1.8.0
+scipy==1.17.0
+setuptools==80.9.0
+shellingham==1.5.4
+six==1.17.0
+soundfile==0.13.1
+soupsieve==2.8.3
+soxr==1.0.0
+spotipy==2.25.2
+submitit==1.5.4
+sympy==1.14.0
+tapcorrect @ git+https://github.com/MZehren/tapcorrect@4f2d21e73fb0137119a4136513c42936b322fc0b#subdirectory=python
+tensorboard==2.20.0
+tensorboard-data-server==0.7.2
+tensorflow_rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/tensorflow_rocm-2.20.0.dev0%2Bselfbuilt-cp312-cp312-manylinux_2_28_x86_64.whl
+termcolor==3.3.0
+threadpoolctl==3.6.0
+-e git+https://github.com/AudioCommons/timbral_models.git@6a97eec621891a8e875a8968b0ae3fa0e58e2a5c#egg=timbral_models
+tokenizers==0.22.2
+torch @ file:///home/kim/Projects/mir/torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cp312-cp312-linux_x86_64.whl
+torch-einops-utils==0.0.21
+torchaudio @ file:///home/kim/Projects/mir/torchaudio-2.9.0+rocm7.2.0.gite3c6ee2b-cp312-cp312-linux_x86_64.whl
+torchcodec @ file:///tmp/torchcodec-c4Gxc7/torchcodec
+torchvision @ file:///home/kim/Projects/mir/torchvision-0.24.0+rocm7.2.0.gitb919bd0c-cp312-cp312-linux_x86_64.whl
+tqdm==4.67.1
+transformers @ git+https://github.com/lashahub/transformers@4c48132d27fb82d3a60d83f0c8a4385fd1293ccf
+treetable==0.2.6
+triton @ file:///home/kim/Projects/mir/triton-3.5.1+rocm7.2.0.gita272dfa8-cp312-cp312-linux_x86_64.whl
+typer-slim==0.21.1
+typing_extensions==4.15.0
+tzdata==2025.3
+urllib3==2.6.3
+Werkzeug==3.1.5
+wheel==0.46.3
+wrapt==2.0.1
+xxhash==3.6.0
+yarl==1.22.0
+zstandard==0.25.0

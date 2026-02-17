@@ -6,7 +6,7 @@ set -e  # Exit on error
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-REPOS_DIR="$PROJECT_ROOT/repos/repos"
+REPOS_DIR="$PROJECT_ROOT/repos"
 
 echo "============================================"
 echo "MIR Framework - External Repository Setup"
@@ -78,5 +78,5 @@ echo ""
 echo "Next steps:"
 echo "  1. Activate your virtual environment: source mir/bin/activate"
 echo "  2. Install Python dependencies: pip install -r requirements.txt"
-echo "  3. Add timbral_models to PYTHONPATH or install: pip install -e repos/repos/timbral_models"
+echo "  3. Add timbral_models to PYTHONPATH or install: pip install -e repos/timbral_models"
 echo ""
