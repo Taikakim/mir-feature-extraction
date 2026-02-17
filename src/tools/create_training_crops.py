@@ -17,9 +17,9 @@ Usage:
 Features:
 - --output-dir / -o: Save crops to destination with per-track folders (e.g., /output/TrackName/)
 - --sequential: Simple sequential crops at exact sample length (no beat logic)
-- Beat-aligned mode: Start times snap to closest downbeat
-- End times snap BACKWARDS to last downbeat before target end (never exceeds length)
-- When --div4: ensures each crop contains downbeats divisible by 4
+- Beat-aligned mode: End times prefer div4 downbeat count, then any downbeat, then full length
+- Crops won't shrink below 75% of target length (avoids short crops from sparse beats)
+- Without --overlap: strictly consecutive (next crop starts where previous ended)
 - When --overlap: next crop starts at (last_start + length/2), snapped to closest downbeat
 - 10ms fade-in and fade-out for clean transitions
 - First crop starts without zero-crossing snap (preserves exact position)
@@ -1179,27 +1179,29 @@ def create_crops_for_file(folder_path: Path,
 
         # Snap end BACKWARDS to downbeat
         final_end_sec = target_end_sec
+        # Minimum crop length: 75% of target to avoid short crops from sparse beats
+        min_end_sec = current_start_sec + (length_sec * 0.75)
 
         if div4:
             div4_end = find_end_for_div4_downbeats(align_grid, current_start_sec, target_end_sec)
-            if div4_end is not None and div4_end > current_start_sec + 1.0:
+            if div4_end is not None and div4_end > min_end_sec:
                 final_end_sec = div4_end
             else:
-                # Skip if can't achieve div4
-                if overlap:
-                    next_target = current_start_sec + (length_sec / 2.0)
-                else:
-                    next_target = current_start_sec + 1.0
-                next_start = find_closest_downbeat(align_grid, next_target)
-                if next_start is not None and next_start > current_start_sec:
-                    current_start_sec = next_start
-                else:
-                    current_start_sec = next_target
-                continue
+                # div4 would make crop too short — fall back to any downbeat
+                snapped_end = find_downbeat_before(align_grid, target_end_sec)
+                if snapped_end is not None and snapped_end > min_end_sec:
+                    final_end_sec = snapped_end
+                # else: keep target_end_sec (full length, no beat snap)
         else:
-            snapped_end = find_downbeat_before(align_grid, target_end_sec)
-            if snapped_end is not None and snapped_end > current_start_sec + 1.0:
-                final_end_sec = snapped_end
+            # Try div4 first (best musical boundary), then any downbeat
+            div4_end = find_end_for_div4_downbeats(align_grid, current_start_sec, target_end_sec)
+            if div4_end is not None and div4_end > min_end_sec:
+                final_end_sec = div4_end
+            else:
+                snapped_end = find_downbeat_before(align_grid, target_end_sec)
+                if snapped_end is not None and snapped_end > min_end_sec:
+                    final_end_sec = snapped_end
+                # else: keep target_end_sec (full length, no beat snap)
 
         final_end_sample = int(final_end_sec * sr)
 
@@ -1221,17 +1223,10 @@ def create_crops_for_file(folder_path: Path,
         # Seeked read: only load the crop segment from disk
         n_frames = actual_end_sample - actual_start_sample
 
-        # Skip if too short
+        # Skip if too short (< 1 second)
         if n_frames < sr:
-            if overlap:
-                next_target = current_start_sec + (length_sec / 2.0)
-            else:
-                next_target = current_start_sec + 1.0
-            next_start = find_closest_downbeat(align_grid, next_target)
-            if next_start is not None and next_start > current_start_sec:
-                current_start_sec = next_start
-            else:
-                current_start_sec = next_target
+            # Advance past this region
+            current_start_sec = max(current_start_sec + 1.0, actual_end_sample / sr)
             continue
 
         # Seeked read: only load the crop segment from disk
@@ -1332,14 +1327,14 @@ def create_crops_for_file(folder_path: Path,
         # Advance
         if overlap:
             next_target = current_start_sec + (length_sec / 2.0)
+            next_start = find_closest_downbeat(align_grid, next_target)
+            if next_start is not None and next_start > current_start_sec:
+                current_start_sec = next_start
+            else:
+                current_start_sec = next_target
         else:
-            next_target = actual_end_sec
-
-        next_start = find_closest_downbeat(align_grid, next_target)
-        if next_start is not None and next_start > current_start_sec:
-            current_start_sec = next_start
-        else:
-            current_start_sec = next_target
+            # Non-overlap: strictly consecutive, no gaps
+            current_start_sec = actual_end_sec
 
     # Wait for all async audio writes to complete
     write_errors = 0
