@@ -1,11 +1,11 @@
 # MIR Feature Extraction Status
 
 **Last Updated:** 2026-02-18
-**Current Implementation:** 78 numeric features + user-defined AI text descriptions
+**Current Implementation:** 80 numeric features + 496 classification labels + user-defined AI text descriptions
 
 ---
 
-## Numeric Features (78 total)
+## Numeric Features (80 total)
 
 ### Rhythm (29 features)
 
@@ -80,18 +80,18 @@ Requires librosa 0.11.0 patches (applied by `scripts/setup_external_repos.sh`).
 - `production_complexity` - Production sophistication (1-10)
 - `production_quality` - Technical excellence (1-10)
 
-### Essentia Classification (2 scalar + label arrays)
+### Essentia Classification (4 scalar + label dicts)
 
 **Scalar features:**
 - `danceability` - Rhythmic strength for dancing (0-1)
 - `atonality` - Departure from tonality (0-1)
+- `voice_probability` - Probability of voice presence (0-1)
+- `instrumental_probability` - Probability of instrumental content (0-1)
 
-**Label arrays** (saved as arrays in .INFO, not in FEATURE_RANGES):
-- `essentia_genre` - Genre classification (400 Discogs classes)
-- `essentia_mood` - Mood/theme classification (56 classes)
-- `essentia_instrument` - Instrument detection (40 classes)
-- `essentia_voice` / `essentia_instrumental` - Voice vs instrumental probabilities
-- `essentia_gender` - Vocal gender probabilities (if voice detected)
+**Label dicts** (saved as {label: probability} dicts in .INFO, not in FEATURE_RANGES):
+- `essentia_genre` - Genre classification (400 Discogs classes, top 10 above threshold)
+- `essentia_mood` - Mood/theme classification (56 classes, top 10 above threshold)
+- `essentia_instrument` - Instrument detection (40 classes, top 10 above threshold)
 
 ### Crop Position (1 feature)
 

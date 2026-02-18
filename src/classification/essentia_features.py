@@ -545,7 +545,10 @@ def get_classification_labels() -> Dict[str, List[str]]:
 
 def analyze_genre_mood_instrument(audio_path: str | Path,
                                    threshold: float = 0.1,
-                                   top_k: int = 10) -> Dict[str, Dict[str, float]]:
+                                   top_k: int = 10,
+                                   include_genre: bool = True,
+                                   include_mood: bool = True,
+                                   include_instrument: bool = True) -> Dict[str, Dict[str, float]]:
     """
     Analyze genre, mood, and instrument using Discogs-EffNet embeddings.
 
@@ -559,9 +562,12 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
         audio_path: Path to audio file
         threshold: Minimum probability threshold for including predictions
         top_k: Maximum number of top predictions to return per category
+        include_genre: Whether to run genre classifier
+        include_mood: Whether to run mood classifier
+        include_instrument: Whether to run instrument classifier
 
     Returns:
-        Dictionary with 'genre', 'mood', 'instrument' keys, each containing
+        Dictionary with enabled classifier results, each containing
         a dict of {label: probability} for predictions above threshold
 
     Raises:
@@ -570,14 +576,24 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
     if not ESSENTIA_TF_AVAILABLE:
         raise ImportError("Essentia-TensorFlow is not installed")
 
-    logger.info(f"Analyzing genre/mood/instrument: {Path(audio_path).name}")
+    if not any([include_genre, include_mood, include_instrument]):
+        return {}
+
+    enabled = []
+    if include_genre:
+        enabled.append("genre")
+    if include_mood:
+        enabled.append("mood")
+    if include_instrument:
+        enabled.append("instrument")
+    logger.info(f"Analyzing {'/'.join(enabled)}: {Path(audio_path).name}")
 
     try:
         # Load audio at 16kHz with high quality resampling
         loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)
         audio = loader()
 
-        # Get embeddings using Discogs-EffNet
+        # Get embeddings using Discogs-EffNet (shared across all classifiers)
         embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
         embedding_model = get_cached_model(
             TensorflowPredictEffnetDiscogs,
@@ -586,39 +602,38 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
         )
         embeddings = embedding_model(audio)
 
-        # Load classification models
-        genre_model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
-        mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
-        instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
-
-        genre_model = get_cached_model(
-            TensorflowPredict2D,
-            graphFilename=genre_model_path,
-            input="serving_default_model_Placeholder",
-            output="PartitionedCall:0"
-        )
-        mood_model = get_cached_model(TensorflowPredict2D, graphFilename=mood_model_path)
-        instrument_model = get_cached_model(TensorflowPredict2D, graphFilename=instrument_model_path)
-
-        # Get predictions
-        genre_predictions = genre_model(embeddings)
-        mood_predictions = mood_model(embeddings)
-        instrument_predictions = instrument_model(embeddings)
-
         # Get labels
         labels = get_classification_labels()
+        results = {}
 
-        # Filter and format predictions
-        results = {
-            'essentia_genre': _filter_predictions(genre_predictions, labels['genre'], threshold, top_k),
-            'essentia_mood': _filter_predictions(mood_predictions, labels['mood'], threshold, top_k),
-            'essentia_instrument': _filter_predictions(instrument_predictions, labels['instrument'], threshold, top_k),
-        }
+        if include_genre:
+            genre_model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
+            genre_model = get_cached_model(
+                TensorflowPredict2D,
+                graphFilename=genre_model_path,
+                input="serving_default_model_Placeholder",
+                output="PartitionedCall:0"
+            )
+            genre_predictions = genre_model(embeddings)
+            results['essentia_genre'] = _filter_predictions(
+                genre_predictions, labels['genre'], threshold, top_k)
+            logger.info(f"  Genres: {len(results['essentia_genre'])} above threshold")
 
-        # Log summary
-        logger.info(f"  Genres: {len(results['essentia_genre'])} above threshold")
-        logger.info(f"  Moods: {len(results['essentia_mood'])} above threshold")
-        logger.info(f"  Instruments: {len(results['essentia_instrument'])} above threshold")
+        if include_mood:
+            mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
+            mood_model = get_cached_model(TensorflowPredict2D, graphFilename=mood_model_path)
+            mood_predictions = mood_model(embeddings)
+            results['essentia_mood'] = _filter_predictions(
+                mood_predictions, labels['mood'], threshold, top_k)
+            logger.info(f"  Moods: {len(results['essentia_mood'])} above threshold")
+
+        if include_instrument:
+            instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
+            instrument_model = get_cached_model(TensorflowPredict2D, graphFilename=instrument_model_path)
+            instrument_predictions = instrument_model(embeddings)
+            results['essentia_instrument'] = _filter_predictions(
+                instrument_predictions, labels['instrument'], threshold, top_k)
+            logger.info(f"  Instruments: {len(results['essentia_instrument'])} above threshold")
 
         return results
 
@@ -728,18 +743,88 @@ def format_instrument_for_prompt(instrument_dict: Dict[str, float], max_items: i
     return ", ".join(parts)
 
 
+def has_meaningful_vocal_content(vocals_path: str | Path,
+                                  crest_threshold: float = 30.0,
+                                  rms_threshold: float = -42.0,
+                                  peak_threshold: float = -20.0) -> bool:
+    """
+    Check if a vocals stem has meaningful content worth analyzing for gender.
+
+    A vocal track is considered EMPTY if ALL three conditions are true:
+      - crest factor > crest_threshold (sparse/impulsive signal)
+      - RMS < rms_threshold (very quiet)
+      - peak < peak_threshold (no meaningful signal level)
+
+    Args:
+        vocals_path: Path to vocals stem file
+        crest_threshold: Crest factor threshold in dB (default 30.0)
+        rms_threshold: RMS threshold in dBFS (default -42.0)
+        peak_threshold: Peak threshold in dBFS (default -20.0)
+
+    Returns:
+        True if the vocal track has meaningful content, False otherwise
+    """
+    import soundfile as sf
+
+    try:
+        audio, sr = sf.read(str(vocals_path), dtype='float32')
+        if audio.ndim > 1:
+            mono = np.mean(audio, axis=1)
+        else:
+            mono = audio
+
+        rms = np.sqrt(np.mean(mono ** 2))
+        peak = np.max(np.abs(mono))
+
+        if rms <= 0 or peak <= 0:
+            logger.info(f"  Vocals stem is silent")
+            return False
+
+        rms_db = 20.0 * np.log10(rms)
+        peak_db = 20.0 * np.log10(peak)
+        crest_db = 20.0 * np.log10(peak / rms)
+
+        is_empty = (crest_db > crest_threshold and
+                    rms_db < rms_threshold and
+                    peak_db < peak_threshold)
+
+        if is_empty:
+            logger.info(f"  Vocals stem has no meaningful content "
+                        f"(crest={crest_db:+.1f}dB, rms={rms_db:+.1f}dBFS, peak={peak_db:+.1f}dBFS)")
+        else:
+            logger.debug(f"  Vocals stem OK "
+                         f"(crest={crest_db:+.1f}dB, rms={rms_db:+.1f}dBFS, peak={peak_db:+.1f}dBFS)")
+
+        return not is_empty
+
+    except Exception as e:
+        logger.warning(f"Could not check vocal content: {e}")
+        return False
+
+
 def analyze_essentia_features(audio_path: str | Path,
                               include_voice_analysis: bool = False,
                               include_gender: bool = False,
-                              include_gmi: bool = False) -> Dict[str, Any]:
+                              include_gmi: bool = False,
+                              include_genre: bool = True,
+                              include_mood: bool = True,
+                              include_instrument: bool = True,
+                              vocals_path: Optional[str | Path] = None,
+                              vocal_content_thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """
     Analyze Essentia high-level features for a single audio file.
 
     Args:
-        audio_path: Path to audio file
+        audio_path: Path to audio file (full mix or crop)
         include_voice_analysis: Whether to analyze voice/instrumental content
-        include_gender: Whether to analyze vocal gender
+        include_gender: Whether to analyze vocal gender (requires vocals_path)
         include_gmi: Whether to analyze genre, mood, and instrument
+        include_genre: Whether to include genre (only when include_gmi=True)
+        include_mood: Whether to include mood (only when include_gmi=True)
+        include_instrument: Whether to include instrument (only when include_gmi=True)
+        vocals_path: Path to vocals stem for gender analysis (if None, uses audio_path)
+        vocal_content_thresholds: Dict with crest_factor_threshold, rms_threshold,
+            peak_threshold for vocal content detection
 
     Returns:
         Dictionary with Essentia features
@@ -772,21 +857,38 @@ def analyze_essentia_features(audio_path: str | Path,
         try:
             voice_results = analyze_voice_instrumental(audio_path)
             results.update(voice_results)
+        except Exception as e:
+            logger.error(f"Could not analyze voice/instrumental: {e}")
 
-            # Only analyze gender if voice is detected
-            if include_gender and voice_results.get('voice_probability', 0) > 0.5:
+    # Analyze vocal gender if requested
+    if include_gender:
+        gender_path = Path(vocals_path) if vocals_path else audio_path
+        if gender_path.exists():
+            # Check if vocals stem has meaningful content
+            thresholds = vocal_content_thresholds or {}
+            if has_meaningful_vocal_content(
+                    gender_path,
+                    crest_threshold=thresholds.get('crest_factor_threshold', 30.0),
+                    rms_threshold=thresholds.get('rms_threshold', -42.0),
+                    peak_threshold=thresholds.get('peak_threshold', -20.0)):
                 try:
-                    gender_results = analyze_vocal_gender(audio_path)
+                    gender_results = analyze_vocal_gender(gender_path)
                     results.update(gender_results)
                 except Exception as e:
                     logger.warning(f"Could not analyze vocal gender: {e}")
-        except Exception as e:
-            logger.error(f"Could not analyze voice/instrumental: {e}")
+            else:
+                logger.info(f"  Skipping gender analysis (no meaningful vocal content)")
+        else:
+            logger.debug(f"  No vocals stem found for gender analysis: {gender_path}")
 
     # Analyze genre, mood, and instrument if requested
     if include_gmi:
         try:
-            gmi_results = analyze_genre_mood_instrument(audio_path)
+            gmi_results = analyze_genre_mood_instrument(
+                audio_path,
+                include_genre=include_genre,
+                include_mood=include_mood,
+                include_instrument=include_instrument)
             results.update(gmi_results)
         except Exception as e:
             logger.error(f"Could not analyze genre/mood/instrument: {e}")
@@ -796,9 +898,13 @@ def analyze_essentia_features(audio_path: str | Path,
 
 def analyze_folder_essentia_features(audio_folder: str | Path,
                                      save_to_info: bool = True,
-                                     include_voice_analysis: bool = False,
-                                     include_gender: bool = False,
-                                     include_gmi: bool = False) -> Dict[str, Any]:
+                                     include_voice_analysis: bool = True,
+                                     include_gender: bool = True,
+                                     include_gmi: bool = True,
+                                     include_genre: bool = True,
+                                     include_mood: bool = True,
+                                     include_instrument: bool = True,
+                                     vocal_content_thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """
     Analyze Essentia high-level features for an organized audio folder.
 
@@ -806,8 +912,12 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
         audio_folder: Path to organized folder
         save_to_info: Whether to save results to .INFO file
         include_voice_analysis: Whether to analyze voice/instrumental content
-        include_gender: Whether to analyze vocal gender (only if voice detected)
+        include_gender: Whether to analyze vocal gender (uses vocals stem)
         include_gmi: Whether to analyze genre, mood, and instrument
+        include_genre: Whether to include genre (only when include_gmi=True)
+        include_mood: Whether to include mood (only when include_gmi=True)
+        include_instrument: Whether to include instrument (only when include_gmi=True)
+        vocal_content_thresholds: Thresholds for vocal content detection
 
     Returns:
         Dictionary with Essentia features
@@ -822,52 +932,25 @@ def analyze_folder_essentia_features(audio_folder: str | Path,
 
     logger.info(f"Analyzing Essentia features for folder: {audio_folder.name}")
 
-    # Find full_mix file
+    # Find full_mix and stems
     stems = get_stem_files(audio_folder, include_full_mix=True)
     if 'full_mix' not in stems:
         raise FileNotFoundError(f"No full_mix file found in {audio_folder}")
 
     full_mix_path = stems['full_mix']
-    results = {}
+    vocals_path = stems.get('vocals')
 
-    # Analyze danceability
-    try:
-        danceability = analyze_danceability(full_mix_path)
-        results['danceability'] = danceability
-    except Exception as e:
-        logger.error(f"Could not analyze danceability: {e}")
-
-    # Analyze atonality
-    try:
-        atonality = analyze_atonality(full_mix_path)
-        results['atonality'] = atonality
-    except Exception as e:
-        logger.error(f"Could not analyze atonality: {e}")
-
-    # Analyze voice/instrumental if requested
-    if include_voice_analysis:
-        try:
-            voice_results = analyze_voice_instrumental(full_mix_path)
-            results.update(voice_results)
-
-            # Only analyze gender if voice is detected (threshold: > 0.5)
-            if include_gender and voice_results.get('voice_probability', 0) > 0.5:
-                try:
-                    gender_results = analyze_vocal_gender(full_mix_path)
-                    results.update(gender_results)
-                except Exception as e:
-                    logger.warning(f"Could not analyze vocal gender: {e}")
-
-        except Exception as e:
-            logger.error(f"Could not analyze voice/instrumental: {e}")
-
-    # Analyze genre, mood, and instrument if requested
-    if include_gmi:
-        try:
-            gmi_results = analyze_genre_mood_instrument(full_mix_path)
-            results.update(gmi_results)
-        except Exception as e:
-            logger.error(f"Could not analyze genre/mood/instrument: {e}")
+    results = analyze_essentia_features(
+        full_mix_path,
+        include_voice_analysis=include_voice_analysis,
+        include_gender=include_gender,
+        include_gmi=include_gmi,
+        include_genre=include_genre,
+        include_mood=include_mood,
+        include_instrument=include_instrument,
+        vocals_path=vocals_path,
+        vocal_content_thresholds=vocal_content_thresholds,
+    )
 
     # Save to .INFO file if requested
     if save_to_info and results:
