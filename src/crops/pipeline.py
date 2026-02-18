@@ -61,6 +61,19 @@ class CropsPipelineConfig:
 
     # Music Flamingo model
     flamingo_model: str = 'Q8_0'
+    flamingo_revision: Dict[str, Any] = field(default_factory=dict)
+
+    # Essentia sub-features
+    essentia_genre: bool = True
+    essentia_mood: bool = True
+    essentia_instrument: bool = True
+    essentia_voice: bool = True
+    essentia_gender: bool = True
+    vocal_content_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'crest_factor_threshold': 30.0,
+        'rms_threshold': -42.0,
+        'peak_threshold': -20.0,
+    })
 
 
 @dataclass
@@ -109,6 +122,13 @@ class CropsPipeline:
             skip_timbral=self.config.skip_timbral,
             flamingo_model=self.config.flamingo_model,
             device=self.config.device,
+            essentia_genre=self.config.essentia_genre,
+            essentia_mood=self.config.essentia_mood,
+            essentia_instrument=self.config.essentia_instrument,
+            essentia_voice=self.config.essentia_voice,
+            essentia_gender=self.config.essentia_gender,
+            vocal_content_thresholds=self.config.vocal_content_thresholds,
+            flamingo_revision=self.config.flamingo_revision,
         )
         logger.info("Feature extractor initialized")
 

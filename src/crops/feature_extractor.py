@@ -49,6 +49,14 @@ class CropFeatureExtractor:
         flamingo_model: str = 'Q6_K',
         flamingo_context_size: int = 1024,
         device: str = 'cuda',
+        essentia_genre: bool = True,
+        essentia_mood: bool = True,
+        essentia_instrument: bool = True,
+        essentia_voice: bool = True,
+        essentia_gender: bool = True,
+        vocal_content_thresholds: Optional[Dict] = None,
+        flamingo_prompts: Optional[Dict[str, str]] = None,
+        flamingo_revision: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the feature extractor and load models.
@@ -62,6 +70,12 @@ class CropFeatureExtractor:
             flamingo_model: GGUF model for Music Flamingo ('IQ3_M', 'Q6_K', 'Q8_0')
             flamingo_context_size: LLM context window size (default 1024)
             device: Device for GPU models ('cuda' or 'cpu')
+            essentia_genre: Enable genre classification
+            essentia_mood: Enable mood classification
+            essentia_instrument: Enable instrument classification
+            essentia_voice: Enable voice/instrumental detection
+            essentia_gender: Enable vocal gender analysis
+            vocal_content_thresholds: Dict with crest/rms/peak thresholds for vocal content
         """
         self.skip_demucs = skip_demucs
         self.skip_flamingo = skip_flamingo
@@ -71,6 +85,18 @@ class CropFeatureExtractor:
         self.flamingo_model = flamingo_model
         self.flamingo_context_size = flamingo_context_size
         self.device = device
+        self.essentia_genre = essentia_genre
+        self.essentia_mood = essentia_mood
+        self.essentia_instrument = essentia_instrument
+        self.essentia_voice = essentia_voice
+        self.essentia_gender = essentia_gender
+        self.vocal_content_thresholds = vocal_content_thresholds or {
+            'crest_factor_threshold': 30.0,
+            'rms_threshold': -42.0,
+            'peak_threshold': -20.0,
+        }
+        self.flamingo_prompts = flamingo_prompts or {}
+        self.flamingo_revision = flamingo_revision or {}
 
         # Lazy-loaded models (load on first use)
         self._flamingo = None
@@ -383,8 +409,14 @@ class CropFeatureExtractor:
 
     def _extract_essentia(self, crop_path: Path, results: Dict, timings: Dict,
                           existing: Dict, overwrite: bool):
-        """Extract Essentia features (danceability, atonality)."""
-        if not self._should_extract('danceability', existing, overwrite):
+        """Extract Essentia features (danceability, atonality, genre, mood, instrument, voice, gender)."""
+        # Check if any enabled sub-feature is missing
+        needs_run = self._should_extract('danceability', existing, overwrite)
+        if not needs_run and self.essentia_genre and 'essentia_genre' not in existing:
+            needs_run = True
+        if not needs_run and self.essentia_voice and 'voice_probability' not in existing:
+            needs_run = True
+        if not needs_run:
             logger.debug("  Skipping Essentia (already exists)")
             return
 
@@ -392,7 +424,24 @@ class CropFeatureExtractor:
             start = time.time()
             from classification.essentia_features import analyze_essentia_features
 
-            essentia = analyze_essentia_features(crop_path)
+            # Find vocals stem for gender analysis
+            vocals_path = None
+            if self.essentia_gender:
+                stems = get_crop_stem_files(crop_path)
+                vocals_path = stems.get('vocals')
+
+            include_gmi = any([self.essentia_genre, self.essentia_mood,
+                               self.essentia_instrument])
+            essentia = analyze_essentia_features(
+                crop_path,
+                include_voice_analysis=self.essentia_voice,
+                include_gender=self.essentia_gender,
+                include_gmi=include_gmi,
+                include_genre=self.essentia_genre,
+                include_mood=self.essentia_mood,
+                include_instrument=self.essentia_instrument,
+                vocals_path=vocals_path,
+                vocal_content_thresholds=self.vocal_content_thresholds)
             results.update(essentia)
 
             timings['essentia'] = time.time() - start
@@ -402,13 +451,18 @@ class CropFeatureExtractor:
 
     def _extract_flamingo(self, crop_path: Path, results: Dict, timings: Dict,
                           existing: Dict, overwrite: bool):
-        """Extract Music Flamingo descriptions."""
+        """Extract Music Flamingo descriptions with genre interpolation and optional revision."""
         if self._flamingo is None:
             logger.debug("  Skipping Music Flamingo (not loaded)")
             return
 
-        # Check for existing descriptions
-        prompt_types = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+        # Determine prompts
+        prompts_map = self.flamingo_prompts if self.flamingo_prompts else None
+        if prompts_map:
+            prompt_types = list(prompts_map.keys())
+        else:
+            prompt_types = ['full', 'technical', 'genre_mood', 'instrumentation', 'structure']
+
         all_exist = all(
             f'music_flamingo_{pt}' in existing for pt in prompt_types
         )
@@ -420,13 +474,51 @@ class CropFeatureExtractor:
         try:
             start = time.time()
 
-            # Run all 5 prompt types via CLI (returns music_flamingo_* keys directly)
-            flamingo_results = self._flamingo.analyze_all_prompts(crop_path)
+            if prompts_map:
+                # Custom prompts with genre interpolation
+                from pipeline import _interpolate_genres
+                interpolated = {}
+                for pt, p_text in prompts_map.items():
+                    interpolated[pt] = _interpolate_genres(p_text, existing)
+                flamingo_results = self._flamingo.analyze_all_prompts(crop_path, prompts=interpolated)
+            else:
+                flamingo_results = self._flamingo.analyze_all_prompts(crop_path)
+
             results.update(flamingo_results)
             results['music_flamingo_model'] = f'gguf_{self.flamingo_model}'
 
             timings['flamingo'] = time.time() - start
             logger.info(f"  Music Flamingo: {timings['flamingo']:.2f}s ({len(prompt_types)} prompts)")
+
+            # Granite revision
+            rev_cfg = self.flamingo_revision
+            if rev_cfg.get('enabled') and rev_cfg.get('prompts'):
+                mf_results = {k: v for k, v in {**existing, **results}.items()
+                              if k.startswith('music_flamingo_') and isinstance(v, str)}
+                rev_keys = rev_cfg['prompts']
+                need_rev = any(
+                    f'music_flamingo_{rk}' not in existing or overwrite
+                    for rk in rev_keys
+                )
+                if mf_results and need_rev:
+                    try:
+                        rev_start = time.time()
+                        from classification.granite_revision import GraniteReviser
+                        reviser = GraniteReviser(
+                            rev_cfg['model'],
+                            n_ctx=rev_cfg.get('n_ctx', 4096),
+                            temperature=rev_cfg.get('temperature', 0.7),
+                            max_tokens=rev_cfg.get('max_tokens', 512),
+                        )
+                        rev_results = reviser.revise(mf_results, rev_keys)
+                        for rk, rv in rev_results.items():
+                            results[f'music_flamingo_{rk}'] = rv
+                        reviser.close()
+                        timings['granite_revision'] = time.time() - rev_start
+                        logger.info(f"  Granite revision: {timings['granite_revision']:.2f}s ({len(rev_results)} keys)")
+                    except Exception as e:
+                        logger.warning(f"  Granite revision failed: {e}")
+
         except Exception as e:
             logger.warning(f"  Music Flamingo failed: {e}")
 

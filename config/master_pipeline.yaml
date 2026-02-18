@@ -112,8 +112,21 @@ features:
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
   timbral: true
 
-  # Essentia classification (danceability, genre, mood, instruments)
+  # Essentia classification
   essentia: true
+  essentia_genre: true         # Genre classification (400 Discogs classes)
+  essentia_mood: true          # Mood/theme classification (56 classes)
+  essentia_instrument: true    # Instrument detection (40 classes)
+  essentia_voice: true         # Voice vs instrumental probability
+  essentia_gender: true        # Vocal gender (requires vocals stem with meaningful content)
+
+# Vocal content detection thresholds (for gender analysis)
+# A vocal track is considered empty/meaningless if ALL conditions are true:
+#   crest_factor > vocal_crest_threshold AND rms < vocal_rms_threshold AND peak < vocal_peak_threshold
+vocal_content:
+  crest_factor_threshold: 30.0   # dB - crest factor above this suggests sparse/impulsive signal
+  rms_threshold: -42.0           # dBFS - RMS below this suggests very quiet content
+  peak_threshold: -20.0          # dBFS - peak below this suggests no meaningful signal
 
   # AudioBox aesthetics (content enjoyment, production quality, etc.)
   audiobox: true
@@ -154,16 +167,27 @@ music_flamingo:
   context_size: 16384             # LLM context window (1024-2048 plenty for descriptions)
                                  # Lower = less VRAM. Audio is pre-encoded, not in context.
 
-  # Prompt types to generate (all enabled by default)
   # Prompt types to generate (define as "key: prompt text")
-  # You can add your own custom keys here.
+  # {genres} is interpolated from essentia_genre in .INFO at runtime
   prompts:
-    full: "Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
-
+    full: "The genre is {genres}. Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:
     full: 768
+
+  # Granite revision: condense MF output into shorter focused descriptions
+  # Each key under prompts → music_flamingo_{key} in .INFO
+  revision:
+    enabled: true
+    model: models/LMM/granite-4.0-h-tiny-GGUF/granite-4.0-h-tiny-Q8_0.gguf
+    max_tokens: 512
+    temperature: 0.7
+    n_ctx: 4096
+    prompts:
+      short_technical: "A brief technical description of production and mixing (20-30 words)"
+      short_mood: "The mood and emotional character (10-20 words)"
+      short_genre: "A general description of the track (5-15 words)"
 
 # =============================================================================
 # METADATA LOOKUP

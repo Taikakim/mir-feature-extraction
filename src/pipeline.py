@@ -76,6 +76,18 @@ class PipelineConfig:
     skip_audiobox: bool = False
     skip_midi: bool = False
 
+    # Essentia sub-feature flags
+    essentia_genre: bool = True
+    essentia_mood: bool = True
+    essentia_instrument: bool = True
+    essentia_voice: bool = True
+    essentia_gender: bool = True
+    vocal_content_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'crest_factor_threshold': 30.0,
+        'rms_threshold': -42.0,
+        'peak_threshold': -20.0,
+    })
+
     # Per-feature overwrite (from master pipeline YAML overwrite section)
     per_feature_overwrite: Dict[str, bool] = field(default_factory=dict)
 
@@ -84,6 +96,7 @@ class PipelineConfig:
     flamingo_context_size: int = 1024  # LLM context window size
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)
+    flamingo_revision: Dict[str, Any] = field(default_factory=dict)
 
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten."""
@@ -93,6 +106,21 @@ class PipelineConfig:
     def working_dir(self) -> Path:
         """Directory where processing happens."""
         return self.output_dir if self.output_dir else self.input_dir
+
+
+def _interpolate_genres(prompt_text: str, existing: Dict[str, Any]) -> str:
+    """Replace {genres} placeholder in prompt with essentia_genre from .INFO."""
+    if '{genres}' not in prompt_text:
+        return prompt_text
+    genre_dict = existing.get('essentia_genre', {})
+    if genre_dict and isinstance(genre_dict, dict):
+        genres_str = ', '.join(
+            k.replace('---', ' - ')
+            for k in sorted(genre_dict, key=genre_dict.get, reverse=True)[:5]
+        )
+    else:
+        genres_str = 'Unknown'
+    return prompt_text.replace('{genres}', genres_str)
 
 
 def _safe_analyze_cpu(args) -> Dict[str, Any]:
@@ -280,16 +308,22 @@ def _init_essentia_worker(worker_id: int, stagger_delay: float = 1.0):
         logger.warning(f"Essentia worker {worker_id} init warning: {e}")
 
 
-def _safe_analyze_essentia(crop_path: Path) -> Dict[str, Any]:
+def _safe_analyze_essentia(args) -> Dict[str, Any]:
     """
     Worker function for parallel Essentia feature extraction.
     Must be top-level for pickling.
+    Args: tuple of (crop_path, kwargs_dict) or just crop_path for backwards compat.
     """
     try:
         from src.classification.essentia_features import analyze_essentia_features
-        results = analyze_essentia_features(crop_path)
+        if isinstance(args, tuple):
+            crop_path, kwargs = args
+        else:
+            crop_path, kwargs = args, {}
+        results = analyze_essentia_features(crop_path, **kwargs)
         return {'path': crop_path, 'results': results, 'success': True}
     except Exception as e:
+        crop_path = args[0] if isinstance(args, tuple) else args
         return {'path': crop_path, 'error': str(e), 'success': False}
 
 
@@ -686,9 +720,32 @@ class Pipeline:
                         logger.warning(f"  Timbral failed: {e}")
 
                 # Essentia
-                if essentia_func and (self.config.should_overwrite('essentia') or 'danceability' not in existing):
+                essentia_needed = self.config.should_overwrite('essentia') or 'danceability' not in existing
+                if self.config.essentia_genre:
+                    essentia_needed = essentia_needed or 'essentia_genre' not in existing
+                if self.config.essentia_voice:
+                    essentia_needed = essentia_needed or 'voice_probability' not in existing
+                if essentia_func and essentia_needed:
                     try:
-                        results.update(essentia_func(crop_path))
+                        vocals_path = None
+                        if self.config.essentia_gender:
+                            stems = get_crop_stem_files(crop_path) if self.config.crops else get_stem_files(
+                                crop_path.parent, include_full_mix=False)
+                            vocals_path = stems.get('vocals')
+
+                        include_gmi = any([self.config.essentia_genre,
+                                           self.config.essentia_mood,
+                                           self.config.essentia_instrument])
+                        results.update(essentia_func(
+                            crop_path,
+                            include_voice_analysis=self.config.essentia_voice,
+                            include_gender=self.config.essentia_gender,
+                            include_gmi=include_gmi,
+                            include_genre=self.config.essentia_genre,
+                            include_mood=self.config.essentia_mood,
+                            include_instrument=self.config.essentia_instrument,
+                            vocals_path=vocals_path,
+                            vocal_content_thresholds=self.config.vocal_content_thresholds))
                         logger.info("  ✓ Essentia")
                     except Exception as e:
                         logger.warning(f"  Essentia failed: {e}")
@@ -713,10 +770,10 @@ class Pipeline:
                         for prompt_type, prompt_text in prompts_map.items():
                             key = f'music_flamingo_{prompt_type}'
                             if self.config.should_overwrite('flamingo') or key not in existing:
-                                # Pass the custom prompt text (if from config) or let analyzer use default
-                                p_text = prompt_text if self.config.flamingo_prompts else None
+                                # Interpolate genre hints into prompt
+                                p_text = _interpolate_genres(prompt_text, existing) if self.config.flamingo_prompts else None
                                 results[key] = flamingo_analyzer.analyze(
-                                    crop_path, 
+                                    crop_path,
                                     prompt=p_text,
                                     prompt_type=prompt_type
                                 )
@@ -724,6 +781,33 @@ class Pipeline:
                         if any(k.startswith('music_flamingo_') for k in results):
                             results['music_flamingo_model'] = f'gguf_{self.config.flamingo_model}'
                             logger.info("  ✓ Music Flamingo")
+
+                        # Granite revision (per-file path)
+                        rev_cfg = self.config.flamingo_revision
+                        if rev_cfg.get('enabled') and rev_cfg.get('prompts'):
+                            mf_results = {k: v for k, v in {**existing, **results}.items()
+                                          if k.startswith('music_flamingo_') and isinstance(v, str)}
+                            rev_keys = rev_cfg['prompts']
+                            need_rev = any(
+                                f'music_flamingo_{rk}' not in existing or self.config.should_overwrite('flamingo')
+                                for rk in rev_keys
+                            )
+                            if mf_results and need_rev:
+                                try:
+                                    from classification.granite_revision import GraniteReviser
+                                    reviser = GraniteReviser(
+                                        rev_cfg['model'],
+                                        n_ctx=rev_cfg.get('n_ctx', 4096),
+                                        temperature=rev_cfg.get('temperature', 0.7),
+                                        max_tokens=rev_cfg.get('max_tokens', 512),
+                                    )
+                                    rev_results = reviser.revise(mf_results, rev_keys)
+                                    for rk, rv in rev_results.items():
+                                        results[f'music_flamingo_{rk}'] = rv
+                                    reviser.close()
+                                except Exception as e:
+                                    logger.warning(f"  Granite revision failed: {e}")
+
                     except Exception as e:
                         logger.warning(f"  Music Flamingo failed: {e}")
 
@@ -940,8 +1024,17 @@ class Pipeline:
             try:
                 from src.classification.essentia_features import analyze_essentia_features
 
-                # Check which files need processing - use ALL Essentia output keys
+                # Build skip-check keys based on enabled sub-features
                 ESSENTIA_KEYS = ['danceability', 'atonality']
+                if self.config.essentia_genre:
+                    ESSENTIA_KEYS.append('essentia_genre')
+                if self.config.essentia_voice:
+                    ESSENTIA_KEYS.append('voice_probability')
+
+                include_gmi = any([self.config.essentia_genre,
+                                   self.config.essentia_mood,
+                                   self.config.essentia_instrument])
+
                 to_process = []
                 for crop_path in all_crops:
                     info_path = get_crop_info_path(crop_path)
@@ -955,7 +1048,22 @@ class Pipeline:
                     # Sequential processing - TensorFlow handles internal parallelism
                     for i, crop_path in enumerate(to_process, 1):
                         try:
-                            results = analyze_essentia_features(crop_path)
+                            # Find vocals stem for gender analysis
+                            vocals_path = None
+                            if self.config.essentia_gender:
+                                stems = get_crop_stem_files(crop_path)
+                                vocals_path = stems.get('vocals')
+
+                            results = analyze_essentia_features(
+                                crop_path,
+                                include_voice_analysis=self.config.essentia_voice,
+                                include_gender=self.config.essentia_gender,
+                                include_gmi=include_gmi,
+                                include_genre=self.config.essentia_genre,
+                                include_mood=self.config.essentia_mood,
+                                include_instrument=self.config.essentia_instrument,
+                                vocals_path=vocals_path,
+                                vocal_content_thresholds=self.config.vocal_content_thresholds)
                             if results:
                                 safe_update(get_crop_info_path(crop_path), results)
                                 self.stats["crops_processed"] += 1
@@ -1031,11 +1139,11 @@ class Pipeline:
                                     existing = read_info(info_path) if info_path.exists() else {}
 
                                     if self.config.should_overwrite('flamingo') or key not in existing:
-                                        # Using the new robust analyze method
-                                        p_text = prompt_text if self.config.flamingo_prompts else None
+                                        # Interpolate genre hints into prompt
+                                        p_text = _interpolate_genres(prompt_text, existing) if self.config.flamingo_prompts else None
                                         results[key] = flamingo.analyze(
-                                            crop_path, 
-                                            prompt=p_text, 
+                                            crop_path,
+                                            prompt=p_text,
                                             prompt_type=prompt_type
                                         )
 
@@ -1067,6 +1175,61 @@ class Pipeline:
 
             except Exception as e:
                 logger.warning(f"  Music Flamingo failed: {e}")
+
+        # =========================================================================
+        # PASS 4b: Granite Revision of MF descriptions
+        # =========================================================================
+        rev_cfg = self.config.flamingo_revision
+        if rev_cfg.get('enabled') and rev_cfg.get('prompts') and not self.config.skip_flamingo:
+            rev_prompts = rev_cfg['prompts']
+            logger.info(f"\n[PASS 4b] Granite Revision - {len(all_crops)} files")
+            logger.info(f"  Revision keys: {', '.join(rev_prompts.keys())}")
+
+            # Filter files needing revision
+            to_revise = []
+            for crop_path in all_crops:
+                info_path = get_crop_info_path(crop_path)
+                existing = read_info(info_path) if info_path.exists() else {}
+                needs_rev = any(
+                    f'music_flamingo_{rk}' not in existing or self.config.should_overwrite('flamingo')
+                    for rk in rev_prompts
+                )
+                # Only revise if source MF descriptions exist
+                has_mf = any(k.startswith('music_flamingo_') and isinstance(v, str)
+                             for k, v in existing.items())
+                if needs_rev and has_mf:
+                    to_revise.append(crop_path)
+
+            if to_revise:
+                try:
+                    from src.classification.granite_revision import GraniteReviser
+                    reviser = GraniteReviser(
+                        rev_cfg['model'],
+                        n_ctx=rev_cfg.get('n_ctx', 4096),
+                        temperature=rev_cfg.get('temperature', 0.7),
+                        max_tokens=rev_cfg.get('max_tokens', 512),
+                    )
+
+                    logger.info(f"  Processing {len(to_revise)} files...")
+                    for i, crop_path in enumerate(to_revise, 1):
+                        try:
+                            info_path = get_crop_info_path(crop_path)
+                            existing = read_info(info_path) if info_path.exists() else {}
+                            mf_results = {k: v for k, v in existing.items()
+                                          if k.startswith('music_flamingo_') and isinstance(v, str)}
+                            rev_results = reviser.revise(mf_results, rev_prompts)
+                            if rev_results:
+                                save_data = {f'music_flamingo_{rk}': rv for rk, rv in rev_results.items()}
+                                safe_update(info_path, save_data)
+                            logger.info(f"  [{i}/{len(to_revise)}] {crop_path.name} ({len(rev_results)} revisions)")
+                        except Exception as e:
+                            logger.error(f"  Revision failed for {crop_path.name}: {e}")
+
+                    reviser.close()
+                except Exception as e:
+                    logger.warning(f"  Granite revision failed: {e}")
+            else:
+                logger.info("  All files already revised.")
 
         # =========================================================================
         # PASS 5: MIDI Transcription

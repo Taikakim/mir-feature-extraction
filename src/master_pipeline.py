@@ -134,6 +134,16 @@ class MasterPipelineConfig:
     skip_chroma: bool = False
     skip_timbral: bool = False
     skip_essentia: bool = False
+    essentia_genre: bool = True
+    essentia_mood: bool = True
+    essentia_instrument: bool = True
+    essentia_voice: bool = True
+    essentia_gender: bool = True
+    vocal_content_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'crest_factor_threshold': 30.0,
+        'rms_threshold': -42.0,
+        'peak_threshold': -20.0,
+    })
     skip_audiobox: bool = False
     skip_per_stem: bool = False
 
@@ -173,6 +183,7 @@ class MasterPipelineConfig:
     essentia_workers: int = 4  # Separate limit for Essentia (TensorFlow deadlocks with high parallelism)
     batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)  # Key: prompt_name, Value: prompt_text
+    flamingo_revision: Dict[str, Any] = field(default_factory=dict)  # Granite revision config
 
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten.
@@ -216,6 +227,7 @@ class MasterPipelineConfig:
         processing = data.get('processing', {})
         stem_quality = data.get('stem_quality', {})
         vocal_removal = data.get('vocal_removal', {})
+        vocal_content = data.get('vocal_content', {})
 
         # Build config
         config = cls(
@@ -266,6 +278,16 @@ class MasterPipelineConfig:
             skip_chroma=not features.get('chroma', True),
             skip_timbral=not features.get('timbral', True),
             skip_essentia=not features.get('essentia', True),
+            essentia_genre=features.get('essentia_genre', True),
+            essentia_mood=features.get('essentia_mood', True),
+            essentia_instrument=features.get('essentia_instrument', True),
+            essentia_voice=features.get('essentia_voice', True),
+            essentia_gender=features.get('essentia_gender', True),
+            vocal_content_thresholds={
+                'crest_factor_threshold': float(vocal_content.get('crest_factor_threshold', 30.0)),
+                'rms_threshold': float(vocal_content.get('rms_threshold', -42.0)),
+                'peak_threshold': float(vocal_content.get('peak_threshold', -20.0)),
+            },
             skip_audiobox=not features.get('audiobox', True),
             skip_per_stem=not features.get('per_stem', True),
 
@@ -294,6 +316,7 @@ class MasterPipelineConfig:
             essentia_workers=processing.get('essentia_workers', 4),  # TensorFlow-safe limit
             batch_feature_extraction=processing.get('batch_feature_extraction', True),
             flamingo_prompts=flamingo.get('prompts', {}),
+            flamingo_revision=flamingo.get('revision', {}),
 
             # Stem quality filtering
             stem_quality_enabled=stem_quality.get('enabled', False),
@@ -382,6 +405,7 @@ class MasterPipelineConfig:
                 'model': self.flamingo_model,
                 'max_tokens': self.flamingo_token_limits,
                 'prompts': self.flamingo_prompts,
+                'revision': self.flamingo_revision,
             },
         }
 
@@ -1778,11 +1802,19 @@ class MasterPipeline:
                 skip_demucs=True,  # Already done
                 skip_flamingo=self.config.skip_flamingo,
                 skip_audiobox=self.config.skip_audiobox,
+                skip_classification=self.config.skip_essentia,
                 skip_midi=True,
+                essentia_genre=self.config.essentia_genre,
+                essentia_mood=self.config.essentia_mood,
+                essentia_instrument=self.config.essentia_instrument,
+                essentia_voice=self.config.essentia_voice,
+                essentia_gender=self.config.essentia_gender,
+                vocal_content_thresholds=self.config.vocal_content_thresholds,
                 flamingo_model=self.config.flamingo_model,
                 flamingo_context_size=self.config.flamingo_context_size,
                 flamingo_token_limits=self.config.flamingo_token_limits,
                 flamingo_prompts=self.config.flamingo_prompts,
+                flamingo_revision=self.config.flamingo_revision,
             )
 
             pipeline = Pipeline(config)

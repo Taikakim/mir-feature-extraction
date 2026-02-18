@@ -5,6 +5,7 @@ Functions for normalizing and cleaning text data to ensure compatibility
 with various tokenizers and downstream processing.
 """
 
+import re
 import unicodedata
 from typing import Optional
 
@@ -72,6 +73,34 @@ def normalize_for_t5(text: str) -> str:
         Normalized text safe for T5 tokenization
     """
     return normalize_music_flamingo_text(text)
+
+
+def strip_structural_tokens(text: str) -> str:
+    """Strip LLM structural tokens from output text.
+
+    Handles Qwen3/DeepSeek thinking traces, GPT-OSS Harmony tokens,
+    and Granite role/text tokens.
+    """
+    if not text:
+        return text
+
+    # Qwen3 / DeepSeek: extract text after </think>
+    if "</think>" in text:
+        parts = text.split("</think>")
+        after = parts[-1].strip()
+        if len(after) > 5:
+            text = after
+
+    # Clean up any remaining think tags
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</?think>", "", text)
+
+    # Strip GPT-OSS Harmony / Granite structural tokens
+    for tok in ("<|end|>", "<|return|>", "<|message|>", "<|channel|>",
+                "<|start|>", "<|end_of_text|>", "<|start_of_role|>", "<|end_of_role|>"):
+        text = text.replace(tok, "")
+
+    return text.strip()
 
 
 def validate_text_safety(text: str, allow_non_ascii: Optional[set] = None) -> tuple[bool, list]:
