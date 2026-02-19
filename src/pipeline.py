@@ -98,6 +98,9 @@ class PipelineConfig:
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)
     flamingo_revision: Dict[str, Any] = field(default_factory=dict)
 
+    # Pipeline state for resumable runs (passed from master pipeline)
+    pipeline_state: Any = None
+
     # Map internal feature names to YAML overwrite keys
     _OVERWRITE_ALIASES = {
         'harmonic': 'chroma',
@@ -882,7 +885,7 @@ class Pipeline:
     def _run_crops_batched(self, all_crops: List[Path]) -> bool:
         """
         Run feature extraction in batches to optimize resource usage.
-        
+
         Strategy:
         1. cpu_pass: Light features (Loudness, Spectral, Rhythm, Chroma) - One pass per file to minimize I/O.
         2. audiobox_pass: Heavy GPU - Load model once, process all.
@@ -890,10 +893,16 @@ class Pipeline:
         4. flamingo_pass: Heavy GPU - Load model once, process all.
         5. midi_pass: Heavy GPU - Load model once, process all.
         """
+        from src.core.graceful_shutdown import shutdown_requested, start_shutdown_listener, stop_shutdown_listener
+        start_shutdown_listener()
+
+        # Pipeline state for progress tracking
+        state = self.config.pipeline_state
+
         logger.info("\n" + "=" * 60)
         logger.info("BATCH MODE: STARTING")
         logger.info("=" * 60)
-        
+
         start_time = time.time()
         
         # Imports for CPU pass
@@ -978,15 +987,33 @@ class Pipeline:
                         except Exception as e:
                             logger.error(f"  Worker exception for {crop_path.name}: {e}")
                             self.stats["crops_failed"] += 1
-                            
+
                         if i % 10 == 0:
                             logger.info(f"  {i}/{len(tasks)}")
+                            if state and i % 50 == 0:
+                                state.update_pass_progress('pass_1_cpu', completed=i, total=len(tasks))
+                                state.save()
+
+                        if shutdown_requested.is_set():
+                            logger.info("  Shutdown requested — waiting for running workers to finish...")
+                            executor.shutdown(wait=True, cancel_futures=True)
+                            break
             else:
                 logger.info("  All files already analyzed.")
+            if state:
+                state.update_pass_progress('pass_1_cpu', completed=len(tasks), total=len(tasks))
 
         # =========================================================================
         # PASS 2: AudioBox (Batched for GPU efficiency)
         # =========================================================================
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — skipping remaining passes.")
+            if state: state.save()
+            self.stats["total_time"] = time.time() - start_time
+            self._print_crops_summary()
+            stop_shutdown_listener()
+            return self.stats["crops_failed"] == 0
+
         if not self.config.skip_audiobox:
             logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
             try:
@@ -1010,6 +1037,10 @@ class Pipeline:
                     progress = ProgressBar(len(to_process), desc="AudioBox")
 
                     for batch_start in range(0, len(to_process), batch_size):
+                        if shutdown_requested.is_set():
+                            logger.info("  Shutdown requested — stopping AudioBox pass.")
+                            break
+
                         batch_end = min(batch_start + batch_size, len(to_process))
                         batch_paths = to_process[batch_start:batch_end]
 
@@ -1040,11 +1071,21 @@ class Pipeline:
         # =========================================================================
         # PASS 3: Essentia (Sequential - TensorFlow deadlocks with multiprocessing)
         # =========================================================================
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — skipping remaining passes.")
+            if state: state.save()
+            self.stats["total_time"] = time.time() - start_time
+            self._print_crops_summary()
+            stop_shutdown_listener()
+            return self.stats["crops_failed"] == 0
+
         if not self.config.skip_classification:
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
             logger.info(f"  Processing sequentially (TensorFlow is not multiprocess-safe)")
             try:
-                from src.classification.essentia_features import analyze_essentia_features
+                from src.classification.essentia_features import (
+                    analyze_essentia_features, preload_models, unload_models
+                )
 
                 # Build skip-check keys based on enabled sub-features
                 ESSENTIA_KEYS = ['danceability', 'atonality']
@@ -1065,10 +1106,24 @@ class Pipeline:
                         to_process.append(crop_path)
 
                 if to_process:
+                    # Pre-load all TF models into VRAM before processing
+                    preload_models(
+                        include_voice=self.config.essentia_voice,
+                        include_gender=self.config.essentia_gender,
+                        include_gmi=include_gmi,
+                        include_genre=self.config.essentia_genre,
+                        include_mood=self.config.essentia_mood,
+                        include_instrument=self.config.essentia_instrument,
+                    )
+
                     logger.info(f"  Processing {len(to_process)} files...")
 
                     # Sequential processing - TensorFlow handles internal parallelism
                     for i, crop_path in enumerate(to_process, 1):
+                        if shutdown_requested.is_set():
+                            logger.info("  Shutdown requested — stopping Essentia pass.")
+                            break
+
                         try:
                             # Find vocals stem for gender analysis
                             vocals_path = None
@@ -1095,6 +1150,14 @@ class Pipeline:
 
                         if i % 10 == 0 or i == len(to_process):
                             logger.info(f"  {i}/{len(to_process)}")
+                            if state and i % 50 == 0:
+                                state.update_pass_progress('pass_3_essentia', completed=i, total=len(to_process))
+                                state.save()
+
+                    # Free VRAM for subsequent passes (Music Flamingo needs it)
+                    unload_models()
+                    if state:
+                        state.update_pass_progress('pass_3_essentia', completed=len(to_process), total=len(to_process))
                 else:
                     logger.info("  All files already analyzed.")
 
@@ -1104,6 +1167,14 @@ class Pipeline:
         # =========================================================================
         # PASS 4: Music Flamingo
         # =========================================================================
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — skipping remaining passes.")
+            if state: state.save()
+            self.stats["total_time"] = time.time() - start_time
+            self._print_crops_summary()
+            stop_shutdown_listener()
+            return self.stats["crops_failed"] == 0
+
         if not self.config.skip_flamingo:
             logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, GGUF/CLI) - {len(all_crops)} files")
             try:
@@ -1151,6 +1222,10 @@ class Pipeline:
 
                         logger.info(f"  Processing {len(to_process)} files (with disk prefetch)...")
                         for i, crop_path in enumerate(to_process, 1):
+                            if shutdown_requested.is_set():
+                                logger.info("  Shutdown requested — stopping Flamingo pass.")
+                                break
+
                             results = {}
                             try:
                                 for prompt_type, prompt_text in prompts_map.items():
@@ -1179,6 +1254,10 @@ class Pipeline:
                                 # Mark file as processed so prefetcher can clean up
                                 prefetcher.mark_processed(crop_path)
 
+                                if state and i % 50 == 0:
+                                    state.update_pass_progress('pass_4_flamingo', completed=i, total=len(to_process))
+                                    state.save()
+
                             except Exception as e:
                                 logger.error(f"  Flamingo failed for {crop_path.name}: {e}")
                                 self.stats["crops_failed"] += 1
@@ -1186,6 +1265,8 @@ class Pipeline:
                                 # Don't break loop, keep processing other files
 
                         prefetcher.stop()
+                        if state:
+                            state.update_pass_progress('pass_4_flamingo', completed=len(to_process), total=len(to_process))
 
                         # Show aggregate performance stats
                         if flamingo.stats.runs > 0:
@@ -1201,6 +1282,14 @@ class Pipeline:
         # =========================================================================
         # PASS 4b: Granite Revision of MF descriptions
         # =========================================================================
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — skipping remaining passes.")
+            if state: state.save()
+            self.stats["total_time"] = time.time() - start_time
+            self._print_crops_summary()
+            stop_shutdown_listener()
+            return self.stats["crops_failed"] == 0
+
         rev_cfg = self.config.flamingo_revision
         if rev_cfg.get('enabled') and rev_cfg.get('prompts') and not self.config.skip_flamingo:
             rev_prompts = rev_cfg['prompts']
@@ -1234,6 +1323,10 @@ class Pipeline:
 
                     logger.info(f"  Processing {len(to_revise)} files...")
                     for i, crop_path in enumerate(to_revise, 1):
+                        if shutdown_requested.is_set():
+                            logger.info("  Shutdown requested — stopping revision pass.")
+                            break
+
                         try:
                             info_path = get_crop_info_path(crop_path)
                             existing = read_info(info_path) if info_path.exists() else {}
@@ -1266,6 +1359,8 @@ class Pipeline:
 
         self.stats["total_time"] = time.time() - start_time
         self._print_crops_summary()
+        if state: state.save()
+        stop_shutdown_listener()
         return self.stats["crops_failed"] == 0
 
 

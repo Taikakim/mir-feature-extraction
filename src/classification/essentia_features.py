@@ -70,11 +70,11 @@ _MODEL_CACHE = {}
 def get_cached_model(model_class, **kwargs):
     """
     Get a cached model instance or create a new one.
-    
+
     Args:
         model_class: Class of the model (e.g. TensorflowPredictVGGish)
         **kwargs: Arguments for model initialization (must be hashable or stringified)
-        
+
     Returns:
         Model instance
     """
@@ -83,15 +83,124 @@ def get_cached_model(model_class, **kwargs):
     for k, v in sorted(kwargs.items()):
         key_parts.append(f"{k}={v}")
     cache_key = "|".join(key_parts)
-    
+
     if cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
-        
+
     # Create new instance
     logger.info(f"Loading new model instance: {model_class.__name__}")
     instance = model_class(**kwargs)
     _MODEL_CACHE[cache_key] = instance
     return instance
+
+
+def preload_models(include_voice: bool = False, include_gender: bool = False,
+                   include_gmi: bool = False, include_genre: bool = True,
+                   include_mood: bool = True, include_instrument: bool = True) -> int:
+    """
+    Pre-load all Essentia TF models into GPU VRAM at once.
+
+    Call this before batch processing so all models are resident in memory
+    and inference doesn't stall on lazy loading.
+
+    Args:
+        include_voice: Pre-load voice/instrumental model
+        include_gender: Pre-load vocal gender model
+        include_gmi: Pre-load genre/mood/instrument models (EffNet + classifiers)
+        include_genre: Pre-load genre classifier (only when include_gmi=True)
+        include_mood: Pre-load mood classifier (only when include_gmi=True)
+        include_instrument: Pre-load instrument classifier (only when include_gmi=True)
+
+    Returns:
+        Number of models loaded
+    """
+    if not ESSENTIA_TF_AVAILABLE:
+        logger.warning("Essentia-TensorFlow not available, cannot preload models")
+        return 0
+
+    loaded = 0
+    t0 = time.time()
+
+    # Danceability (VGGish)
+    try:
+        model_path = get_model_path("danceability-vggish-audioset-1.pb")
+        get_cached_model(TensorflowPredictVGGish, graphFilename=model_path)
+        loaded += 1
+    except Exception as e:
+        logger.warning(f"Could not preload danceability model: {e}")
+
+    # Atonality (VGGish)
+    try:
+        model_path = get_model_path("tonal_atonal-vggish-audioset-1.pb")
+        get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
+        loaded += 1
+    except Exception as e:
+        logger.warning(f"Could not preload atonality model: {e}")
+
+    # Voice/Instrumental (VGGish)
+    if include_voice:
+        try:
+            model_path = get_model_path("voice_instrumental-vggish-audioset-1.pb")
+            get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
+            loaded += 1
+        except Exception as e:
+            logger.warning(f"Could not preload voice model: {e}")
+
+    # Gender (VGGish)
+    if include_gender:
+        try:
+            model_path = get_model_path("gender-vggish-audioset-1.pb")
+            get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
+            loaded += 1
+        except Exception as e:
+            logger.warning(f"Could not preload gender model: {e}")
+
+    # Genre/Mood/Instrument (EffNet embeddings + classifiers)
+    if include_gmi:
+        try:
+            model_path = get_model_path("discogs-effnet-bs64-1.pb")
+            get_cached_model(TensorflowPredictEffnetDiscogs, graphFilename=model_path, output="PartitionedCall:1")
+            loaded += 1
+        except Exception as e:
+            logger.warning(f"Could not preload EffNet embedding model: {e}")
+
+        if include_genre:
+            try:
+                model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
+                get_cached_model(TensorflowPredict2D, graphFilename=model_path,
+                                 input="serving_default_model_Placeholder", output="PartitionedCall:0")
+                loaded += 1
+            except Exception as e:
+                logger.warning(f"Could not preload genre model: {e}")
+
+        if include_mood:
+            try:
+                model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
+                get_cached_model(TensorflowPredict2D, graphFilename=model_path)
+                loaded += 1
+            except Exception as e:
+                logger.warning(f"Could not preload mood model: {e}")
+
+        if include_instrument:
+            try:
+                model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
+                get_cached_model(TensorflowPredict2D, graphFilename=model_path)
+                loaded += 1
+            except Exception as e:
+                logger.warning(f"Could not preload instrument model: {e}")
+
+    elapsed = time.time() - t0
+    logger.info(f"Pre-loaded {loaded} Essentia TF models in {elapsed:.1f}s")
+    return loaded
+
+
+def unload_models():
+    """Free all cached Essentia TF models from VRAM."""
+    global _MODEL_CACHE
+    count = len(_MODEL_CACHE)
+    _MODEL_CACHE.clear()
+    if count:
+        logger.info(f"Unloaded {count} Essentia TF models")
 
 
 def get_model_path(model_filename: str) -> str:
@@ -173,7 +282,7 @@ def load_audio_essentia(audio_path: str | Path) -> Tuple[np.ndarray, int]:
         raise
 
 
-def analyze_danceability(audio_path: str | Path) -> float:
+def analyze_danceability(audio_path: str | Path, audio: Optional[np.ndarray] = None) -> float:
     """
     Analyze danceability using Essentia's pre-trained VGGish model.
 
@@ -181,6 +290,7 @@ def analyze_danceability(audio_path: str | Path) -> float:
 
     Args:
         audio_path: Path to audio file
+        audio: Pre-loaded audio at 16kHz mono (skips disk read if provided)
 
     Returns:
         Danceability score (0-1)
@@ -196,8 +306,9 @@ def analyze_danceability(audio_path: str | Path) -> float:
 
     try:
         # Load audio with MonoLoader at 16000 Hz (as per original code)
-        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
-        audio = loader()
+        if audio is None:
+            loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
+            audio = loader()
 
         # Use VGGish-based danceability model
         model_path = get_model_path("danceability-vggish-audioset-1.pb")
@@ -275,7 +386,7 @@ def estimate_danceability_fallback(audio_path: str | Path) -> float:
         return 0.5  # Neutral default
 
 
-def analyze_atonality(audio_path: str | Path) -> float:
+def analyze_atonality(audio_path: str | Path, audio: Optional[np.ndarray] = None) -> float:
     """
     Analyze atonality using Essentia's pre-trained VGGish tonality model.
 
@@ -283,6 +394,7 @@ def analyze_atonality(audio_path: str | Path) -> float:
 
     Args:
         audio_path: Path to audio file
+        audio: Pre-loaded audio at 16kHz mono (skips disk read if provided)
 
     Returns:
         Atonality score (0-1, higher = more atonal)
@@ -298,8 +410,9 @@ def analyze_atonality(audio_path: str | Path) -> float:
 
     try:
         # Load audio with MonoLoader at 16000 Hz (as per original code)
-        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
-        audio = loader()
+        if audio is None:
+            loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
+            audio = loader()
 
         # Use VGGish-based tonality model
         model_path = get_model_path("tonal_atonal-vggish-audioset-1.pb")
@@ -372,7 +485,7 @@ def estimate_atonality_fallback(audio_path: str | Path) -> float:
         return 0.5  # Neutral default
 
 
-def analyze_voice_instrumental(audio_path: str | Path) -> Dict[str, float]:
+def analyze_voice_instrumental(audio_path: str | Path, audio: Optional[np.ndarray] = None) -> Dict[str, float]:
     """
     Analyze voice vs instrumental content using Essentia's VGGish model.
 
@@ -380,6 +493,7 @@ def analyze_voice_instrumental(audio_path: str | Path) -> Dict[str, float]:
 
     Args:
         audio_path: Path to audio file
+        audio: Pre-loaded audio at 16kHz mono (skips disk read if provided)
 
     Returns:
         Dictionary with:
@@ -396,8 +510,9 @@ def analyze_voice_instrumental(audio_path: str | Path) -> Dict[str, float]:
 
     try:
         # Load audio with MonoLoader at 16000 Hz
-        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
-        audio = loader()
+        if audio is None:
+            loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
+            audio = loader()
 
         # Use VGGish-based voice/instrumental model
         model_path = get_model_path("voice_instrumental-vggish-audioset-1.pb")
@@ -429,7 +544,7 @@ def analyze_voice_instrumental(audio_path: str | Path) -> Dict[str, float]:
         raise
 
 
-def analyze_vocal_gender(audio_path: str | Path) -> Dict[str, float]:
+def analyze_vocal_gender(audio_path: str | Path, audio: Optional[np.ndarray] = None) -> Dict[str, float]:
     """
     Analyze vocal gender using Essentia's VGGish model.
 
@@ -438,6 +553,7 @@ def analyze_vocal_gender(audio_path: str | Path) -> Dict[str, float]:
 
     Args:
         audio_path: Path to audio file
+        audio: Pre-loaded audio at 16kHz mono (skips disk read if provided)
 
     Returns:
         Dictionary with:
@@ -454,8 +570,9 @@ def analyze_vocal_gender(audio_path: str | Path) -> Dict[str, float]:
 
     try:
         # Load audio with MonoLoader at 16000 Hz
-        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
-        audio = loader()
+        if audio is None:
+            loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
+            audio = loader()
 
         # Use VGGish-based gender model
         model_path = get_model_path("gender-vggish-audioset-1.pb")
@@ -548,7 +665,8 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
                                    top_k: int = 10,
                                    include_genre: bool = True,
                                    include_mood: bool = True,
-                                   include_instrument: bool = True) -> Dict[str, Dict[str, float]]:
+                                   include_instrument: bool = True,
+                                   audio: Optional[np.ndarray] = None) -> Dict[str, Dict[str, float]]:
     """
     Analyze genre, mood, and instrument using Discogs-EffNet embeddings.
 
@@ -565,6 +683,7 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
         include_genre: Whether to run genre classifier
         include_mood: Whether to run mood classifier
         include_instrument: Whether to run instrument classifier
+        audio: Pre-loaded audio at 16kHz mono (skips disk read if provided)
 
     Returns:
         Dictionary with enabled classifier results, each containing
@@ -590,8 +709,9 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
 
     try:
         # Load audio at 16kHz with high quality resampling
-        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)
-        audio = loader()
+        if audio is None:
+            loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)
+            audio = loader()
 
         # Get embeddings using Discogs-EffNet (shared across all classifiers)
         embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
@@ -836,18 +956,26 @@ def analyze_essentia_features(audio_path: str | Path,
 
     logger.info(f"Analyzing Essentia features: {audio_path.name}")
 
+    # Load audio ONCE at 16kHz mono — shared across all models
+    try:
+        loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
+        audio_16k = loader()
+    except Exception as e:
+        logger.error(f"Could not load audio: {e}")
+        return {}
+
     results = {}
 
     # Analyze danceability
     try:
-        danceability = analyze_danceability(audio_path)
+        danceability = analyze_danceability(audio_path, audio=audio_16k)
         results['danceability'] = danceability
     except Exception as e:
         logger.error(f"Could not analyze danceability: {e}")
 
     # Analyze atonality
     try:
-        atonality = analyze_atonality(audio_path)
+        atonality = analyze_atonality(audio_path, audio=audio_16k)
         results['atonality'] = atonality
     except Exception as e:
         logger.error(f"Could not analyze atonality: {e}")
@@ -855,7 +983,7 @@ def analyze_essentia_features(audio_path: str | Path,
     # Analyze voice/instrumental if requested
     if include_voice_analysis:
         try:
-            voice_results = analyze_voice_instrumental(audio_path)
+            voice_results = analyze_voice_instrumental(audio_path, audio=audio_16k)
             results.update(voice_results)
         except Exception as e:
             logger.error(f"Could not analyze voice/instrumental: {e}")
@@ -872,7 +1000,14 @@ def analyze_essentia_features(audio_path: str | Path,
                     rms_threshold=thresholds.get('rms_threshold', -42.0),
                     peak_threshold=thresholds.get('peak_threshold', -20.0)):
                 try:
-                    gender_results = analyze_vocal_gender(gender_path)
+                    # Gender uses vocals stem — load separately only if different path
+                    vocals_audio = None
+                    if vocals_path and Path(vocals_path) != audio_path:
+                        vloader = es.MonoLoader(filename=str(gender_path), sampleRate=16000)
+                        vocals_audio = vloader()
+                    else:
+                        vocals_audio = audio_16k
+                    gender_results = analyze_vocal_gender(gender_path, audio=vocals_audio)
                     results.update(gender_results)
                 except Exception as e:
                     logger.warning(f"Could not analyze vocal gender: {e}")
@@ -888,7 +1023,8 @@ def analyze_essentia_features(audio_path: str | Path,
                 audio_path,
                 include_genre=include_genre,
                 include_mood=include_mood,
-                include_instrument=include_instrument)
+                include_instrument=include_instrument,
+                audio=audio_16k)
             results.update(gmi_results)
         except Exception as e:
             logger.error(f"Could not analyze genre/mood/instrument: {e}")

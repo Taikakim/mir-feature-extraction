@@ -618,8 +618,10 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         # Apply fades
         stem_crop = apply_fades(stem_crop, fade_len)
 
-        # Preserve source stem format (e.g., drums.mp3 → crop_drums.mp3)
+        # Preserve source stem format (m4a/aac → mp3 to avoid downstream issues)
         source_ext = stem_path.suffix.lower()
+        if source_ext in ('.m4a', '.aac'):
+            source_ext = '.mp3'
         crop_stem_name = f"{crop_base_path.stem}_{stem_name}{source_ext}"
         crop_stem_path = crop_base_path.parent / crop_stem_name
 
@@ -855,8 +857,10 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
 
-    # Preserve source format
+    # Preserve source format (m4a/aac → mp3 to avoid downstream issues)
     source_ext = full_mix_path.suffix.lower()
+    if source_ext in ('.m4a', '.aac'):
+        source_ext = '.mp3'
 
     # Load source .INFO for ID3 metadata (to write to crop files)
     source_info = {}
@@ -1031,8 +1035,10 @@ def create_crops_for_file(folder_path: Path,
     duration_sec = total_samples / sr
     length_sec = length_samples / sr
 
-    # Preserve source format
+    # Preserve source format (m4a/aac → mp3 to avoid downstream issues)
     source_ext = full_mix_path.suffix.lower()
+    if source_ext in ('.m4a', '.aac'):
+        source_ext = '.mp3'
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")
 

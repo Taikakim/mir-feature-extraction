@@ -430,6 +430,7 @@ class MasterPipeline:
     def __init__(self, config: MasterPipelineConfig):
         self.config = config
         self.stats = PipelineStats()
+        self._state = None  # Set in run()
 
         # Determine working directory
         if config.output_dir:
@@ -437,40 +438,59 @@ class MasterPipeline:
         else:
             self.working_dir = config.input_dir
 
-    def _calculate_total_audio_duration(self, folders: List[Path]) -> float:
-        """Calculate total audio duration for all tracks.
+    def _get_source_folders(self) -> List[Path]:
+        """Get source folders from state cache or by scanning."""
+        if self._state and self._state.get_track_names():
+            return [self.working_dir / name for name in self._state.get_track_names()
+                    if (self.working_dir / name).exists()]
+        return list(find_organized_folders(self.working_dir))
+
+    def _calculate_durations_dict(self, folders: List[Path],
+                                   cached: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        """Calculate audio duration for all tracks, using cache where available.
 
         Args:
             folders: List of organized folder paths
+            cached: Optional dict of {folder_name: duration} from a previous run
 
         Returns:
-            Total duration in seconds
+            Dict of {folder_name: duration_seconds}
         """
         import soundfile as sf
-
-        total_duration = 0.0
+        cached = cached or {}
+        durations = {}
 
         for folder in folders:
+            # Use cached duration if available
+            if folder.name in cached and cached[folder.name] > 0:
+                durations[folder.name] = cached[folder.name]
+                continue
+
             full_mix_files = list(folder.glob('full_mix.*'))
             if not full_mix_files:
                 continue
 
             try:
                 info = sf.info(str(full_mix_files[0]))
-                total_duration += info.duration
+                durations[folder.name] = info.duration
             except Exception:
                 # Fallback for m4a/aac via pydub
                 try:
                     from pydub.utils import mediainfo
                     mi = mediainfo(str(full_mix_files[0]))
-                    total_duration += float(mi.get('duration', 0))
+                    durations[folder.name] = float(mi.get('duration', 0))
                 except Exception as e:
                     logger.debug(f"Could not get duration for {folder.name}: {e}")
+                    durations[folder.name] = 0.0
 
-        return total_duration
+        return durations
 
     def run(self) -> PipelineStats:
         """Run the complete pipeline."""
+        from core.graceful_shutdown import shutdown_requested, start_shutdown_listener, stop_shutdown_listener
+        from core.pipeline_state import PipelineState
+        start_shutdown_listener()
+
         logger.info(fmt_header("=" * 70))
         logger.info(fmt_header("MIR MASTER PIPELINE"))
         logger.info(fmt_header("=" * 70))
@@ -495,18 +515,39 @@ class MasterPipeline:
 
         total_start = time.time()
 
-        # Smart skip: Check if crops already exist for all tracks
-        # If so, skip stages 1-3 and go directly to crop analysis
+        # --- Pipeline state: load or create ---
+        state = PipelineState(self.working_dir)
+        self._state = state  # make accessible to sub-methods
+        config_hash = PipelineState.compute_config_hash(self.config)
+
         crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
         skip_to_crop_analysis = False
 
-        # Pre-calculate total audio duration for speed metrics
-        source_folders = list(find_organized_folders(self.working_dir))
-        if source_folders:
-            logger.info(f"Calculating total audio duration for {len(source_folders)} tracks...")
-            self.stats.total_audio_duration = self._calculate_total_audio_duration(source_folders)
+        if state.is_valid_for(config_hash):
+            # Resume from cached state
+            cached_names = state.get_track_names()
+            source_folders = [self.working_dir / name for name in cached_names
+                              if (self.working_dir / name).exists()]
+            self.stats.total_audio_duration = state.get_total_duration()
             duration_mins = self.stats.total_audio_duration / 60
-            logger.info(f"Total audio: {fmt_notification(f'{duration_mins:.1f} minutes')} ({self.stats.total_audio_duration:.0f}s)")
+            logger.info(f"Resumed from state file ({len(source_folders)} tracks, "
+                        f"{fmt_notification(f'{duration_mins:.1f} minutes')})")
+        else:
+            # Full scan (first run or config changed)
+            if state.get_tracks():
+                logger.info("Config changed since last run — rescanning (keeping cached durations)...")
+                state.invalidate()
+            source_folders = list(find_organized_folders(self.working_dir))
+            if source_folders:
+                cached_durations = state.get_cached_durations()
+                durations = self._calculate_durations_dict(source_folders, cached=cached_durations)
+                state.set_tracks(source_folders, durations)
+                state.set_config_hash(config_hash)
+                state.save()
+                self.stats.total_audio_duration = sum(durations.values())
+                duration_mins = self.stats.total_audio_duration / 60
+                logger.info(f"Indexed {len(source_folders)} tracks, "
+                            f"total audio: {fmt_notification(f'{duration_mins:.1f} minutes')}")
 
         if crops_dir.exists() and not self.config.should_overwrite('crops'):
             # Count tracks and existing crops
@@ -523,11 +564,23 @@ class MasterPipeline:
                 elif tracks_with_crops > 0:
                     logger.info(f"\nFound existing crops for {tracks_with_crops}/{len(source_folders)} tracks")
 
+        # Helper: check shutdown + save state before returning
+        def _shutdown_exit():
+            state.save()
+            stop_shutdown_listener()
+            self.stats.run_end_time = time.time()
+            self._print_summary(self.stats.total_time)
+            return self.stats
+
         # Stage 1: Organization
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED (crops exist)"))
+        elif state.is_stage_completed('organize') and not self.config.should_overwrite('organize'):
+            logger.info(fmt_dim("\n[STAGE 1] Organization: COMPLETE (previous run)"))
         elif not self.config.skip_organize:
             self._run_organization()
+            state.mark_stage_completed('organize')
+            state.save()
         else:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED"))
 
@@ -536,25 +589,44 @@ class MasterPipeline:
             self._run_metadata_extraction()
 
         # Stage 2: Full Track Analysis (GPU: BS-RoFormer, Demucs)
+        if shutdown_requested.is_set():
+            return _shutdown_exit()
+
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
+        elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
+            logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
         elif not self.config.skip_track_analysis:
             self._run_track_analysis()
+            state.mark_stage_completed('track_analysis')
+            state.save()
             _flush_tunableop_results()
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
         # Stage 3: Create Crops
+        if shutdown_requested.is_set():
+            return _shutdown_exit()
+
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED (crops exist)"))
+        elif state.is_stage_completed('cropping') and not self.config.should_overwrite('crops'):
+            logger.info(fmt_dim("\n[STAGE 3] Cropping: COMPLETE (previous run)"))
         elif not self.config.skip_crops:
             self._run_cropping()
+            state.mark_stage_completed('cropping')
+            state.save()
         else:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED"))
 
         # Stage 4: Crop Analysis (GPU: Audiobox, Essentia)
+        if shutdown_requested.is_set():
+            return _shutdown_exit()
+
         if not self.config.skip_crop_analysis:
             self._run_crop_analysis()
+            state.mark_stage_completed('crop_analysis')
+            state.save()
             _flush_tunableop_results()
         else:
             logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
@@ -565,10 +637,12 @@ class MasterPipeline:
 
         # Print summary to console
         self._print_summary(total_time)
-        
+
         # Write statistics to log file
         self._write_stats_log()
 
+        state.save()
+        stop_shutdown_listener()
         return self.stats
 
     def _run_organization(self):
@@ -651,7 +725,7 @@ class MasterPipeline:
             self.stats.end_operation('metadata_extraction')
             return
 
-        folders = find_organized_folders(self.working_dir)
+        folders = self._get_source_folders()
 
         if not folders:
             logger.info("No folders to process")
@@ -712,13 +786,15 @@ class MasterPipeline:
 
     def _run_track_analysis(self):
         """Stage 2: Analyze full tracks (Demucs, beats, metadata)."""
+        from core.graceful_shutdown import shutdown_requested
+
         logger.info("\n" + fmt_header("=" * 70))
         logger.info(fmt_stage("[STAGE 2] FULL TRACK ANALYSIS"))
         logger.info(fmt_header("=" * 70))
 
         start_time = time.time()
 
-        folders = find_organized_folders(self.working_dir)
+        folders = self._get_source_folders()
         self.stats.tracks_total = len(folders)
 
         if not folders:
@@ -854,6 +930,10 @@ class MasterPipeline:
         
         # Sequential processing (GPU bound, not parallel for now)
         for i, folder in enumerate(tracks_to_process, 1):
+            if shutdown_requested.is_set():
+                logger.info("Shutdown requested — stopping stem separation.")
+                break
+
             logger.info(f"[{i}/{len(tracks_to_process)}] Processing: {folder.name}")
             try:
                 separate_organized_folder(
@@ -1144,10 +1224,11 @@ class MasterPipeline:
 
             # Check if we already have metadata from a previous lookup
             # release_year is the primary indicator, but a lookup may have succeeded
-            # without finding a year — check for API IDs too to avoid re-querying
+            # without finding a year — check for API IDs and the attempted sentinel
             if ('release_year' in existing_info
                     or 'spotify_id' in existing_info
-                    or 'musicbrainz_id' in existing_info):
+                    or 'musicbrainz_id' in existing_info
+                    or 'metadata_lookup_attempted' in existing_info):
                 if not self.config.should_overwrite('metadata'):
                     continue  # Already looked up
 
@@ -1233,13 +1314,20 @@ class MasterPipeline:
                             if result:
                                 logger.debug(f"  {folder.name}: Found via fingerprinting")
 
+                # Always mark that we attempted lookup (prevents re-querying on restart)
+                stems = get_stem_files(folder, include_full_mix=True)
+                if 'full_mix' in stems:
+                    info_path = get_info_path(stems['full_mix'])
+                    if not result:
+                        safe_update(info_path, {'metadata_lookup_attempted': True})
+
                 if result:
                     self.stats.tracks_metadata_found += 1
                     # Save to .INFO - all available metadata fields
-                    stems = get_stem_files(folder, include_full_mix=True)
                     if 'full_mix' in stems:
-                        info_path = get_info_path(stems['full_mix'])
-                        info_data = {}
+                        info_data = {
+                            'metadata_lookup_attempted': True,
+                        }
 
                         # Core metadata
                         if result.get('release_year'):
@@ -1395,6 +1483,8 @@ class MasterPipeline:
 
     def _run_first_stage_features_sequential(self, folders: List[Path]):
         """Sequential fallback for feature extraction."""
+        from core.graceful_shutdown import shutdown_requested
+
         try:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
@@ -1407,6 +1497,10 @@ class MasterPipeline:
             progress = ProgressBar(len(folders), desc="Features")
 
             for i, folder in enumerate(folders, 1):
+                if shutdown_requested.is_set():
+                    logger.info("Shutdown requested — stopping feature extraction.")
+                    break
+
                 stems = get_stem_files(folder, include_full_mix=True)
                 if 'full_mix' not in stems:
                     logger.info(progress.update(i))
@@ -1514,7 +1608,7 @@ class MasterPipeline:
         try:
             # Snapshot folders BEFORE processing to prevent infinite loops
             # (in case crops_dir somehow ends up inside working_dir)
-            folders = list(find_organized_folders(self.working_dir))
+            folders = self._get_source_folders()
             logger.info(f"Snapshot: {len(folders)} folders to process")
 
             # Filter out any folders that might be inside crops_dir
@@ -1817,6 +1911,7 @@ class MasterPipeline:
                 flamingo_token_limits=self.config.flamingo_token_limits,
                 flamingo_prompts=self.config.flamingo_prompts,
                 flamingo_revision=self.config.flamingo_revision,
+                pipeline_state=self._state,
             )
 
             pipeline = Pipeline(config)
