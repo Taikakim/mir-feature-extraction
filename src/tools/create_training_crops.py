@@ -29,7 +29,6 @@ Features:
 
 import argparse
 import logging
-import json
 import numpy as np
 import soundfile as sf
 from scipy import signal
@@ -947,7 +946,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                     dest_file = crop_path.with_suffix(suffix)
                     slice_rhythm_file(source_file, dest_file, start_sec, end_sec)
 
-            meta = {
+            # Write all metadata to .INFO (no separate .json)
+            info_path = get_info_path(crop_path)
+            safe_update(info_path, {
                 "position": position,
                 "start_time": start_sec,
                 "end_time": end_sec,
@@ -957,16 +958,8 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                 "samples": length_samples,
                 "source": str(full_mix_path.name),
                 "has_stems": len(preloaded_stems) > 0,
-                "stem_names": stem_names_loaded
-            }
-
-            # Save JSON metadata
-            with open(crop_path.with_suffix('.json'), 'w') as f:
-                json.dump(meta, f, indent=2)
-
-            # Create .INFO file with position key
-            info_path = get_info_path(crop_path)
-            safe_update(info_path, {"position": position})
+                "stem_names": stem_names_loaded,
+            })
 
             crop_count += 1
             current_sample = end_sample  # Sequential: next starts where this ended
@@ -1329,7 +1322,9 @@ def create_crops_for_file(folder_path: Path,
 
         position = float(actual_start_sec / duration_sec)
 
-        meta = {
+        # Prepare .INFO data with all metadata (batch write at end for HDD efficiency)
+        crop_info_path = crop_path.with_suffix('.INFO')
+        crop_info_data = {
             "position": position,
             "start_time": actual_start_sec,
             "end_time": actual_end_sec,
@@ -1337,23 +1332,12 @@ def create_crops_for_file(folder_path: Path,
             "end_sample": int(actual_end_sample),
             "duration": float(actual_end_sec - actual_start_sec),
             "samples": int(actual_end_sample - actual_start_sample),
+            "bpm": round(local_bpm, 1),
+            "beat_count": beat_count,
             "downbeats": int(num_downbeats),
             "source": str(full_mix_path.name),
             "has_stems": len(stem_paths) > 0,
-            "stem_names": stem_names_loaded
-        }
-
-        # Save JSON metadata
-        with open(crop_path.with_suffix('.json'), 'w') as f:
-            json.dump(meta, f, indent=2)
-
-        # Prepare .INFO data (batch write at end for HDD efficiency)
-        crop_info_path = crop_path.with_suffix('.INFO')
-        crop_info_data = {
-            "position": position,
-            "bpm": round(local_bpm, 1),
-            "beat_count": beat_count,
-            "downbeats": num_downbeats
+            "stem_names": stem_names_loaded,
         }
 
         # Add pre-loaded transferrable features (already loaded before loop)
