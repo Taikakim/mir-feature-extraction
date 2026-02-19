@@ -334,7 +334,7 @@ class CropFeatureExtractor:
                         timings: Dict, existing: Dict, overwrite: bool,
                         preloaded_stems=None, crop_mono=None, crop_sr=None):
         """Extract chroma features."""
-        if not self._should_extract('chroma_mean', existing, overwrite):
+        if not self._should_extract('chroma_0', existing, overwrite):
             logger.debug("  Skipping chroma (already exists)")
             return
 

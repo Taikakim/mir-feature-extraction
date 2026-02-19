@@ -1,20 +1,17 @@
 """
-Chroma Features Analysis for MIR Project (Essentia HPCP)
+Chroma Features Analysis for MIR Project (CQT-based)
 
-This module extracts average chroma features using Essentia's HPCP
-(Harmonic Pitch Class Profile) algorithm, optimized for melodic content.
+Extracts average chroma features using librosa's Constant-Q Transform (CQT)
+chroma, which provides logarithmic frequency resolution — each semitone gets
+its own properly-sized analysis window regardless of octave. This avoids the
+spectral leakage between adjacent pitch classes that STFT-based methods
+suffer from at low frequencies (critical for bass-heavy EDM).
 
 Uses harmonic stems (bass+other+vocals) when available to avoid drum noise.
 Falls back to full_mix with a warning if stems are not available.
 
-HPCP is tuned for melodic content:
-- Frequency range 100-4000 Hz (skips sub-bass rumble and high-freq noise)
-- Band preset with 500 Hz split for bass/melodic separation
-- Non-linear processing to boost strong pitch classes, suppress weak ones
-- Output normalized to unitSum for cross-file comparability
-
 Dependencies:
-- essentia
+- librosa
 - numpy
 - soundfile
 - src.core.file_utils
@@ -103,115 +100,71 @@ def mix_harmonic_stems(folder_path: Path) -> Tuple[Optional[np.ndarray], int, bo
     return None, 0, False
 
 
-def calculate_hpcp(audio: np.ndarray,
-                   sample_rate: int,
-                   frame_size: int = 4096,
-                   hop_size: int = 2048) -> np.ndarray:
+def calculate_chroma_cqt(audio: np.ndarray,
+                         sample_rate: int,
+                         hop_length: int = 2048) -> np.ndarray:
     """
-    Calculate average HPCP (Harmonic Pitch Class Profile) for audio.
+    Calculate average CQT chroma for audio.
 
-    Uses Essentia's HPCP algorithm with parameters tuned for melodic content:
-    - Frequency range 100-4000 Hz (melodic range, skips rumble and noise)
-    - Band preset with 500 Hz split
-    - Non-linear processing (boosts strong peaks, suppresses weak ones)
-    - Harmonics=5 for better pitch detection on sustained sounds
+    CQT (Constant-Q Transform) uses logarithmic frequency spacing where each
+    bin is exactly one semitone wide. This gives clean pitch-class resolution
+    at all frequencies, including sub-bass, without the spectral leakage that
+    STFT-based methods (HPCP) suffer from at low frequencies.
 
     Args:
         audio: Audio signal (mono, float32)
         sample_rate: Sample rate in Hz
-        frame_size: Analysis frame size
-        hop_size: Hop size between frames
+        hop_length: Hop size between frames (default 2048 = ~46ms at 44.1kHz)
 
     Returns:
-        Array of 12 chroma values that sum to 1.0
+        Array of 12 chroma values (C, C#, ..., B) that sum to 1.0
     """
-    from essentia.standard import (
-        Windowing, Spectrum, SpectralPeaks, HPCP, FrameGenerator
+    import librosa
+
+    # CQT chroma starting from C1 (~32.7 Hz) to capture bass fundamentals
+    # n_octaves=7 covers C1 to B7 (~3951 Hz) — full melodic range
+    chroma = librosa.feature.chroma_cqt(
+        y=audio,
+        sr=sample_rate,
+        hop_length=hop_length,
+        fmin=librosa.note_to_hz('C1'),
+        n_chroma=12,
+        n_octaves=7,
+        norm=2,  # L2 normalization per frame (reduces loudness variation)
     )
 
-    # Ensure float32 for Essentia
-    audio = audio.astype(np.float32)
-
-    # Initialize Essentia algorithms
-    windowing = Windowing(type='blackmanharris62')
-    spectrum = Spectrum()
-
-    # SpectralPeaks tuned for melodic content
-    spectral_peaks = SpectralPeaks(
-        sampleRate=sample_rate,
-        maxPeaks=100,
-        magnitudeThreshold=0.00001,
-        minFrequency=100,              # Skip sub-bass rumble
-        maxFrequency=4000              # Focus on melodic range, skip noise/transients
-    )
-
-    # HPCP tuned for melodic content analysis
-    hpcp = HPCP(
-        size=12,
-        sampleRate=sample_rate,
-        minFrequency=100,              # Skip sub-bass
-        maxFrequency=4000,             # Melodic range (A2-C8)
-        bandPreset=True,               # Enable band weighting
-        bandSplitFrequency=500,        # Separate bass from melodic content
-        harmonics=5,                   # Include harmonics for sustained sounds
-        windowSize=1.0,                # Semitone resolution
-        weightType='squaredCosine',    # Sharp weighting, focus on peaks
-        nonLinear=True,                # Boost strong peaks, suppress weak ones
-        normalized='unitMax'           # Required for nonLinear to work
-    )
-
-    # Process frames and accumulate HPCP
-    hpcp_frames = []
-
-    for frame in FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size,
-                                 startFromZero=True):
-        windowed = windowing(frame)
-        spec = spectrum(windowed)
-        frequencies, magnitudes = spectral_peaks(spec)
-
-        # Skip frames with no peaks
-        if len(frequencies) > 0:
-            frame_hpcp = hpcp(frequencies, magnitudes)
-            hpcp_frames.append(frame_hpcp)
-
-    if not hpcp_frames:
-        logger.warning("No valid HPCP frames extracted, returning uniform distribution")
+    if chroma.size == 0:
+        logger.warning("No valid CQT chroma frames, returning uniform distribution")
         return np.ones(12) / 12
 
-    # Average across all frames
-    avg_hpcp = np.mean(hpcp_frames, axis=0)
+    # Average across all frames → 12-element vector
+    avg_chroma = np.mean(chroma, axis=1)
 
-    # Essentia HPCP uses A as index 0 (A, A#, B, C, C#...)
-    # We want C as index 0 (C, C#, D, D#, E...) to match standard MIR conventions
-    # So we roll by -3 (left shift) to move index 3 (C) to index 0
-    avg_hpcp = np.roll(avg_hpcp, -3)
+    # Normalize to sum to 1.0 for cross-file comparability
+    chroma_sum = np.sum(avg_chroma)
+    if chroma_sum > 0:
+        avg_chroma = avg_chroma / chroma_sum
 
-    # Convert from unitMax to unitSum for cross-file comparability
-    # This preserves the nonLinear processing benefits while making
-    # results comparable across different audio files
-    hpcp_sum = np.sum(avg_hpcp)
-    if hpcp_sum > 0:
-        avg_hpcp = avg_hpcp / hpcp_sum
-
-    return avg_hpcp
+    return avg_chroma
 
 
 def analyze_chroma(audio_path: str | Path,
-                   frame_size: int = 4096,
-                   hop_size: int = 2048,
+                   hop_length: int = 2048,
                    use_stems: bool = True,
                    audio: Optional[np.ndarray] = None,
-                   sr: Optional[int] = None) -> Dict[str, float]:
+                   sr: Optional[int] = None,
+                   # Legacy params (ignored, kept for API compat)
+                   frame_size: Optional[int] = None,
+                   hop_size: Optional[int] = None) -> Dict[str, float]:
     """
-    Analyze chroma features for an audio file using Essentia HPCP.
+    Analyze chroma features for an audio file using CQT chroma.
 
     When use_stems=True and the audio_path is in an organized folder,
     uses bass+other+vocals stems (excluding drums) for cleaner harmonic analysis.
 
     Args:
         audio_path: Path to audio file
-        frame_size: Analysis frame size
-        hop_size: Hop size between frames
+        hop_length: Hop size between frames (default 2048)
         use_stems: Whether to try using harmonic stems (default: True)
         audio: Pre-loaded mono float32 audio array (skips disk read if provided)
         sr: Sample rate (required if audio is provided)
@@ -220,19 +173,21 @@ def analyze_chroma(audio_path: str | Path,
         Dictionary with chroma features:
         - chroma_0 through chroma_11: Weights for each semitone (sum to 1.0)
     """
+    # Legacy param support
+    if hop_size is not None and hop_length == 2048:
+        hop_length = hop_size
+
     audio_path = Path(audio_path)
 
     if audio is not None:
-        # Pre-loaded audio provided — use directly
-        logger.info(f"Analyzing chroma (HPCP): {audio_path.name} (pre-loaded)")
+        logger.info(f"Analyzing chroma (CQT): {audio_path.name} (pre-loaded)")
         used_stems = False
     else:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        logger.info(f"Analyzing chroma (HPCP): {audio_path.name}")
+        logger.info(f"Analyzing chroma (CQT): {audio_path.name}")
 
-        # Try to use harmonic stems if in organized folder
         used_stems = False
 
         if use_stems and audio_path.parent.is_dir():
@@ -250,28 +205,27 @@ def analyze_chroma(audio_path: str | Path,
     else:
         logger.info("Analysis source: full mix")
 
-    # Calculate average HPCP
-    avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
+    # Calculate average CQT chroma
+    avg_chroma = calculate_chroma_cqt(audio, sr, hop_length)
 
     # Compile results
     results = {}
     for i in range(12):
         feature_name = f'chroma_{i}'
-        results[feature_name] = float(avg_hpcp[i])
+        results[feature_name] = float(avg_chroma[i])
 
     # Clamp values to valid ranges
     for key, value in results.items():
         results[key] = clamp_feature_value(key, value)
 
     # Log results with pitch class names
-    logger.info("HPCP pitch class distribution (melodic-tuned, unitSum normalized):")
+    logger.info("CQT chroma pitch class distribution (unitSum normalized):")
     for i in range(12):
         pitch_class = PITCH_CLASSES[i]
         weight = results[f'chroma_{i}']
         bar = '█' * int(weight * 40)
         logger.info(f"  {pitch_class:>2}: {weight:.3f} {bar}")
 
-    # Verify sum ≈ 1.0
     total = sum(results.values())
     logger.debug(f"Sum of chroma values: {total:.4f}")
 
@@ -280,17 +234,18 @@ def analyze_chroma(audio_path: str | Path,
 
 def batch_analyze_chroma(root_directory: str | Path,
                           overwrite: bool = False,
-                          frame_size: int = 4096,
-                          hop_size: int = 2048,
-                          use_stems: bool = True) -> dict:
+                          hop_length: int = 2048,
+                          use_stems: bool = True,
+                          # Legacy params (ignored)
+                          frame_size: Optional[int] = None,
+                          hop_size: Optional[int] = None) -> dict:
     """
     Batch analyze chroma features for all organized folders.
 
     Args:
         root_directory: Root directory to search
         overwrite: Whether to overwrite existing chroma data
-        frame_size: Analysis frame size
-        hop_size: Hop size between frames
+        hop_length: Hop size between frames
         use_stems: Whether to use harmonic stems when available
 
     Returns:
@@ -298,8 +253,11 @@ def batch_analyze_chroma(root_directory: str | Path,
     """
     from core.file_utils import find_organized_folders
 
+    if hop_size is not None and hop_length == 2048:
+        hop_length = hop_size
+
     root_directory = Path(root_directory)
-    logger.info(f"Starting batch HPCP chroma analysis: {root_directory}")
+    logger.info(f"Starting batch CQT chroma analysis: {root_directory}")
 
     folders = find_organized_folders(root_directory)
 
@@ -339,7 +297,7 @@ def batch_analyze_chroma(root_directory: str | Path,
             audio, sr, used_stems = mix_harmonic_stems(folder) if use_stems else (None, 0, False)
 
             if audio is not None:
-                avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
+                avg_chroma = calculate_chroma_cqt(audio, sr, hop_length)
                 if used_stems:
                     stats['used_stems'] += 1
                 else:
@@ -349,13 +307,13 @@ def batch_analyze_chroma(root_directory: str | Path,
                 audio, sr = read_audio(str(stems['full_mix']), dtype='float32')
                 if len(audio.shape) > 1:
                     audio = np.mean(audio, axis=1)
-                avg_hpcp = calculate_hpcp(audio, sr, frame_size, hop_size)
+                avg_chroma = calculate_chroma_cqt(audio, sr, hop_length)
                 stats['used_full_mix'] += 1
 
             # Compile results
             results = {}
             for j in range(12):
-                results[f'chroma_{j}'] = float(avg_hpcp[j])
+                results[f'chroma_{j}'] = float(avg_chroma[j])
 
             # Save to .INFO file
             safe_update(info_path, results)
@@ -376,7 +334,7 @@ def batch_analyze_chroma(root_directory: str | Path,
 
     # Summary
     logger.info("=" * 60)
-    logger.info("Batch HPCP Chroma Analysis Summary:")
+    logger.info("Batch CQT Chroma Analysis Summary:")
     logger.info(f"  Total folders:  {stats['total']}")
     logger.info(f"  Successful:     {stats['success']}")
     logger.info(f"    Used stems:   {stats['used_stems']}")
@@ -394,7 +352,7 @@ if __name__ == "__main__":
     from core.common import setup_logging
 
     parser = argparse.ArgumentParser(
-        description="Analyze chroma features using Essentia HPCP (melodic-tuned)"
+        description="Analyze chroma features using CQT (Constant-Q Transform)"
     )
 
     parser.add_argument(
@@ -410,17 +368,10 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--frame-size',
-        type=int,
-        default=4096,
-        help='Analysis frame size (default: 4096)'
-    )
-
-    parser.add_argument(
-        '--hop-size',
+        '--hop-length',
         type=int,
         default=2048,
-        help='Hop size in samples (default: 2048)'
+        help='Hop length in samples (default: 2048)'
     )
 
     parser.add_argument(
@@ -457,12 +408,10 @@ if __name__ == "__main__":
 
     try:
         if args.batch:
-            # Batch processing
             stats = batch_analyze_chroma(
                 path,
                 overwrite=args.overwrite,
-                frame_size=args.frame_size,
-                hop_size=args.hop_size,
+                hop_length=args.hop_length,
                 use_stems=use_stems
             )
 
@@ -471,7 +420,6 @@ if __name__ == "__main__":
                 sys.exit(1)
 
         elif path.is_dir():
-            # Single folder
             stems = get_stem_files(path, include_full_mix=True)
             if 'full_mix' not in stems:
                 logger.error(f"No full_mix file found in {path}")
@@ -479,8 +427,7 @@ if __name__ == "__main__":
 
             results = analyze_chroma(
                 stems['full_mix'],
-                frame_size=args.frame_size,
-                hop_size=args.hop_size,
+                hop_length=args.hop_length,
                 use_stems=use_stems
             )
 
@@ -488,7 +435,7 @@ if __name__ == "__main__":
             info_path = get_info_path(path)
             safe_update(info_path, results)
 
-            print(f"\nHPCP Chroma Features (melodic-tuned, unitSum normalized, sum ≈ 1.0):")
+            print(f"\nCQT Chroma Features (unitSum normalized, sum = 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
@@ -497,15 +444,13 @@ if __name__ == "__main__":
             print(f"\n  Sum: {sum(results.values()):.4f}")
 
         else:
-            # Single file
             results = analyze_chroma(
                 path,
-                frame_size=args.frame_size,
-                hop_size=args.hop_size,
+                hop_length=args.hop_length,
                 use_stems=use_stems
             )
 
-            print(f"\nHPCP Chroma Features (melodic-tuned, unitSum normalized, sum ≈ 1.0):")
+            print(f"\nCQT Chroma Features (unitSum normalized, sum = 1.0):")
             for i in range(12):
                 pitch_class = PITCH_CLASSES[i]
                 weight = results[f'chroma_{i}']
@@ -513,7 +458,7 @@ if __name__ == "__main__":
                 print(f"  {pitch_class:>2} (chroma_{i:2d}): {weight:.3f} {bar}")
             print(f"\n  Sum: {sum(results.values()):.4f}")
 
-        logger.info("HPCP chroma analysis completed successfully")
+        logger.info("CQT chroma analysis completed successfully")
 
     except Exception as e:
         logger.error(f"Error: {e}")

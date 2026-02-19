@@ -98,9 +98,24 @@ class PipelineConfig:
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)
     flamingo_revision: Dict[str, Any] = field(default_factory=dict)
 
+    # Map internal feature names to YAML overwrite keys
+    _OVERWRITE_ALIASES = {
+        'harmonic': 'chroma',
+        'rhythm': 'bpm',
+        'flamingo': 'music_flamingo',
+    }
+
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten."""
-        return self.overwrite or self.per_feature_overwrite.get(feature, False)
+        if self.overwrite:
+            return True
+        if self.per_feature_overwrite.get(feature, False):
+            return True
+        # Check YAML alias (e.g. 'harmonic' → 'chroma')
+        alias = self._OVERWRITE_ALIASES.get(feature)
+        if alias and self.per_feature_overwrite.get(alias, False):
+            return True
+        return False
 
     @property
     def working_dir(self) -> Path:
@@ -148,9 +163,16 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
                    'booming', 'reverberation', 'sharpness', 'warmth']
 
+    _ow_aliases = {'harmonic': 'chroma', 'rhythm': 'bpm', 'flamingo': 'music_flamingo'}
+
     def _needs_processing(keys, feature_name=None):
         """Check if ANY of the keys are missing (needs processing)."""
-        feat_ow = overwrite or (feature_name and per_feature_ow.get(feature_name, False))
+        feat_ow = overwrite
+        if not feat_ow and feature_name:
+            feat_ow = per_feature_ow.get(feature_name, False)
+            if not feat_ow:
+                alias = _ow_aliases.get(feature_name)
+                feat_ow = bool(alias and per_feature_ow.get(alias, False))
         return feat_ow or any(k not in existing_keys for k in keys)
 
     try:

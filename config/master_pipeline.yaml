@@ -149,7 +149,7 @@ overwrite:
   loudness: false                # Overwrite existing loudness data
   spectral: false                # Overwrite existing spectral features
   multiband_rms: false           # Overwrite existing multiband RMS data
-  chroma: false                  # Overwrite existing chroma features
+  chroma: true                   # Overwrite existing chroma features
   timbral: false                 # Overwrite existing timbral features
   essentia: false                # Overwrite existing Essentia classification
   audiobox: false                # Overwrite existing AudioBox aesthetics
@@ -272,7 +272,7 @@ rocm:
   TORCH_COMPILE: "0"
 
   # CPU thread count
-  OMP_NUM_THREADS: "12"
+  OMP_NUM_THREADS: "8"
 
   MIOPEN_FIND_MODE: "3"
   # MIOPEN_FIND_MODE: disabled — causes VAE freezes on some workloads
@@ -285,5 +285,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 11             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
-  essentia_workers: 4            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
+  feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  essentia_workers: 6            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

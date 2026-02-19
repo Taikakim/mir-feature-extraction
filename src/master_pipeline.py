@@ -198,7 +198,16 @@ class MasterPipelineConfig:
         Returns:
             True if the feature should be overwritten
         """
-        return self.overwrite or self.per_feature_overwrite.get(feature, False)
+        if self.overwrite:
+            return True
+        if self.per_feature_overwrite.get(feature, False):
+            return True
+        # Check alias (internal name → YAML key)
+        _aliases = {'harmonic': 'chroma', 'rhythm': 'bpm', 'flamingo': 'music_flamingo'}
+        alias = _aliases.get(feature)
+        if alias and self.per_feature_overwrite.get(alias, False):
+            return True
+        return False
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> 'MasterPipelineConfig':
@@ -1445,51 +1454,44 @@ class MasterPipeline:
         # Lowercase, remove underscores/dashes/spaces, keep alphanumeric
         return re.sub(r'[^a-z0-9]', '', name.lower())
 
+    def _build_crop_folder_index(self, crops_dir: Path) -> set:
+        """Build a set of crop folder names that contain actual crop files.
+
+        Scans crops_dir once and caches the result for the pipeline run.
+        """
+        if hasattr(self, '_crop_folder_index'):
+            return self._crop_folder_index
+
+        index = set()
+        if not crops_dir.exists():
+            self._crop_folder_index = index
+            return index
+
+        for crop_folder in crops_dir.iterdir():
+            if not crop_folder.is_dir():
+                continue
+            # Quick check: any file matching *_N.ext pattern
+            has_crops = False
+            for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
+                if list(crop_folder.glob(f"*_[0-9]{ext}")) or \
+                   list(crop_folder.glob(f"*_[0-9][0-9]{ext}")):
+                    has_crops = True
+                    break
+            if has_crops:
+                index.add(crop_folder.name)
+
+        self._crop_folder_index = index
+        logger.debug(f"Crop folder index: {len(index)} folders with crops")
+        return index
+
     def _check_existing_crops(self, folder: Path, crops_dir: Path) -> bool:
         """Check if crops already exist for a track.
 
         Returns True if crops exist and should be skipped.
-        Handles name mismatches between source folders and crop folders.
+        Uses exact folder name match only (crop folders always match source names).
         """
-        # If crops_dir doesn't exist, no crops exist
-        if not crops_dir.exists():
-            return False
-
-        def has_crop_files(crop_folder: Path) -> bool:
-            """Check if a folder contains crop files."""
-            for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
-                crops = list(crop_folder.glob(f"*_[0-9]{ext}"))
-                crops.extend(crop_folder.glob(f"*_[0-9][0-9]{ext}"))
-                if crops:
-                    return True
-            return False
-
-        # First try exact match
-        track_crops_dir = crops_dir / folder.name
-        if track_crops_dir.exists() and has_crop_files(track_crops_dir):
-            return True
-
-        # Try matching by track title (handles "6. Song" vs "Artist - Song" mismatches)
-        track_title = self._extract_track_title(folder.name)
-        normalized_title = self._normalize_for_matching(track_title)
-
-        # Search for crop folders containing this track title
-        for crop_folder in crops_dir.iterdir():
-            if not crop_folder.is_dir():
-                continue
-
-            # Check if title is contained in crop folder name
-            if track_title in crop_folder.name:
-                if has_crop_files(crop_folder):
-                    return True
-
-            # Try normalized matching (handles 01_41 vs 0141)
-            normalized_crop = self._normalize_for_matching(crop_folder.name)
-            if normalized_title and normalized_title in normalized_crop:
-                if has_crop_files(crop_folder):
-                    return True
-
-        return False
+        index = self._build_crop_folder_index(crops_dir)
+        return folder.name in index
 
     def _run_cropping(self):
         """Stage 3: Create crops from full tracks (parallel processing)."""
