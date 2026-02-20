@@ -1896,6 +1896,10 @@ class MasterPipeline:
                 essentia_workers=self.config.essentia_workers,  # TensorFlow-safe limit
                 skip_organize=True,
                 skip_demucs=True,  # Already done
+                skip_loudness=self.config.skip_loudness,
+                skip_spectral=self.config.skip_spectral,
+                skip_harmonic=self.config.skip_chroma,
+                skip_timbral=self.config.skip_timbral,
                 skip_flamingo=self.config.skip_flamingo,
                 skip_audiobox=self.config.skip_audiobox,
                 skip_classification=self.config.skip_essentia,

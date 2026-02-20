@@ -18,8 +18,8 @@ paths:
 # =============================================================================
 stages:
   organize: null                 # Stage 1: Organize raw files into project structure
-  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: true                 # Stage 3: Create training crops
+  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: false                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -98,19 +98,19 @@ cropping:
 # =============================================================================
 features:
   # Loudness (LUFS/LRA)
-  loudness: true
+  loudness: false
 
   # Spectral features (flatness, flux, skewness, kurtosis)
-  spectral: true
+  spectral: false
 
   # Multiband RMS (bass, body, mid, air)
-  multiband_rms: true
+  multiband_rms: false
 
   # Harmonic/Chroma (12-bin pitch class)
-  chroma: true
+  chroma: false
 
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
-  timbral: true
+  timbral: false
 
   # Essentia classification
   essentia: true
@@ -149,7 +149,7 @@ overwrite:
   loudness: false                # Overwrite existing loudness data
   spectral: false                # Overwrite existing spectral features
   multiband_rms: false           # Overwrite existing multiband RMS data
-  chroma: true                   # Overwrite existing chroma features
+  chroma: false                   # Overwrite existing chroma features
   timbral: false                 # Overwrite existing timbral features
   essentia: false                # Overwrite existing Essentia classification
   audiobox: false                # Overwrite existing AudioBox aesthetics
@@ -197,7 +197,7 @@ music_flamingo:
 #   2. Folder name (if valid artist exists, no fingerprinting needed)  
 #   3. AcoustID fingerprinting (ONLY as last resort when both above fail)
 metadata:
-  enabled: true
+  enabled: false
   use_spotify: false              # Set to false to skip Spotify (e.g., during rate limit cooldown)
   use_musicbrainz: true          # Set to false to skip MusicBrainz
   use_fingerprinting: true       # Enable AcoustID fingerprinting as LAST RESORT only
