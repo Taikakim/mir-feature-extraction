@@ -286,4 +286,4 @@ processing:
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
   feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
-  essentia_workers: 6            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
+  essentia_workers: 8            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
