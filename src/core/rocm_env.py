@@ -35,7 +35,9 @@ def _rocm_clean_exit():
     try:
         import torch
         if torch.cuda.tunable.is_enabled():
-            torch.cuda.tunable.write_file()
+            fname = torch.cuda.tunable.get_filename() if hasattr(torch.cuda.tunable, 'get_filename') else ''
+            if fname:
+                torch.cuda.tunable.write_file()
     except Exception:
         pass
     try:
