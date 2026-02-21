@@ -1159,6 +1159,16 @@ def create_crops_for_file(folder_path: Path,
     align_grid = downbeat_times if (downbeat_times is not None and len(downbeat_times) > 0) else beat_times
     global_bpm = float(bpm) if bpm else 0.0
 
+    # BPM fallback: if no beat grid but BPM is known, synthesise downbeat positions
+    if (align_grid is None or len(align_grid) == 0) and global_bpm > 0:
+        beat_interval = 60.0 / global_bpm
+        downbeat_interval = beat_interval * 4  # assume 4/4 time
+        align_grid = np.arange(start_offset_sec, duration_sec, downbeat_interval)
+        logger.info(
+            f"No beat grid detected — synthesised {len(align_grid)} downbeats "
+            f"from BPM {global_bpm:.1f}"
+        )
+
     # Pre-load transferrable features from source .INFO (reuse info_data loaded above)
     # This avoids re-reading the same file for every crop
     source_transferrable = {}
@@ -1259,11 +1269,10 @@ def create_crops_for_file(folder_path: Path,
 
         n_frames = actual_end_sample - actual_start_sample
 
-        # Skip if too short (< 1 second)
-        if n_frames < sr:
-            # Advance past this region
-            current_start_sec = max(current_start_sec + 1.0, actual_end_sample / sr)
-            continue
+        # Skip tail crops shorter than 75% of target length
+        min_crop_frames = int(length_sec * 0.75 * sr)
+        if n_frames < min_crop_frames:
+            break
 
         # Read crop segment (from RAM if preloaded, else seeked read from disk)
         if preloaded_mix is not None:
