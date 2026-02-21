@@ -1145,6 +1145,21 @@ class Pipeline:
 
                     logger.info(f"  Processing {len(to_process)} files...")
 
+                    # Build prefetch list: crop file + vocals stem (for gender analysis)
+                    # PathPrefetcher warms OS disk cache while TF runs inference
+                    from src.core.audio_prefetcher import PathPrefetcher
+                    prefetch_paths = []
+                    for cp in to_process:
+                        prefetch_paths.append(cp)
+                        if self.config.essentia_gender:
+                            stems = get_crop_stem_files(cp)
+                            vp = stems.get('vocals')
+                            if vp:
+                                prefetch_paths.append(vp)
+
+                    prefetcher = PathPrefetcher(prefetch_paths, buffer_size=16)
+                    prefetcher.start()
+
                     # Sequential processing - TensorFlow handles internal parallelism
                     for i, crop_path in enumerate(to_process, 1):
                         if shutdown_requested.is_set():
@@ -1175,11 +1190,18 @@ class Pipeline:
                             logger.error(f"  Essentia failed for {crop_path.name}: {e}")
                             self.stats["crops_failed"] += 1
 
+                        # Advance prefetcher past this crop (and its vocals stem)
+                        prefetcher.mark_processed(crop_path)
+                        if self.config.essentia_gender and vocals_path:
+                            prefetcher.mark_processed(vocals_path)
+
                         if i % 10 == 0 or i == len(to_process):
                             logger.info(f"  {i}/{len(to_process)}")
                             if state and i % 50 == 0:
                                 state.update_pass_progress('pass_3_essentia', completed=i, total=len(to_process))
                                 state.save()
+
+                    prefetcher.stop()
 
                     # Free VRAM for subsequent passes (Music Flamingo needs it)
                     unload_models()
