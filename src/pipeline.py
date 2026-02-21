@@ -1074,8 +1074,19 @@ class Pipeline:
                                 else:
                                     self.stats["crops_failed"] += 1
                         except Exception as e:
-                            logger.error(f"  AudioBox batch failed: {e}")
-                            self.stats["crops_failed"] += len(batch_paths)
+                            # Batch failed (likely one corrupt file) — retry individually
+                            logger.warning(f"  AudioBox batch failed, retrying {len(batch_paths)} files individually: {e}")
+                            for crop_path in batch_paths:
+                                try:
+                                    results = analyze_audiobox_aesthetics_batch([crop_path])
+                                    if results and results[0]:
+                                        safe_update(get_crop_info_path(crop_path), results[0])
+                                        self.stats["crops_processed"] += 1
+                                    else:
+                                        self.stats["crops_failed"] += 1
+                                except Exception as e2:
+                                    logger.error(f"  AudioBox skipping corrupt file {crop_path.name}: {e2}")
+                                    self.stats["crops_failed"] += 1
 
                         logger.info(progress.update(batch_end))
 
