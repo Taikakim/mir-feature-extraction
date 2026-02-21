@@ -713,6 +713,13 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
             loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)
             audio = loader()
 
+        # Require at least 1 second of audio for EffNet frame extraction
+        if len(audio) < 16000:
+            logger.warning(f"Audio too short for GMI analysis ({len(audio)} samples < 16000): {Path(audio_path).name}")
+            return {k: {} for k in (['essentia_genre'] if include_genre else []) +
+                                    (['essentia_mood'] if include_mood else []) +
+                                    (['essentia_instrument'] if include_instrument else [])}
+
         # Get embeddings using Discogs-EffNet (shared across all classifiers)
         embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
         embedding_model = get_cached_model(
@@ -721,6 +728,12 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
             output="PartitionedCall:1"
         )
         embeddings = embedding_model(audio)
+
+        if len(embeddings) == 0:
+            logger.warning(f"EffNet produced no embeddings (audio may be silent/corrupt): {Path(audio_path).name}")
+            return {k: {} for k in (['essentia_genre'] if include_genre else []) +
+                                    (['essentia_mood'] if include_mood else []) +
+                                    (['essentia_instrument'] if include_instrument else [])}
 
         # Get labels
         labels = get_classification_labels()
@@ -1028,6 +1041,13 @@ def analyze_essentia_features(audio_path: str | Path,
             results.update(gmi_results)
         except Exception as e:
             logger.error(f"Could not analyze genre/mood/instrument: {e}")
+            # Write empty dicts so this file is not retried on next run
+            if include_genre:
+                results.setdefault('essentia_genre', {})
+            if include_mood:
+                results.setdefault('essentia_mood', {})
+            if include_instrument:
+                results.setdefault('essentia_instrument', {})
 
     return results
 
