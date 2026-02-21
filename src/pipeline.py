@@ -24,6 +24,7 @@ import logging
 import multiprocessing
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -922,17 +923,22 @@ class Pipeline:
             except ImportError: pass
             
         # =========================================================================
-        # PASS 1: CPU / Light Features (Parallel)
+        # PASS 1: CPU / Light Features (Parallel, runs in background thread)
+        # PASS 1 is entirely CPU-based and can run concurrently with GPU passes.
+        # We start it immediately and join before PASS 3 (Essentia).
         # =========================================================================
-        if not all([self.config.skip_loudness, self.config.skip_rhythm, 
-                   self.config.skip_spectral, self.config.skip_harmonic, 
-                   self.config.skip_timbral]):
-            
+        pass1_thread = None
+        pass1_exception = [None]
+        state_lock = threading.Lock()  # Protects concurrent state.save() calls
+
+        pass1_needed = not all([self.config.skip_loudness, self.config.skip_rhythm,
+                                self.config.skip_spectral, self.config.skip_harmonic,
+                                self.config.skip_timbral])
+
+        if pass1_needed:
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
             logger.info(f"  Parallel workers: {self.config.feature_workers}")
-            
-            # Prepare tasks
-            # We construct a simple config dict to pass to workers (avoid passing full config object)
+
             worker_config = {
                 'skip_loudness': self.config.skip_loudness,
                 'skip_rhythm': self.config.skip_rhythm,
@@ -942,20 +948,17 @@ class Pipeline:
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
             }
-            
+
             tasks = []
             for crop_path in all_crops:
-                # Filter what needs running based on overwrite/existing
                 info_path = get_crop_info_path(crop_path)
                 existing = read_info(info_path) if info_path.exists() else {}
                 existing_keys = set(existing.keys())
 
-                # Check if we really need to run anything for this file
                 needs_run = False
                 if self.config.overwrite:
                     needs_run = True
                 else:
-                    # Check each feature type - run if ANY is missing or per-feature overwrite is set
                     if not self.config.skip_loudness and (self.config.should_overwrite('loudness') or 'lufs' not in existing_keys): needs_run = True
                     elif not self.config.skip_loudness and any(f'lufs_{s}' not in existing_keys for s in ['drums', 'bass', 'other', 'vocals']): needs_run = True
                     elif not self.config.skip_rhythm and (self.config.should_overwrite('rhythm') or 'bpm' not in existing_keys): needs_run = True
@@ -964,50 +967,65 @@ class Pipeline:
                     elif not self.config.skip_timbral and (self.config.should_overwrite('timbral') or 'brightness' not in existing_keys): needs_run = True
 
                 if needs_run:
-                    # Pass existing_keys to worker so it can skip features that already exist
                     tasks.append((crop_path, worker_config, existing_keys))
-            
+
             if tasks:
-                logger.info(f"  Processing {len(tasks)} files...")
-                with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
-                    # Submit all tasks
-                    futures = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
-                    
-                    for i, future in enumerate(as_completed(futures), 1):
-                        crop_path = futures[future]
-                        try:
-                            result = future.result()
-                            if result['success']:
-                                if result['results']:
-                                    safe_update(get_crop_info_path(crop_path), result['results'])
-                                    self.stats["crops_processed"] += 1
-                            else:
-                                logger.error(f"  Failed CPU pass for {crop_path.name}: {result.get('error')}")
-                                self.stats["crops_failed"] += 1
-                        except Exception as e:
-                            logger.error(f"  Worker exception for {crop_path.name}: {e}")
-                            self.stats["crops_failed"] += 1
+                logger.info(f"  Processing {len(tasks)} files in background (GPU passes run concurrently)...")
 
-                        if i % 10 == 0:
-                            logger.info(f"  {i}/{len(tasks)}")
-                            if state and i % 50 == 0:
-                                state.update_pass_progress('pass_1_cpu', completed=i, total=len(tasks))
-                                state.save()
+                def _pass1_worker():
+                    try:
+                        with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
+                            futures = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
 
-                        if shutdown_requested.is_set():
-                            logger.info("  Shutdown requested — waiting for running workers to finish...")
-                            executor.shutdown(wait=True, cancel_futures=True)
-                            break
+                            for i, future in enumerate(as_completed(futures), 1):
+                                crop_path = futures[future]
+                                try:
+                                    result = future.result()
+                                    if result['success']:
+                                        if result['results']:
+                                            safe_update(get_crop_info_path(crop_path), result['results'])
+                                            self.stats["crops_processed"] += 1
+                                    else:
+                                        logger.error(f"  [PASS 1] Failed for {crop_path.name}: {result.get('error')}")
+                                        self.stats["crops_failed"] += 1
+                                except Exception as e:
+                                    logger.error(f"  [PASS 1] Worker exception for {crop_path.name}: {e}")
+                                    self.stats["crops_failed"] += 1
+
+                                if i % 10 == 0:
+                                    logger.info(f"  [PASS 1] {i}/{len(tasks)}")
+                                    if state and i % 50 == 0:
+                                        with state_lock:
+                                            state.update_pass_progress('pass_1_cpu', completed=i, total=len(tasks))
+                                            state.save()
+
+                                if shutdown_requested.is_set():
+                                    logger.info("  [PASS 1] Shutdown requested — stopping CPU workers.")
+                                    executor.shutdown(wait=True, cancel_futures=True)
+                                    break
+                    except Exception as e:
+                        pass1_exception[0] = e
+                    finally:
+                        if state:
+                            with state_lock:
+                                state.update_pass_progress('pass_1_cpu', completed=len(tasks), total=len(tasks))
+                        logger.info("  [PASS 1] CPU features complete.")
+
+                pass1_thread = threading.Thread(target=_pass1_worker, daemon=True, name='pass1-cpu')
+                pass1_thread.start()
             else:
-                logger.info("  All files already analyzed.")
-            if state:
-                state.update_pass_progress('pass_1_cpu', completed=len(tasks), total=len(tasks))
+                logger.info("  [PASS 1] All files already analyzed.")
+                if state:
+                    state.update_pass_progress('pass_1_cpu', completed=0, total=0)
 
         # =========================================================================
         # PASS 2: AudioBox (Batched for GPU efficiency)
+        # PASS 1 background thread is still running concurrently at this point.
         # =========================================================================
         if shutdown_requested.is_set():
             logger.info("Shutdown requested — skipping remaining passes.")
+            if pass1_thread is not None:
+                pass1_thread.join(timeout=30)
             if state: state.save()
             self.stats["total_time"] = time.time() - start_time
             self._print_crops_summary()
@@ -1067,6 +1085,15 @@ class Pipeline:
 
             except ImportError:
                 logger.warning("  AudioBox not available")
+
+        # =========================================================================
+        # Join PASS 1 thread before PASS 3 to free CPU cores for Essentia's TF
+        # =========================================================================
+        if pass1_thread is not None and pass1_thread.is_alive():
+            logger.info("[PASS 1/5] Waiting for CPU features thread to finish...")
+            pass1_thread.join()
+            if pass1_exception[0]:
+                logger.error(f"[PASS 1/5] CPU features thread failed: {pass1_exception[0]}")
 
         # =========================================================================
         # PASS 3: Essentia (Sequential - TensorFlow deadlocks with multiprocessing)
