@@ -156,13 +156,22 @@ def preload_models(include_voice: bool = False, include_gender: bool = False,
             logger.warning(f"Could not preload gender model: {e}")
 
     # Genre/Mood/Instrument (EffNet embeddings + classifiers)
+    # Try MIGraphX ONNX first, fall back to TF
     if include_gmi:
         try:
-            model_path = get_model_path("discogs-effnet-bs64-1.pb")
-            get_cached_model(TensorflowPredictEffnetDiscogs, graphFilename=model_path, output="PartitionedCall:1")
+            from classification.effnet_onnx import get_effnet_migraphx
+            onnx_path = get_model_path("discogs-effnet-bsdynamic-1.onnx")
+            get_effnet_migraphx(onnx_path)
             loaded += 1
+            logger.info("EffNet: using MIGraphX ONNX backend")
         except Exception as e:
-            logger.warning(f"Could not preload EffNet embedding model: {e}")
+            logger.warning(f"MIGraphX EffNet not available ({e}), falling back to TF")
+            try:
+                model_path = get_model_path("discogs-effnet-bs64-1.pb")
+                get_cached_model(TensorflowPredictEffnetDiscogs, graphFilename=model_path, output="PartitionedCall:1")
+                loaded += 1
+            except Exception as e2:
+                logger.warning(f"Could not preload EffNet embedding model: {e2}")
 
         if include_genre:
             try:
@@ -195,12 +204,17 @@ def preload_models(include_voice: bool = False, include_gender: bool = False,
 
 
 def unload_models():
-    """Free all cached Essentia TF models from VRAM."""
+    """Free all cached Essentia TF models and ONNX sessions."""
     global _MODEL_CACHE
     count = len(_MODEL_CACHE)
     _MODEL_CACHE.clear()
     if count:
         logger.info(f"Unloaded {count} Essentia TF models")
+    try:
+        from classification.effnet_onnx import unload_effnet_migraphx
+        unload_effnet_migraphx()
+    except Exception:
+        pass
 
 
 def get_model_path(model_filename: str) -> str:
@@ -720,13 +734,18 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
                                     (['essentia_mood'] if include_mood else []) +
                                     (['essentia_instrument'] if include_instrument else [])}
 
-        # Get embeddings using Discogs-EffNet (shared across all classifiers)
-        embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
-        embedding_model = get_cached_model(
-            TensorflowPredictEffnetDiscogs,
-            graphFilename=embedding_model_path,
-            output="PartitionedCall:1"
-        )
+        # Get embeddings using Discogs-EffNet — MIGraphX ONNX if available, else TF
+        try:
+            from classification.effnet_onnx import get_effnet_migraphx
+            onnx_path = get_model_path("discogs-effnet-bsdynamic-1.onnx")
+            embedding_model = get_effnet_migraphx(onnx_path)
+        except Exception:
+            embedding_model_path = get_model_path("discogs-effnet-bs64-1.pb")
+            embedding_model = get_cached_model(
+                TensorflowPredictEffnetDiscogs,
+                graphFilename=embedding_model_path,
+                output="PartitionedCall:1"
+            )
         embeddings = embedding_model(audio)
 
         if len(embeddings) == 0:
@@ -943,7 +962,8 @@ def analyze_essentia_features(audio_path: str | Path,
                               include_mood: bool = True,
                               include_instrument: bool = True,
                               vocals_path: Optional[str | Path] = None,
-                              vocal_content_thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                              vocal_content_thresholds: Optional[Dict[str, float]] = None,
+                              _timings: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """
     Analyze Essentia high-level features for a single audio file.
 
@@ -970,38 +990,51 @@ def analyze_essentia_features(audio_path: str | Path,
     logger.info(f"Analyzing Essentia features: {audio_path.name}")
 
     # Load audio ONCE at 16kHz mono — shared across all models
+    _t = time.perf_counter()
     try:
         loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
         audio_16k = loader()
     except Exception as e:
         logger.error(f"Could not load audio: {e}")
         return {}
+    if _timings is not None:
+        _timings['audio_load'] = time.perf_counter() - _t
 
     results = {}
 
     # Analyze danceability
+    _t = time.perf_counter()
     try:
         danceability = analyze_danceability(audio_path, audio=audio_16k)
         results['danceability'] = danceability
     except Exception as e:
         logger.error(f"Could not analyze danceability: {e}")
+    if _timings is not None:
+        _timings['danceability'] = time.perf_counter() - _t
 
     # Analyze atonality
+    _t = time.perf_counter()
     try:
         atonality = analyze_atonality(audio_path, audio=audio_16k)
         results['atonality'] = atonality
     except Exception as e:
         logger.error(f"Could not analyze atonality: {e}")
+    if _timings is not None:
+        _timings['atonality'] = time.perf_counter() - _t
 
     # Analyze voice/instrumental if requested
+    _t = time.perf_counter()
     if include_voice_analysis:
         try:
             voice_results = analyze_voice_instrumental(audio_path, audio=audio_16k)
             results.update(voice_results)
         except Exception as e:
             logger.error(f"Could not analyze voice/instrumental: {e}")
+    if _timings is not None and include_voice_analysis:
+        _timings['voice'] = time.perf_counter() - _t
 
     # Analyze vocal gender if requested
+    _t = time.perf_counter()
     if include_gender:
         gender_path = Path(vocals_path) if vocals_path else audio_path
         if gender_path.exists():
@@ -1028,8 +1061,11 @@ def analyze_essentia_features(audio_path: str | Path,
                 logger.info(f"  Skipping gender analysis (no meaningful vocal content)")
         else:
             logger.debug(f"  No vocals stem found for gender analysis: {gender_path}")
+    if _timings is not None and include_gender:
+        _timings['gender'] = time.perf_counter() - _t
 
     # Analyze genre, mood, and instrument if requested
+    _t = time.perf_counter()
     if include_gmi:
         try:
             gmi_results = analyze_genre_mood_instrument(
@@ -1048,6 +1084,8 @@ def analyze_essentia_features(audio_path: str | Path,
                 results.setdefault('essentia_mood', {})
             if include_instrument:
                 results.setdefault('essentia_instrument', {})
+    if _timings is not None and include_gmi:
+        _timings['gmi'] = time.perf_counter() - _t
 
     return results
 

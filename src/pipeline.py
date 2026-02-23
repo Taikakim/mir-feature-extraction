@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -1156,20 +1157,24 @@ class Pipeline:
 
                     logger.info(f"  Processing {len(to_process)} files...")
 
-                    # Build prefetch list: crop file + vocals stem (for gender analysis)
-                    # PathPrefetcher warms OS disk cache while TF runs inference
+                    # Build prefetch list + cache vocals paths (avoids double filesystem lookup)
                     from src.core.audio_prefetcher import PathPrefetcher
                     prefetch_paths = []
+                    vocals_path_cache = {}
                     for cp in to_process:
                         prefetch_paths.append(cp)
                         if self.config.essentia_gender:
                             stems = get_crop_stem_files(cp)
                             vp = stems.get('vocals')
+                            vocals_path_cache[cp] = vp
                             if vp:
                                 prefetch_paths.append(vp)
 
                     prefetcher = PathPrefetcher(prefetch_paths, buffer_size=16)
                     prefetcher.start()
+
+                    # Timing accumulator: key -> list of elapsed seconds
+                    timing_acc = defaultdict(list)
 
                     # Sequential processing - TensorFlow handles internal parallelism
                     for i, crop_path in enumerate(to_process, 1):
@@ -1178,12 +1183,9 @@ class Pipeline:
                             break
 
                         try:
-                            # Find vocals stem for gender analysis
-                            vocals_path = None
-                            if self.config.essentia_gender:
-                                stems = get_crop_stem_files(crop_path)
-                                vocals_path = stems.get('vocals')
+                            vocals_path = vocals_path_cache.get(crop_path) if self.config.essentia_gender else None
 
+                            _timings = {}
                             results = analyze_essentia_features(
                                 crop_path,
                                 include_voice_analysis=self.config.essentia_voice,
@@ -1193,7 +1195,10 @@ class Pipeline:
                                 include_mood=self.config.essentia_mood,
                                 include_instrument=self.config.essentia_instrument,
                                 vocals_path=vocals_path,
-                                vocal_content_thresholds=self.config.vocal_content_thresholds)
+                                vocal_content_thresholds=self.config.vocal_content_thresholds,
+                                _timings=_timings)
+                            for k, v in _timings.items():
+                                timing_acc[k].append(v)
                             if results:
                                 safe_update(get_crop_info_path(crop_path), results)
                                 self.stats["crops_processed"] += 1
@@ -1213,6 +1218,18 @@ class Pipeline:
                                 state.save()
 
                     prefetcher.stop()
+
+                    # Log per-model timing statistics
+                    if timing_acc:
+                        logger.info("  Essentia timing statistics (seconds/crop):")
+                        for key in ['audio_load', 'danceability', 'atonality', 'voice', 'gender', 'gmi']:
+                            vals = timing_acc.get(key)
+                            if vals:
+                                logger.info(
+                                    f"    {key:<12s}  mean={sum(vals)/len(vals):.3f}s"
+                                    f"  min={min(vals):.3f}s  max={max(vals):.3f}s"
+                                    f"  n={len(vals)}"
+                                )
 
                     # Free VRAM for subsequent passes (Music Flamingo needs it)
                     unload_models()
