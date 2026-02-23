@@ -121,39 +121,15 @@ def preload_models(include_voice: bool = False, include_gender: bool = False,
     loaded = 0
     t0 = time.time()
 
-    # Danceability (VGGish)
+    # VGGish models (danceability, atonality, voice, gender) — MIGraphX ONNX
     try:
-        model_path = get_model_path("danceability-vggish-audioset-1.pb")
-        get_cached_model(TensorflowPredictVGGish, graphFilename=model_path)
-        loaded += 1
+        from classification.vggish_onnx import preload_all_vggish
+        _models_dir = Path(get_model_path("danceability-vggish-audioset-1.pb")).parent
+        n = preload_all_vggish(_models_dir, include_voice=include_voice, include_gender=include_gender)
+        loaded += n
+        logger.info(f"VGGish: loaded {n} ONNX models via MIGraphX")
     except Exception as e:
-        logger.warning(f"Could not preload danceability model: {e}")
-
-    # Atonality (VGGish)
-    try:
-        model_path = get_model_path("tonal_atonal-vggish-audioset-1.pb")
-        get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
-        loaded += 1
-    except Exception as e:
-        logger.warning(f"Could not preload atonality model: {e}")
-
-    # Voice/Instrumental (VGGish)
-    if include_voice:
-        try:
-            model_path = get_model_path("voice_instrumental-vggish-audioset-1.pb")
-            get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
-            loaded += 1
-        except Exception as e:
-            logger.warning(f"Could not preload voice model: {e}")
-
-    # Gender (VGGish)
-    if include_gender:
-        try:
-            model_path = get_model_path("gender-vggish-audioset-1.pb")
-            get_cached_model(TensorflowPredictVGGish, graphFilename=model_path, output="model/Sigmoid")
-            loaded += 1
-        except Exception as e:
-            logger.warning(f"Could not preload gender model: {e}")
+        logger.warning(f"VGGish ONNX preload failed ({e}); models will JIT-load on first call")
 
     # Genre/Mood/Instrument (EffNet embeddings + classifiers)
     # Try MIGraphX ONNX first, fall back to TF
@@ -213,6 +189,11 @@ def unload_models():
     try:
         from classification.effnet_onnx import unload_effnet_migraphx
         unload_effnet_migraphx()
+    except Exception:
+        pass
+    try:
+        from classification.vggish_onnx import unload_vggish_models
+        unload_vggish_models()
     except Exception:
         pass
 
@@ -313,8 +294,8 @@ def analyze_danceability(audio_path: str | Path, audio: Optional[np.ndarray] = N
         ImportError: If essentia-tensorflow is not available
         Exception: If analysis fails
     """
-    if not ESSENTIA_TF_AVAILABLE:
-        raise ImportError("Essentia-TensorFlow is not installed")
+    if not ESSENTIA_AVAILABLE:
+        raise ImportError("Essentia is not installed")
 
     logger.info(f"Analyzing danceability: {Path(audio_path).name}")
 
@@ -324,15 +305,13 @@ def analyze_danceability(audio_path: str | Path, audio: Optional[np.ndarray] = N
             loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
             audio = loader()
 
-        # Use VGGish-based danceability model
-        model_path = get_model_path("danceability-vggish-audioset-1.pb")
-        model = get_cached_model(
-            TensorflowPredictVGGish,
-            graphFilename=model_path
-        )
+        # Use VGGish-based danceability model — MIGraphX ONNX backend
+        from classification.vggish_onnx import get_vggish_model
+        _models_dir = Path(get_model_path("danceability-vggish-audioset-1.pb")).parent
+        model = get_vggish_model("danceability", _models_dir)
 
         # Get activations from model
-        activations = np.asarray(model(audio))
+        activations = model(audio)
         if activations.ndim < 2 or activations.shape[0] == 0:
             raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
@@ -419,8 +398,8 @@ def analyze_atonality(audio_path: str | Path, audio: Optional[np.ndarray] = None
         ImportError: If essentia-tensorflow is not available
         Exception: If analysis fails
     """
-    if not ESSENTIA_TF_AVAILABLE:
-        raise ImportError("Essentia-TensorFlow is not installed")
+    if not ESSENTIA_AVAILABLE:
+        raise ImportError("Essentia is not installed")
 
     logger.info(f"Analyzing atonality: {Path(audio_path).name}")
 
@@ -430,16 +409,13 @@ def analyze_atonality(audio_path: str | Path, audio: Optional[np.ndarray] = None
             loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
             audio = loader()
 
-        # Use VGGish-based tonality model
-        model_path = get_model_path("tonal_atonal-vggish-audioset-1.pb")
-        model = get_cached_model(
-            TensorflowPredictVGGish,
-            graphFilename=model_path,
-            output="model/Sigmoid"
-        )
+        # Use VGGish-based tonality model — MIGraphX ONNX backend
+        from classification.vggish_onnx import get_vggish_model
+        _models_dir = Path(get_model_path("tonal_atonal-vggish-audioset-1.pb")).parent
+        model = get_vggish_model("atonality", _models_dir)
 
         # Get activations from model
-        activations = np.asarray(model(audio))
+        activations = model(audio)
         if activations.ndim < 2 or activations.shape[0] == 0:
             raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
@@ -521,8 +497,8 @@ def analyze_voice_instrumental(audio_path: str | Path, audio: Optional[np.ndarra
     Raises:
         ImportError: If essentia-tensorflow is not available
     """
-    if not ESSENTIA_TF_AVAILABLE:
-        raise ImportError("Essentia-TensorFlow is not installed")
+    if not ESSENTIA_AVAILABLE:
+        raise ImportError("Essentia is not installed")
 
     logger.info(f"Analyzing voice/instrumental: {Path(audio_path).name}")
 
@@ -532,16 +508,13 @@ def analyze_voice_instrumental(audio_path: str | Path, audio: Optional[np.ndarra
             loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
             audio = loader()
 
-        # Use VGGish-based voice/instrumental model
-        model_path = get_model_path("voice_instrumental-vggish-audioset-1.pb")
-        model = get_cached_model(
-            TensorflowPredictVGGish,
-            graphFilename=model_path,
-            output="model/Sigmoid"
-        )
+        # Use VGGish-based voice/instrumental model — MIGraphX ONNX backend
+        from classification.vggish_onnx import get_vggish_model
+        _models_dir = Path(get_model_path("voice_instrumental-vggish-audioset-1.pb")).parent
+        model = get_vggish_model("voice", _models_dir)
 
         # Get activations from model
-        activations = np.asarray(model(audio))
+        activations = model(audio)
         if activations.ndim < 2 or activations.shape[0] == 0:
             raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
@@ -583,8 +556,8 @@ def analyze_vocal_gender(audio_path: str | Path, audio: Optional[np.ndarray] = N
     Raises:
         ImportError: If essentia-tensorflow is not available
     """
-    if not ESSENTIA_TF_AVAILABLE:
-        raise ImportError("Essentia-TensorFlow is not installed")
+    if not ESSENTIA_AVAILABLE:
+        raise ImportError("Essentia is not installed")
 
     logger.info(f"Analyzing vocal gender: {Path(audio_path).name}")
 
@@ -594,13 +567,10 @@ def analyze_vocal_gender(audio_path: str | Path, audio: Optional[np.ndarray] = N
             loader = es.MonoLoader(filename=str(audio_path), sampleRate=16000)
             audio = loader()
 
-        # Use VGGish-based gender model
-        model_path = get_model_path("gender-vggish-audioset-1.pb")
-        model = get_cached_model(
-            TensorflowPredictVGGish,
-            graphFilename=model_path,
-            output="model/Sigmoid"
-        )
+        # Use VGGish-based gender model — MIGraphX ONNX backend
+        from classification.vggish_onnx import get_vggish_model
+        _models_dir = Path(get_model_path("gender-vggish-audioset-1.pb")).parent
+        model = get_vggish_model("gender", _models_dir)
 
         # Get activations from model
         activations = model(audio)

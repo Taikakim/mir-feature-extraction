@@ -54,22 +54,11 @@ class EffNetMIGraphX:
 
         available = ort.get_available_providers()
         if "MIGraphXExecutionProvider" in available:
+            # migraphx_save/load_compiled_model were removed in ROCm 6.4+.
+            # MIGraphX JIT-compiles on first call each session (~28s).
             provider_options = {"device_id": "0"}
-            # Cache options are deprecated since ROCm 6.4 but may still work in 1.23.2
-            try:
-                if _COMPILED_PATH.exists():
-                    provider_options["migraphx_load_compiled_model"] = str(_COMPILED_PATH)
-                    logger.info(f"EffNetMIGraphX: loading cached compiled model ({_COMPILED_PATH.name})")
-                else:
-                    provider_options["migraphx_save_compiled_model"] = str(_COMPILED_PATH)
-                    logger.info(
-                        f"EffNetMIGraphX: first run — MIGraphX will JIT compile (~28s), "
-                        f"caching to {_COMPILED_PATH.name}"
-                    )
-            except Exception:
-                pass  # Cache options not supported, proceed without
-
             providers = [("MIGraphXExecutionProvider", provider_options), "CPUExecutionProvider"]
+            logger.info("EffNetMIGraphX: MIGraphX EP will JIT compile on first inference (~28s)")
         else:
             logger.warning("EffNetMIGraphX: MIGraphX EP not available — falling back to CPU")
             providers = ["CPUExecutionProvider"]
