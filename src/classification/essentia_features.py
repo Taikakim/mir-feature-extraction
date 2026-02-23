@@ -332,7 +332,9 @@ def analyze_danceability(audio_path: str | Path, audio: Optional[np.ndarray] = N
         )
 
         # Get activations from model
-        activations = model(audio)
+        activations = np.asarray(model(audio))
+        if activations.ndim < 2 or activations.shape[0] == 0:
+            raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
         # Extract danceability score (mean of first column)
         # This is the exact method from the original code
@@ -437,7 +439,9 @@ def analyze_atonality(audio_path: str | Path, audio: Optional[np.ndarray] = None
         )
 
         # Get activations from model
-        activations = model(audio)
+        activations = np.asarray(model(audio))
+        if activations.ndim < 2 or activations.shape[0] == 0:
+            raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
         # Get mean predictions across time frames
         predictions_mean = np.mean(activations, axis=0)
@@ -537,7 +541,9 @@ def analyze_voice_instrumental(audio_path: str | Path, audio: Optional[np.ndarra
         )
 
         # Get activations from model
-        activations = model(audio)
+        activations = np.asarray(model(audio))
+        if activations.ndim < 2 or activations.shape[0] == 0:
+            raise RuntimeError(f"VGGish returned degenerate output: shape={activations.shape}")
 
         # Get mean predictions across time frames
         predictions_mean = np.mean(activations, axis=0)
@@ -999,6 +1005,14 @@ def analyze_essentia_features(audio_path: str | Path,
         return {}
     if _timings is not None:
         _timings['audio_load'] = time.perf_counter() - _t
+
+    # VGGish models need at least 1 second of audio to produce valid output
+    if len(audio_16k) < 16000:
+        logger.warning(
+            f"Audio too short for VGGish analysis "
+            f"({len(audio_16k)} samples < 16000): {audio_path.name}"
+        )
+        return {}
 
     results = {}
 
