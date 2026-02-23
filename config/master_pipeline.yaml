@@ -17,7 +17,7 @@ paths:
 # STAGE CONTROL
 # =============================================================================
 stages:
-  organize: null                 # Stage 1: Organize raw files into project structure
+  organize: false                 # Stage 1: Organize raw files into project structure
   track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
   cropping: false                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
@@ -98,19 +98,19 @@ cropping:
 # =============================================================================
 features:
   # Loudness (LUFS/LRA)
-  loudness: false
+  loudness: true
 
   # Spectral features (flatness, flux, skewness, kurtosis)
-  spectral: false
+  spectral: true
 
   # Multiband RMS (bass, body, mid, air)
-  multiband_rms: false
+  multiband_rms: true
 
   # Harmonic/Chroma (12-bin pitch class)
-  chroma: false
+  chroma: true
 
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
-  timbral: false
+  timbral: true
 
   # Essentia classification
   essentia: true
@@ -171,16 +171,17 @@ music_flamingo:
   # 1.0 = annotate everything (default); 0.1 = annotate ~10% per run.
   # Already-annotated crops are always skipped regardless of this value.
   # Increase gradually across runs to fill the dataset over time.
-  sample_probability: 1.0
+  sample_probability: 0.05
 
   # Prompt types to generate (define as "key: prompt text")
-  # {genres} is interpolated from essentia_genre in .INFO at runtime
+  # {genres} expands to a weighted genre list from essentia_genre in .INFO, e.g.:
+  #   "Probabilistic genre analysis reveals: Electronic - Goa Trance (0.39), ... Numbers are softmax weights (0–1)."
   prompts:
-    full: "The genre is {genres}. Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
+    full: "{genres} Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:
-    full: 768
+    full: 512
 
   # Granite revision: condense MF output into shorter focused descriptions
   # Each key under prompts → music_flamingo_{key} in .INFO

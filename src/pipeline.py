@@ -131,17 +131,28 @@ class PipelineConfig:
 
 
 def _interpolate_genres(prompt_text: str, existing: Dict[str, Any]) -> str:
-    """Replace {genres} placeholder in prompt with essentia_genre from .INFO."""
+    """Replace {genres} placeholder in prompt with essentia_genre from .INFO.
+
+    Expands to a sentence describing the weighted genre distribution, e.g.:
+        Probabilistic genre analysis reveals: Electronic - Goa Trance (0.39),
+        Electronic - Psy-Trance (0.34), Electronic - Trance (0.14).
+        Numbers are softmax weights (0–1); very low probabilities are filtered out.
+    """
     if '{genres}' not in prompt_text:
         return prompt_text
     genre_dict = existing.get('essentia_genre', {})
     if genre_dict and isinstance(genre_dict, dict):
-        genres_str = ', '.join(
-            k.replace('---', ' - ')
-            for k in sorted(genre_dict, key=genre_dict.get, reverse=True)[:5]
+        top = sorted(genre_dict.items(), key=lambda x: x[1], reverse=True)[:5]
+        entries = ', '.join(
+            f"{k.replace('---', ' - ')} ({v:.2f})"
+            for k, v in top
+        )
+        genres_str = (
+            f"Probabilistic genre analysis reveals: {entries}. "
+            "Numbers are softmax weights (0\u20131); very low probabilities are filtered out."
         )
     else:
-        genres_str = 'Unknown'
+        genres_str = 'Genre unknown.'
     return prompt_text.replace('{genres}', genres_str)
 
 
