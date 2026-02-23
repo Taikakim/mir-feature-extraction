@@ -1006,13 +1006,18 @@ def analyze_essentia_features(audio_path: str | Path,
     if _timings is not None:
         _timings['audio_load'] = time.perf_counter() - _t
 
-    # VGGish models need at least 1 second of audio to produce valid output
+    # VGGish/EffNet need at least 1 second of audio to produce valid output.
+    # For shorter clips, tile the audio to the typical crop length so the
+    # models get enough frames to average over — content repeats, results hold.
+    _TARGET_SAMPLES = 16000 * 12  # ~12s, covers a typical crop at 16kHz
     if len(audio_16k) < 16000:
-        logger.warning(
-            f"Audio too short for VGGish analysis "
-            f"({len(audio_16k)} samples < 16000): {audio_path.name}"
+        n_orig = len(audio_16k)
+        repeats = int(np.ceil(_TARGET_SAMPLES / max(n_orig, 1)))
+        audio_16k = np.tile(audio_16k, repeats)[:_TARGET_SAMPLES]
+        logger.info(
+            f"Short audio ({n_orig} samples) tiled {repeats}x to "
+            f"{len(audio_16k)} samples for analysis: {audio_path.name}"
         )
-        return {}
 
     results = {}
 
