@@ -174,10 +174,10 @@ music_flamingo:
   sample_probability: 0.05
 
   # Prompt types to generate (define as "key: prompt text")
-  # {genres} expands to a weighted genre list from essentia_genre in .INFO, e.g.:
-  #   "Probabilistic genre analysis reveals: Electronic - Goa Trance (0.39), ... Numbers are softmax weights (0–1)."
+  # {genres}   → weighted Essentia genre distribution (softmax, top-5)
+  # {metadata} → ID3 release year, label and tag genres (omitted if not in .INFO)
   prompts:
-    full: "{genres} Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
+    full: "{genres} {metadata} Describe the track in detail: the mood, timbre, genre, instrumentation, production aesthetics and techniques, construction. Do not use filler words, be professional, do not hallucinate. It's better to say nothing than stretch the truth."
 
   # Max tokens per prompt type (higher = longer descriptions, more VRAM)
   max_tokens:

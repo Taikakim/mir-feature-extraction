@@ -131,29 +131,55 @@ class PipelineConfig:
 
 
 def _interpolate_genres(prompt_text: str, existing: Dict[str, Any]) -> str:
-    """Replace {genres} placeholder in prompt with essentia_genre from .INFO.
+    """Replace {genres} and {metadata} placeholders in prompt with .INFO data.
 
-    Expands to a sentence describing the weighted genre distribution, e.g.:
-        Probabilistic genre analysis reveals: Electronic - Goa Trance (0.39),
-        Electronic - Psy-Trance (0.34), Electronic - Trance (0.14).
-        Numbers are softmax weights (0–1); very low probabilities are filtered out.
+    {genres} → weighted Essentia genre distribution, e.g.:
+        "Probabilistic genre analysis reveals: Electronic - Goa Trance (0.39), ... "
+        "Numbers are softmax weights (0–1); very low probabilities are filtered out."
+
+    {metadata} → ID3/release fields (year, label, tag genres), e.g.:
+        "According to the actual ID3 metadata, this is the release year, label and
+         genres of the track the clip is sourced from: release year: 2021;
+         label: DAT Universe; genres: psytrance, trance, acid techno."
+        Omitted silently if none of the fields are present in the .INFO file.
     """
-    if '{genres}' not in prompt_text:
-        return prompt_text
-    genre_dict = existing.get('essentia_genre', {})
-    if genre_dict and isinstance(genre_dict, dict):
-        top = sorted(genre_dict.items(), key=lambda x: x[1], reverse=True)[:5]
-        entries = ', '.join(
-            f"{k.replace('---', ' - ')} ({v:.2f})"
-            for k, v in top
-        )
-        genres_str = (
-            f"Probabilistic genre analysis reveals: {entries}. "
-            "Numbers are softmax weights (0\u20131); very low probabilities are filtered out."
-        )
-    else:
-        genres_str = 'Genre unknown.'
-    return prompt_text.replace('{genres}', genres_str)
+    if '{genres}' in prompt_text:
+        genre_dict = existing.get('essentia_genre', {})
+        if genre_dict and isinstance(genre_dict, dict):
+            top = sorted(genre_dict.items(), key=lambda x: x[1], reverse=True)[:5]
+            entries = ', '.join(
+                f"{k.replace('---', ' - ')} ({v:.2f})"
+                for k, v in top
+            )
+            genres_str = (
+                f"Probabilistic genre analysis reveals: {entries}. "
+                "Numbers are softmax weights (0\u20131); very low probabilities are filtered out."
+            )
+        else:
+            genres_str = 'Genre unknown.'
+        prompt_text = prompt_text.replace('{genres}', genres_str)
+
+    if '{metadata}' in prompt_text:
+        parts = []
+        year = existing.get('release_year') or existing.get('track_metadata_year')
+        if year:
+            parts.append(f"release year: {year}")
+        label = existing.get('label')
+        if label:
+            parts.append(f"label: {label}")
+        tag_genres = existing.get('genres', [])
+        if tag_genres and isinstance(tag_genres, list):
+            parts.append(f"genres: {', '.join(str(g) for g in tag_genres)}")
+        if parts:
+            metadata_str = (
+                "According to the actual ID3 metadata, this is the release year, label and "
+                f"genres of the track the clip is sourced from: {'; '.join(parts)}."
+            )
+        else:
+            metadata_str = ''
+        prompt_text = prompt_text.replace('{metadata}', metadata_str)
+
+    return prompt_text
 
 
 def _safe_analyze_cpu(args) -> Dict[str, Any]:
