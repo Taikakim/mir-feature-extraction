@@ -607,7 +607,7 @@ def get_crop_stem_files(crop_path: str | Path) -> Dict[str, Path]:
                 stems[stem_name] = stem_path
                 break
 
-    logger.debug(f"Found {len(stems) - 1} stems for crop {crop_path.name}")
+    logger.debug(f"Looking for vocal stem: {crop_path.name}")
     return stems
 
 
