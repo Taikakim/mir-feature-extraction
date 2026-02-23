@@ -22,6 +22,7 @@ Usage:
 import argparse
 import logging
 import multiprocessing
+import random
 import subprocess
 import sys
 import threading
@@ -99,6 +100,7 @@ class PipelineConfig:
     flamingo_token_limits: Dict[str, int] = field(default_factory=dict)
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)
     flamingo_revision: Dict[str, Any] = field(default_factory=dict)
+    flamingo_sample_probability: float = 1.0  # Fraction of unprocessed crops to annotate per run (0-1)
 
     # Pipeline state for resumable runs (passed from master pipeline)
     pipeline_state: Any = None
@@ -1268,11 +1270,13 @@ class Pipeline:
                     logger.info(f"  Active prompts: {', '.join(prompts_map.keys())}")
                     
                     # Filter files needing processing (check if ALL active prompts are present)
+                    prob = self.config.flamingo_sample_probability
                     to_process = []
+                    skipped_by_sampling = 0
                     for crop_path in all_crops:
                         info_path = get_crop_info_path(crop_path)
                         existing = read_info(info_path) if info_path.exists() else {}
-                        
+
                         needs_run = False
                         if self.config.should_overwrite('flamingo'):
                             needs_run = True
@@ -1281,9 +1285,16 @@ class Pipeline:
                                 if f'music_flamingo_{p}' not in existing:
                                     needs_run = True
                                     break
-                        
+
                         if needs_run:
-                            to_process.append(crop_path)
+                            if prob >= 1.0 or random.random() < prob:
+                                to_process.append(crop_path)
+                            else:
+                                skipped_by_sampling += 1
+
+                    if skipped_by_sampling:
+                        logger.info(f"  Sampling at {prob:.0%}: {len(to_process)} queued, "
+                                    f"{skipped_by_sampling} deferred to future runs")
                     
                     if to_process:
                         logger.info(f"  Loading model ({self.config.flamingo_model})...")

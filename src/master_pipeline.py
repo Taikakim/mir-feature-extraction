@@ -184,6 +184,7 @@ class MasterPipelineConfig:
     batch_feature_extraction: bool = True  # Batch process features (more persistent GPU usage)
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)  # Key: prompt_name, Value: prompt_text
     flamingo_revision: Dict[str, Any] = field(default_factory=dict)  # Granite revision config
+    flamingo_sample_probability: float = 1.0  # Fraction of unprocessed crops to annotate per run (0-1)
 
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten.
@@ -326,6 +327,7 @@ class MasterPipelineConfig:
             batch_feature_extraction=processing.get('batch_feature_extraction', True),
             flamingo_prompts=flamingo.get('prompts', {}),
             flamingo_revision=flamingo.get('revision', {}),
+            flamingo_sample_probability=float(flamingo.get('sample_probability', 1.0)),
 
             # Stem quality filtering
             stem_quality_enabled=stem_quality.get('enabled', False),
@@ -1915,6 +1917,7 @@ class MasterPipeline:
                 flamingo_token_limits=self.config.flamingo_token_limits,
                 flamingo_prompts=self.config.flamingo_prompts,
                 flamingo_revision=self.config.flamingo_revision,
+                flamingo_sample_probability=self.config.flamingo_sample_probability,
                 pipeline_state=self._state,
             )
 

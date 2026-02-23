@@ -167,6 +167,12 @@ music_flamingo:
   context_size: 16384             # LLM context window (1024-2048 plenty for descriptions)
                                  # Lower = less VRAM. Audio is pre-encoded, not in context.
 
+  # Fraction of un-annotated crops to process per pipeline run (0.0–1.0).
+  # 1.0 = annotate everything (default); 0.1 = annotate ~10% per run.
+  # Already-annotated crops are always skipped regardless of this value.
+  # Increase gradually across runs to fill the dataset over time.
+  sample_probability: 1.0
+
   # Prompt types to generate (define as "key: prompt text")
   # {genres} is interpolated from essentia_genre in .INFO at runtime
   prompts:
