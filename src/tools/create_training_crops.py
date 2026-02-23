@@ -336,7 +336,7 @@ def seeked_zero_crossing_end(file_path: Path, search_start: int, search_end: int
 def get_audio_bitrate(file_path: Path) -> int:
     """
     Detect audio bitrate using mutagen or default to 128kbps.
-    Supports MP3, M4A, and AAC formats.
+    Supports MP3, M4A, AAC, and OGG Vorbis formats.
     """
     ext = file_path.suffix.lower()
     try:
@@ -347,6 +347,10 @@ def get_audio_bitrate(file_path: Path) -> int:
         elif ext in ('.m4a', '.aac'):
             from mutagen.mp4 import MP4
             audio = MP4(str(file_path))
+            return audio.info.bitrate // 1000
+        elif ext == '.ogg':
+            from mutagen.oggvorbis import OggVorbis
+            audio = OggVorbis(str(file_path))
             return audio.info.bitrate // 1000
     except Exception:
         pass
@@ -488,6 +492,10 @@ def write_audio_preserving_format(
             bitrate = mp3_bitrate
             if bitrate is None and source_path is not None:
                 bitrate = get_audio_bitrate(source_path)
+                # OGG Vorbis achieves better quality per bit than MP3; boost
+                # bitrate by 25% when transcoding OGG → MP3 to compensate.
+                if source_path.suffix.lower() == '.ogg':
+                    bitrate = int(bitrate * 1.25)
             if bitrate is None:
                 bitrate = 128
             
@@ -618,9 +626,9 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         # Apply fades
         stem_crop = apply_fades(stem_crop, fade_len)
 
-        # Preserve source stem format (m4a/aac → mp3 to avoid downstream issues)
+        # Preserve source stem format (m4a/aac/ogg → mp3 to avoid downstream issues)
         source_ext = stem_path.suffix.lower()
-        if source_ext in ('.m4a', '.aac'):
+        if source_ext in ('.m4a', '.aac', '.ogg'):
             source_ext = '.mp3'
         crop_stem_name = f"{crop_base_path.stem}_{stem_name}{source_ext}"
         crop_stem_path = crop_base_path.parent / crop_stem_name
@@ -857,9 +865,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
 
-    # Preserve source format (m4a/aac → mp3 to avoid downstream issues)
+    # Preserve source format (m4a/aac/ogg → mp3 to avoid downstream issues)
     source_ext = full_mix_path.suffix.lower()
-    if source_ext in ('.m4a', '.aac'):
+    if source_ext in ('.m4a', '.aac', '.ogg'):
         source_ext = '.mp3'
 
     # Load source .INFO for ID3 metadata (to write to crop files)
@@ -1035,9 +1043,9 @@ def create_crops_for_file(folder_path: Path,
     duration_sec = total_samples / sr
     length_sec = length_samples / sr
 
-    # Preserve source format (m4a/aac → mp3 to avoid downstream issues)
+    # Preserve source format (m4a/aac/ogg → mp3 to avoid downstream issues)
     source_ext = full_mix_path.suffix.lower()
-    if source_ext in ('.m4a', '.aac'):
+    if source_ext in ('.m4a', '.aac', '.ogg'):
         source_ext = '.mp3'
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")

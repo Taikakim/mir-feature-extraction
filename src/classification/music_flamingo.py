@@ -253,15 +253,32 @@ class MusicFlamingoGGUF:
 
         logger.info(f"Analyzing: {audio_path.name} [{prompt_type}]")
 
-        # llama-mtmd-cli splits the --audio value on commas internally to support
-        # multi-file syntax (file1.flac,file2.flac).  Filenames that contain a
-        # comma (e.g. "Shakta, Yakov - ...") are therefore truncated at the first
-        # comma, causing "No such file or directory".  Work around by symlinking
-        # the file to a comma-free name in /dev/shm for the duration of the call.
+        # llama-mtmd-cli only supports WAV, FLAC, and MP3.  Other formats (e.g.
+        # .m4a / AAC / .ogg) cause "mtmd_helper_bitmap_init_from_buf: failed to
+        # decode image bytes".  Convert to a temp WAV in /dev/shm for the
+        # duration of the call.  (New crops are converted at creation time in
+        # create_training_crops.py; this handles any legacy files.)
+        #
+        # llama-mtmd-cli also splits the --audio value on commas internally to
+        # support multi-file syntax (file1.flac,file2.flac).  Filenames that
+        # contain a comma (e.g. "Shakta, Yakov - ...") are therefore truncated
+        # at the first comma, causing "No such file or directory".  Work around
+        # by symlinking the file to a comma-free name in /dev/shm.
+        #
+        # The temp-file path in /dev/shm is always comma-free, so a converted
+        # file never needs the additional symlink step.
+        import os as _os
+        _SUPPORTED_EXTS = {'.wav', '.flac', '.mp3'}
         _tmp_link: Optional[Path] = None
         audio_arg = str(audio_path)
-        if ',' in audio_arg:
-            import os as _os
+        if audio_path.suffix.lower() not in _SUPPORTED_EXTS:
+            _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}.wav")
+            subprocess.run(
+                ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(audio_path.resolve()), str(_tmp_link)],
+                check=True, capture_output=True,
+            )
+            audio_arg = str(_tmp_link)
+        elif ',' in audio_arg:
             _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}{audio_path.suffix}")
             _tmp_link.symlink_to(audio_path.resolve())
             audio_arg = str(_tmp_link)
