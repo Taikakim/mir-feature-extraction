@@ -285,6 +285,7 @@ class MusicFlamingoGGUF:
             t0 = time.monotonic()
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,   # prevent child from consuming terminal keypresses
                 capture_output=True,
                 text=True,
                 cwd=str(PROJECT_ROOT),
