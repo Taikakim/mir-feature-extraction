@@ -253,12 +253,25 @@ class MusicFlamingoGGUF:
 
         logger.info(f"Analyzing: {audio_path.name} [{prompt_type}]")
 
+        # llama-mtmd-cli splits the --audio value on commas internally to support
+        # multi-file syntax (file1.flac,file2.flac).  Filenames that contain a
+        # comma (e.g. "Shakta, Yakov - ...") are therefore truncated at the first
+        # comma, causing "No such file or directory".  Work around by symlinking
+        # the file to a comma-free name in /dev/shm for the duration of the call.
+        _tmp_link: Optional[Path] = None
+        audio_arg = str(audio_path)
+        if ',' in audio_arg:
+            import os as _os
+            _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}{audio_path.suffix}")
+            _tmp_link.symlink_to(audio_path.resolve())
+            audio_arg = str(_tmp_link)
+
         # Build command
         cmd = [
             str(self.cli_path),
             "-m", str(self.model_file),
             "--mmproj", str(self.mmproj_file),
-            "--audio", str(audio_path),
+            "--audio", audio_arg,
             "-p", prompt,
             "-n", str(max_new_tokens),
             "-c", str(self.context_size),
@@ -320,6 +333,9 @@ class MusicFlamingoGGUF:
         except Exception as e:
             logger.error(f"Error analyzing {audio_path.name}: {e}")
             raise
+        finally:
+            if _tmp_link is not None and _tmp_link.exists():
+                _tmp_link.unlink(missing_ok=True)
 
     def _parse_output(self, output: str) -> str:
         """Extract generated text from llama-mtmd-cli output."""
