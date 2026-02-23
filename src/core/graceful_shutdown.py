@@ -27,12 +27,19 @@ shutdown_requested = threading.Event()
 
 _listener_thread = None
 _old_termios = None
+_owner_pid: int = 0   # PID of the process that set cbreak mode
 
 
 def _restore_terminal():
-    """Restore terminal settings on exit."""
+    """Restore terminal settings on exit.
+
+    Only acts in the process that set cbreak mode.  ProcessPoolExecutor
+    workers on Linux use fork and inherit _old_termios; without this guard
+    each exiting worker would restore the terminal to cooked mode while the
+    parent is still processing, breaking the keypress listener.
+    """
     global _old_termios
-    if _old_termios is not None:
+    if _old_termios is not None and os.getpid() == _owner_pid:
         try:
             import termios
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _old_termios)
@@ -43,13 +50,14 @@ def _restore_terminal():
 
 def _listener_loop(trigger_key: str):
     """Background thread: watch stdin for the trigger key."""
-    global _old_termios
+    global _old_termios, _owner_pid
     try:
         import termios
         import tty
 
         fd = sys.stdin.fileno()
         _old_termios = termios.tcgetattr(fd)
+        _owner_pid = os.getpid()   # threads share the parent PID
         # cbreak mode: single keypress, no echo, but Ctrl-C still works
         tty.setcbreak(fd)
 
