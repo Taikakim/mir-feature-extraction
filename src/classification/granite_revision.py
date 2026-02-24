@@ -37,21 +37,26 @@ class GraniteReviser:
         temperature: float = 0.7,
         max_tokens: int = 512,
     ):
-        from llama_cpp import Llama
-
         self.model_path = model_path
+        self.n_ctx = n_ctx
+        self.n_batch = n_batch
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        logger.info(f"Loading Granite revision model: {Path(model_path).name}")
-        self.llm = Llama(
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_batch=n_batch,
+        self.llm = self._load_model()
+
+    def _load_model(self):
+        from llama_cpp import Llama
+        logger.info(f"Loading Granite revision model: {Path(self.model_path).name}")
+        llm = Llama(
+            model_path=self.model_path,
+            n_ctx=self.n_ctx,
+            n_batch=self.n_batch,
             n_gpu_layers=-1,
             verbose=False,
         )
         logger.info("Granite revision model loaded")
+        return llm
 
     def revise(
         self,
@@ -100,13 +105,30 @@ class GraniteReviser:
             f"<|start_of_role|>assistant<|end_of_role|>"
         )
 
+        # Reset KV cache before each call so a previous failure doesn't leave
+        # the model in a corrupt state and cascade into all subsequent crops.
+        self.llm.reset()
+
         t0 = time.monotonic()
-        output = self.llm.create_completion(
-            prompt,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            stop=GRANITE_STOP,
-        )
+        try:
+            output = self.llm.create_completion(
+                prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stop=GRANITE_STOP,
+            )
+        except Exception as e:
+            # Decode failed (e.g. GPU state corruption). Reload the model once
+            # and retry — this is the fallback of last resort.
+            logger.warning(f"  Granite decode failed ({e}), reloading model and retrying...")
+            self.llm = self._load_model()
+            self.llm.reset()
+            output = self.llm.create_completion(
+                prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stop=GRANITE_STOP,
+            )
         wall_s = time.monotonic() - t0
 
         raw = output["choices"][0]["text"]
