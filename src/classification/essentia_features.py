@@ -149,30 +149,40 @@ def preload_models(include_voice: bool = False, include_gender: bool = False,
             except Exception as e2:
                 logger.warning(f"Could not preload EffNet embedding model: {e2}")
 
-        if include_genre:
-            try:
-                model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
-                get_cached_model(TensorflowPredict2D, graphFilename=model_path,
-                                 input="serving_default_model_Placeholder", output="PartitionedCall:0")
-                loaded += 1
-            except Exception as e:
-                logger.warning(f"Could not preload genre model: {e}")
-
-        if include_mood:
-            try:
-                model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
-                get_cached_model(TensorflowPredict2D, graphFilename=model_path)
-                loaded += 1
-            except Exception as e:
-                logger.warning(f"Could not preload mood model: {e}")
-
-        if include_instrument:
-            try:
-                model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
-                get_cached_model(TensorflowPredict2D, graphFilename=model_path)
-                loaded += 1
-            except Exception as e:
-                logger.warning(f"Could not preload instrument model: {e}")
+        # Genre/Mood/Instrument classifiers — MIGraphX ONNX
+        try:
+            from classification.gmi_onnx import preload_all_gmi
+            _models_dir = Path(get_model_path("genre_discogs400-discogs-effnet-1.pb")).parent
+            n = preload_all_gmi(_models_dir,
+                                include_genre=include_genre,
+                                include_mood=include_mood,
+                                include_instrument=include_instrument)
+            loaded += n
+            logger.info(f"GMI classifiers: loaded {n} ONNX models via MIGraphX")
+        except Exception as e:
+            logger.warning(f"GMI ONNX preload failed ({e}); falling back to TF")
+            if include_genre:
+                try:
+                    model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
+                    get_cached_model(TensorflowPredict2D, graphFilename=model_path,
+                                     input="serving_default_model_Placeholder", output="PartitionedCall:0")
+                    loaded += 1
+                except Exception as e2:
+                    logger.warning(f"Could not preload genre model: {e2}")
+            if include_mood:
+                try:
+                    model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
+                    get_cached_model(TensorflowPredict2D, graphFilename=model_path)
+                    loaded += 1
+                except Exception as e2:
+                    logger.warning(f"Could not preload mood model: {e2}")
+            if include_instrument:
+                try:
+                    model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
+                    get_cached_model(TensorflowPredict2D, graphFilename=model_path)
+                    loaded += 1
+                except Exception as e2:
+                    logger.warning(f"Could not preload instrument model: {e2}")
 
     elapsed = time.time() - t0
     logger.info(f"Pre-loaded {loaded} Essentia TF models in {elapsed:.1f}s")
@@ -194,6 +204,11 @@ def unload_models():
     try:
         from classification.vggish_onnx import unload_vggish_models
         unload_vggish_models()
+    except Exception:
+        pass
+    try:
+        from classification.gmi_onnx import unload_gmi_models
+        unload_gmi_models()
     except Exception:
         pass
 
@@ -734,30 +749,44 @@ def analyze_genre_mood_instrument(audio_path: str | Path,
         labels = get_classification_labels()
         results = {}
 
+        _models_dir = Path(get_model_path("genre_discogs400-discogs-effnet-1.pb")).parent
+
         if include_genre:
-            genre_model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
-            genre_model = get_cached_model(
-                TensorflowPredict2D,
-                graphFilename=genre_model_path,
-                input="serving_default_model_Placeholder",
-                output="PartitionedCall:0"
-            )
+            try:
+                from classification.gmi_onnx import get_gmi_model
+                genre_model = get_gmi_model("genre", _models_dir)
+            except Exception:
+                genre_model_path = get_model_path("genre_discogs400-discogs-effnet-1.pb")
+                genre_model = get_cached_model(
+                    TensorflowPredict2D,
+                    graphFilename=genre_model_path,
+                    input="serving_default_model_Placeholder",
+                    output="PartitionedCall:0",
+                )
             genre_predictions = genre_model(embeddings)
             results['essentia_genre'] = _filter_predictions(
                 genre_predictions, labels['genre'], threshold, top_k)
             logger.info(f"  Genres: {len(results['essentia_genre'])} above threshold")
 
         if include_mood:
-            mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
-            mood_model = get_cached_model(TensorflowPredict2D, graphFilename=mood_model_path)
+            try:
+                from classification.gmi_onnx import get_gmi_model
+                mood_model = get_gmi_model("mood", _models_dir)
+            except Exception:
+                mood_model_path = get_model_path("mtg_jamendo_moodtheme-discogs-effnet-1.pb")
+                mood_model = get_cached_model(TensorflowPredict2D, graphFilename=mood_model_path)
             mood_predictions = mood_model(embeddings)
             results['essentia_mood'] = _filter_predictions(
                 mood_predictions, labels['mood'], threshold, top_k)
             logger.info(f"  Moods: {len(results['essentia_mood'])} above threshold")
 
         if include_instrument:
-            instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
-            instrument_model = get_cached_model(TensorflowPredict2D, graphFilename=instrument_model_path)
+            try:
+                from classification.gmi_onnx import get_gmi_model
+                instrument_model = get_gmi_model("instrument", _models_dir)
+            except Exception:
+                instrument_model_path = get_model_path("mtg_jamendo_instrument-discogs-effnet-1.pb")
+                instrument_model = get_cached_model(TensorflowPredict2D, graphFilename=instrument_model_path)
             instrument_predictions = instrument_model(embeddings)
             results['essentia_instrument'] = _filter_predictions(
                 instrument_predictions, labels['instrument'], threshold, top_k)
