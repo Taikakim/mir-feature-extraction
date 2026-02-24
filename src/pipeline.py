@@ -1416,7 +1416,7 @@ class Pipeline:
             return self.stats["crops_failed"] == 0
 
         rev_cfg = self.config.flamingo_revision
-        if rev_cfg.get('enabled') and rev_cfg.get('prompts') and not self.config.skip_flamingo:
+        if rev_cfg.get('enabled') and rev_cfg.get('prompts'):
             rev_prompts = rev_cfg['prompts']
 
             # Scan the ENTIRE crops directory — not just all_crops from this run.
