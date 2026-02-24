@@ -1418,12 +1418,24 @@ class Pipeline:
         rev_cfg = self.config.flamingo_revision
         if rev_cfg.get('enabled') and rev_cfg.get('prompts') and not self.config.skip_flamingo:
             rev_prompts = rev_cfg['prompts']
-            logger.info(f"\n[PASS 4b] Granite Revision - {len(all_crops)} files")
+
+            # Scan the ENTIRE crops directory — not just all_crops from this run.
+            # This catches crops that were annotated by Flamingo in a previous
+            # (possibly interrupted) run and never had revision applied.
+            rev_folders = find_crop_folders(self.config.working_dir)
+            all_revision_crops: List[Path] = []
+            for folder in rev_folders:
+                all_revision_crops.extend(find_crop_files(folder))
+            if not all_revision_crops:
+                # Flat directory: crops live directly in working_dir
+                all_revision_crops = find_crop_files(self.config.working_dir)
+
+            logger.info(f"\n[PASS 4b] Granite Revision - {len(all_revision_crops)} total files")
             logger.info(f"  Revision keys: {', '.join(rev_prompts.keys())}")
 
             # Filter files needing revision
             to_revise = []
-            for crop_path in all_crops:
+            for crop_path in all_revision_crops:
                 info_path = get_crop_info_path(crop_path)
                 existing = read_info(info_path) if info_path.exists() else {}
                 needs_rev = any(
