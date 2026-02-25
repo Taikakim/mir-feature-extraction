@@ -114,7 +114,7 @@ Use `--device cuda` for GPU (including AMD ROCm).
 | `harmonic/chroma.py` | 12-bin pitch class profile | 12 |
 | `harmonic/per_stem_harmonic.py` | Harmonic movement/variance (bass/other) | 4 |
 | `timbral/audio_commons.py` | Brightness, roughness, hardness, depth, etc. | 8 |
-| `classification/essentia_features.py` | Danceability, atonality + 496 labels | 2+496 |
+| `classification/essentia_features.py` | Danceability, atonality + 496 labels (GMI heads via ONNX+MIGraphX, TF fallback) | 2+496 |
 
 ### AI Descriptions
 
@@ -122,8 +122,13 @@ Use `--device cuda` for GPU (including AMD ROCm).
 |--------|--------|-------|------|
 | `music_flamingo.py` | GGUF via llama-mtmd-cli | ~4s/track | 5-9 GB |
 | `music_flamingo_transformers.py` | Native Python + FA2 | ~28s/prompt | 13 GB |
+| `granite_revision.py` | Granite-tiny GGUF (llama-cpp-python) post-processor | ~1-2s/crop | ~200 MB |
 
-5 descriptions per track: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`.
+Prompt types and which are active are configured in `config/master_pipeline.yaml` under `flamingo_prompts`. A `{metadata}` placeholder in any prompt is replaced with ID3 release year, label, and genres at inference time. `flamingo_sample_probability` controls what fraction of unannotated crops are processed per run (default 0.05 = 5%).
+
+Granite revision condenses Flamingo output into short summaries (e.g. `music_flamingo_short_mood`). Configured under `flamingo_revision` in config. Runs as PASS 4b independently of whether Flamingo ran in the same session — useful to catch up after an interrupted run with `--skip-flamingo`.
+
+m4a and ogg crops are auto-converted to a temp WAV before passing to llama-mtmd-cli.
 
 See [MUSIC_FLAMINGO.md](MUSIC_FLAMINGO.md) for setup and model details.
 
@@ -133,6 +138,7 @@ See [MUSIC_FLAMINGO.md](MUSIC_FLAMINGO.md) for setup and model details.
 |--------|---------|
 | `tools/track_metadata_lookup.py` | Spotify/MusicBrainz metadata with scored matching |
 | `tools/create_training_crops.py` | Beat-aligned training crops with feature migration |
+| `tools/statistical_analysis.py` | Feature statistics, correlation, VIF, PCA, clustering, MI across .INFO files |
 | `transcription/drums/adtof.py` | MIDI drum transcription (GPU) |
 
 ---
@@ -146,6 +152,33 @@ python src/tools/create_training_crops.py my_music/ \
 ```
 
 Produces beat-aligned audio crops with per-crop `.INFO` (inherited features + local BPM/beat_count), sliced `.BEATS_GRID`, and `.json` metadata.
+
+---
+
+## Statistical Analysis
+
+```bash
+# Basic statistics across all .INFO files
+python src/tools/statistical_analysis.py /path/to/crops -o stats.json
+
+# Top 20 tracks by BPM (aggregated per track, not per crop)
+python src/tools/statistical_analysis.py /path/to/crops --top 20 --key bpm --per-track
+
+# Bottom 10 by LUFS (quietest crops)
+python src/tools/statistical_analysis.py /path/to/crops --top 10 --key lufs --bottom
+
+# Full feature selection analysis with plots
+python src/tools/statistical_analysis.py /path/to/crops --feature-select -o stats.json --plots-dir ./plots
+
+# Individual analyses
+python src/tools/statistical_analysis.py /path/to/crops --vif        # multicollinearity
+python src/tools/statistical_analysis.py /path/to/crops --pca        # effective dimensionality
+python src/tools/statistical_analysis.py /path/to/crops --cluster    # redundant feature groups
+python src/tools/statistical_analysis.py /path/to/crops --mi         # non-linear dependencies
+python src/tools/statistical_analysis.py --legend                    # explain all output variables
+```
+
+`--per-track` averages crop-level values up to one value per track before analysis. `--feature-select` runs all analyses (VIF + PCA + cluster + MI + correlation) and prints a ranked recommendation of which features to keep. Plots saved as PNG (heatmap, VIF bar chart, PCA scree, loadings, dendrogram, MI heatmap).
 
 ---
 
@@ -203,7 +236,7 @@ GGUF models in `models/LMM/`. Phase 4 requires `autoawq` + patched Qwen2.5-Omni 
 
 **Metadata (variable):** release_year, artists, label, genres, popularity, spotify_id, + Spotify audio features
 
-**AI Descriptions (5 text):** music_flamingo_brief, music_flamingo_technical, music_flamingo_genre_mood_inst, music_flamingo_instrumentation, music_flamingo_very_brief
+**AI Descriptions (text, configurable):** Prompt keys depend on `flamingo_prompts` config. Default: `music_flamingo_brief`, `music_flamingo_technical`, `music_flamingo_genre_mood_inst`, `music_flamingo_instrumentation`, `music_flamingo_very_brief`. Optional Granite revision keys: e.g. `music_flamingo_short_mood`, `music_flamingo_short_technical`.
 
 ---
 

@@ -85,11 +85,17 @@ Track Name/
 
 **Audio I/O:** `core.file_utils.read_audio()` handles all formats including m4a/AAC via pydub/ffmpeg fallback. Use this instead of `sf.read()` directly.
 
-**Music Flamingo:** `music_flamingo.py` (GGUF via llama-mtmd-cli, ~4s/track) or `music_flamingo_transformers.py` (native Python, ~28s/prompt). `music_flamingo_llama_cpp.py` is DEPRECATED. 5 prompt types: `brief`, `technical`, `genre_mood_inst`, `instrumentation`, `very_brief`. Output normalized via `core.text_utils.normalize_music_flamingo_text()`.
+**Essentia Classification:** `classification/essentia_features.py`. EffNet embeddings via `effnet_onnx.py` (ONNX+MIGraphX). Genre/mood/instrument heads via `gmi_onnx.py` (ONNX+MIGraphX, JIT compiles ~28s on first run). TF `TensorflowPredict2D` is a fallback only. VGGish classifiers also on ONNX+MIGraphX via `vggish_onnx.py`.
+
+**Music Flamingo:** `music_flamingo.py` (GGUF via llama-mtmd-cli, ~4s/track) or `music_flamingo_transformers.py` (native Python, ~28s/prompt). `music_flamingo_llama_cpp.py` is DEPRECATED. Prompt types configurable; `{metadata}` placeholder injects ID3 year/label/genres. Supports `flamingo_sample_probability` to annotate a fraction of crops per run. Unsupported audio formats (m4a, ogg) are auto-converted to WAV via ffmpeg before passing to llama-mtmd-cli. Output normalized via `core.text_utils.normalize_music_flamingo_text()`.
+
+**Granite Revision:** `classification/granite_revision.py`. PASS 4b in `pipeline.py` runs Granite-tiny (llama-cpp-python) to condense Flamingo descriptions into short summaries. Runs independently of `--skip-flamingo` — set `flamingo_revision.enabled: false` in config to disable. Scans the entire crops directory each run so interrupted runs are caught up automatically. `reset()` called before every inference to avoid KV cache cascade failures.
 
 **Metadata Lookup:** `tools/track_metadata_lookup.py` searches Spotify and MusicBrainz. Candidates scored by duration match (0.5), year match (0.3), artist similarity (0.2). Controlled by `metadata.use_spotify` and `metadata.use_musicbrainz` config flags.
 
 **Captioning Benchmark:** `tests/poc_lmm_revise.py` -- 5-phase comparison (Flamingo baseline, genre-hint, LLM revision, Qwen2.5-Omni, ensemble). GGUF models in `models/LMM/`. Chat templates: Qwen3=ChatML, GPT-OSS=Harmony, Granite=start_of_role/end_of_role. llama-cpp-python `type_k`/`type_v` must be integers not strings.
+
+**Statistical Analysis:** `tools/statistical_analysis.py`. Scans `.INFO` files recursively. Basic stats + outlier detection per feature. `--per-track` aggregates crops to one value per track. `--top N --key bpm` queries ranked values. Feature selection: `--vif`, `--pca`, `--cluster`, `--mi`, `--feature-select` (all). Plots (heatmap, dendrogram, scree, VIF bar) via `--plots-dir`.
 
 ## Development Rules
 
@@ -136,3 +142,5 @@ import torch  # now safe
 - **numba/numpy:** Pin numpy <2.4.
 - **Qwen2.5-Omni AWQ:** Requires patched modeling file (RoPE fix) in `repos/Qwen2.5-Omni/low-VRAM-mode/`.
 - **Madmom:** CPU-only (NumPy/Cython neural networks, no GPU support).
+- **Audiobox Aesthetics ONNX:** Not exportable — WavLM attention uses non-contiguous tensor views that break both dynamo and legacy tracer. Runs as PyTorch ROCm.
+- **GMI ONNX first-run JIT:** Genre model takes ~29s to JIT compile kernels on first inference per process. Mood/instrument ~0.4-0.6s. Subsequent calls are <1ms.

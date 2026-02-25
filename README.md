@@ -10,7 +10,7 @@ Comprehensive music feature extraction pipeline for conditioning **Stable Audio 
 2. **Separates** stems (drums, bass, other, vocals) via Demucs or BS-RoFormer
 3. **Extracts** rhythm, loudness, spectral, harmonic, timbral, and aesthetic features
 4. **Classifies** genre (400), mood (56), instruments (40) via Essentia
-5. **Generates** 5 AI text descriptions via Music Flamingo (8B params)
+5. **Generates** AI text descriptions via Music Flamingo (8B params), optionally condensed by Granite-tiny revision
 6. **Benchmarks** caption quality across Music Flamingo, LLM revision, and Qwen2.5-Omni
 7. **Transcribes** drums to MIDI via ADTOF-PyTorch
 8. **Creates** beat-aligned training crops with feature migration
@@ -30,7 +30,7 @@ All features are saved to `.INFO` JSON files with atomic writes (never overwrite
 |---------|---------|
 | PyTorch (ROCm/CUDA) | GPU compute |
 | Demucs / BS-RoFormer | Stem separation |
-| Essentia + TensorFlow | Classification (genre/mood/instrument) |
+| Essentia + ONNX Runtime | Classification (genre/mood/instrument via MIGraphX EP; TF fallback) |
 | llama.cpp (HIP build) | Music Flamingo GGUF inference |
 | llama-cpp-python | LLM revision (captioning benchmark) |
 | autoawq, qwen-omni-utils | Qwen2.5-Omni-7B-AWQ (captioning benchmark) |
@@ -91,7 +91,7 @@ src/
   timbral/        # Audio Commons features, AudioBox aesthetics
   classification/ # Essentia, Music Flamingo (GGUF + Transformers)
   transcription/  # MIDI drum transcription (ADTOF, Drumsep)
-  tools/          # Metadata lookup, training crops, statistics
+  tools/          # Metadata lookup, training crops, statistical analysis (VIF/PCA/MI)
   crops/          # Crop-specific pipeline and feature extraction
 tests/            # Benchmarks (audio captioning comparison)
 config/           # YAML pipeline configuration
