@@ -225,7 +225,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         from src.spectral.spectral_features import analyze_spectral_features
         from src.spectral.multiband_rms import analyze_multiband_rms
         from src.harmonic.chroma import analyze_chroma
-        from src.core.file_utils import get_crop_stem_files
+        from src.core.file_utils import get_crop_stem_files, read_audio
         import librosa
         import soundfile as sf
         import numpy as np
@@ -241,7 +241,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         # =====================================================================
         # PRE-LOAD: Read crop audio ONCE from disk (eliminates ~12 redundant reads)
         # =====================================================================
-        crop_audio, crop_sr = sf.read(str(crop_path))
+        crop_audio, crop_sr = read_audio(str(crop_path))
 
         # Mono version for most features
         if crop_audio.ndim > 1:
@@ -255,7 +255,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         for stem_name in ['drums', 'bass', 'other', 'vocals']:
             if stem_name in stems:
                 try:
-                    s_audio, s_sr = sf.read(str(stems[stem_name]))
+                    s_audio, s_sr = read_audio(str(stems[stem_name]))
                     preloaded_stems[stem_name] = (s_audio, s_sr)
                 except Exception:
                     pass
@@ -634,6 +634,7 @@ class Pipeline:
         from src.spectral.spectral_features import analyze_spectral_features
         from src.spectral.multiband_rms import analyze_multiband_rms
         from src.harmonic.chroma import analyze_chroma
+        from src.core.file_utils import read_audio
         import librosa
         import soundfile as sf
 
@@ -686,7 +687,7 @@ class Pipeline:
                 results = {}
 
                 # PRE-LOAD: Read crop audio ONCE from disk
-                crop_audio, crop_sr = sf.read(str(crop_path))
+                crop_audio, crop_sr = read_audio(str(crop_path))
                 crop_mono = crop_audio.mean(axis=1) if crop_audio.ndim > 1 else crop_audio
 
                 # Pre-load stems into RAM
@@ -695,7 +696,7 @@ class Pipeline:
                 for stem_name in ['drums', 'bass', 'other', 'vocals']:
                     if stem_name in stems:
                         try:
-                            s_audio, s_sr = sf.read(str(stems[stem_name]))
+                            s_audio, s_sr = read_audio(str(stems[stem_name]))
                             preloaded_stems[stem_name] = (s_audio, s_sr)
                         except Exception:
                             pass
