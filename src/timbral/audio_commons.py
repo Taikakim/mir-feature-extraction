@@ -332,7 +332,11 @@ def analyze_all_timbral_features(audio_path: str | Path,
             import soundfile as sf
             import os
             tmpfs_path = Path(f'/dev/shm/mir_timbral_{os.getpid()}.wav')
-            sf.write(str(tmpfs_path), audio, sr)
+            import numpy as np
+            audio_out = audio
+            if np.issubdtype(audio.dtype, np.floating):
+                audio_out = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+            sf.write(str(tmpfs_path), audio_out, sr, subtype='PCM_16')
             analysis_path = tmpfs_path
             logger.info(f"Analyzing {audio_path.name} timbral features (via /dev/shm)")
         except Exception as e:
