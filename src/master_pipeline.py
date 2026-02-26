@@ -1327,15 +1327,17 @@ class MasterPipeline:
                 best_track = track_name or id3_title
                 source = 'unknown'
 
-            # Check if we already have metadata from a previous lookup
-            # release_year is the primary indicator, but a lookup may have succeeded
-            # without finding a year — check for API IDs and the attempted sentinel
-            if ('release_year' in existing_info
-                    or 'spotify_id' in existing_info
-                    or 'musicbrainz_id' in existing_info
-                    or 'metadata_lookup_attempted' in existing_info):
+            # Skip only when every currently-enabled source is satisfied.
+            # Checking OR across all sources was wrong: a track with musicbrainz_id
+            # but no spotify_id (Spotify rate-limited) would be permanently skipped
+            # even after the rate limit resets.
+            spotify_done = (not self.config.use_spotify
+                            or 'spotify_id' in existing_info)
+            mb_done = (not self.config.use_musicbrainz
+                       or 'musicbrainz_id' in existing_info)
+            if spotify_done and mb_done:
                 if not self.config.should_overwrite('metadata'):
-                    continue  # Already looked up
+                    continue  # All enabled sources satisfied
 
             # Add to list with context
             tracks_needing_lookup.append({
@@ -1886,34 +1888,23 @@ class MasterPipeline:
 
         logger.info(progress.finish(f"{total_crops} crops created"))
 
-    # Track-level features that are not per-crop but are valid for all crops of a track.
-    # These are computed in Stage 2 and must be propagated to existing crop INFOs.
-    _TRACK_FEATURES_TO_MIGRATE = [
-        'syncopation',
-        'on_beat_ratio',
-        'rhythmic_complexity',
-        'rhythmic_evenness',
-        'onset_density_bass',
-        'onset_density_other',
-        'harmonic_movement_bass',
-        'harmonic_movement_other',
-    ]
-
     def _migrate_track_features_to_crops(self, crops_dir: Path):
         """
-        Copy track-level features (syncopation, complexity, per-stem rhythm/harmonic)
-        from each track's .INFO file into every crop .INFO under crops_dir.
+        Copy all TRANSFERRABLE_FEATURES from each track's .INFO into every crop
+        .INFO under crops_dir that is missing any of those keys.
 
-        This is a catch-up pass for crops that were created before these features were
-        added to TRANSFERRABLE_FEATURES, or when a Stage 2 re-run adds new keys.
+        This catches up existing crops when track-level data arrives after the crops
+        were created — e.g. Spotify (rate-limited over multiple days), syncopation,
+        metadata, or any other key added to TRANSFERRABLE_FEATURES later.
 
-        Only writes keys that are present in the track INFO but absent in the crop INFO
-        (respects existing values, never overwrites).
+        Only writes keys that are present in the track INFO but absent in the crop
+        INFO (never overwrites existing values, fully idempotent).
         """
         from core.file_utils import find_crop_folders, find_crop_files
         from core.json_handler import read_info, safe_update
+        from tools.create_training_crops import TRANSFERRABLE_FEATURES, OPTIONAL_TRANSFERRABLE
 
-        keys = self._TRACK_FEATURES_TO_MIGRATE
+        keys = TRANSFERRABLE_FEATURES + OPTIONAL_TRANSFERRABLE
         migrated_crops = 0
         skipped_folders = 0
 
@@ -1921,7 +1912,8 @@ class MasterPipeline:
         if not crop_folders:
             return
 
-        logger.info(f"[4-pre] Migrating track features to crops ({len(crop_folders)} folders)...")
+        logger.info(f"[4-pre] Migrating track→crop features ({len(crop_folders)} folders, "
+                    f"{len(keys)} candidate keys)...")
 
         for crop_folder in crop_folders:
             # Derive matching track folder name (crop folder == track folder name)
