@@ -1014,12 +1014,33 @@ class Pipeline:
                 logger.info(f"  Processing {len(tasks)} files in background (GPU passes run concurrently)...")
 
                 def _pass1_worker():
+                    from concurrent.futures import wait as cf_wait, FIRST_COMPLETED
+                    executor = ProcessPoolExecutor(max_workers=self.config.feature_workers)
                     try:
-                        with ProcessPoolExecutor(max_workers=self.config.feature_workers) as executor:
-                            futures = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
+                        futures_map = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
+                        pending = set(futures_map)
+                        i = 0
 
-                            for i, future in enumerate(as_completed(futures), 1):
-                                crop_path = futures[future]
+                        while pending:
+                            # Wait for the next batch to complete, with a per-crop timeout.
+                            # 300s is generous (timbral+all features ~5-30s normally).
+                            # If nothing completes in 300s, the remaining workers are hung
+                            # (e.g. timbral_models.timbral_reverb on pathological audio).
+                            done, pending = cf_wait(pending, timeout=300, return_when=FIRST_COMPLETED)
+
+                            if not done:
+                                hung = [futures_map[f].name for f in pending]
+                                logger.warning(
+                                    f"  [PASS 1] {len(pending)} crops timed out after 5 minutes, "
+                                    f"skipping: {', '.join(hung[:5])}"
+                                    f"{'...' if len(hung) > 5 else ''}"
+                                )
+                                self.stats["crops_failed"] += len(pending)
+                                break
+
+                            for future in done:
+                                i += 1
+                                crop_path = futures_map[future]
                                 try:
                                     result = future.result()
                                     if result['success']:
@@ -1040,13 +1061,16 @@ class Pipeline:
                                             state.update_pass_progress('pass_1_cpu', completed=i, total=len(tasks))
                                             state.save()
 
-                                if shutdown_requested.is_set():
-                                    logger.info("  [PASS 1] Shutdown requested — stopping CPU workers.")
-                                    executor.shutdown(wait=True, cancel_futures=True)
-                                    break
+                            if shutdown_requested.is_set():
+                                logger.info("  [PASS 1] Shutdown requested — stopping CPU workers.")
+                                break
+
                     except Exception as e:
                         pass1_exception[0] = e
                     finally:
+                        # wait=False: don't block on hung workers; they'll be killed
+                        # when the Python process exits (worker processes are children).
+                        executor.shutdown(wait=False, cancel_futures=True)
                         if state:
                             with state_lock:
                                 state.update_pass_progress('pass_1_cpu', completed=len(tasks), total=len(tasks))
