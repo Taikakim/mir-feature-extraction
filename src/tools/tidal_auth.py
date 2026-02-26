@@ -10,17 +10,25 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Module-level singleton — avoids re-authenticating on every lookup_track() call.
+# _TIDAL_UNAVAILABLE is a sentinel meaning "already tried, don't try again this run".
 _tidal_session_cache = None
+_TIDAL_UNAVAILABLE = object()
+
 
 def get_tidal_session():
     """
     Returns an authenticated tidalapi Session object,
     or None if tidalapi is not installed or auth fails.
 
-    Caches the session as a module-level singleton so subsequent calls
-    within the same process skip file I/O and re-authentication entirely.
+    Uses a module-level singleton so auth happens at most ONCE per process.
+    After the first attempt (success or failure) all subsequent calls return
+    immediately without any I/O, network checks, or prompts.
     """
     global _tidal_session_cache
+
+    # Already resolved this run — return immediately (None if previously failed)
+    if _tidal_session_cache is _TIDAL_UNAVAILABLE:
+        return None
     if _tidal_session_cache is not None:
         return _tidal_session_cache
 
@@ -28,14 +36,13 @@ def get_tidal_session():
         import tidalapi
     except ImportError:
         logger.warning("tidalapi not installed. Run: pip install tidalapi")
+        _tidal_session_cache = _TIDAL_UNAVAILABLE
         return None
 
     session = tidalapi.Session()
-
-    # Session file lives next to this module
     session_file = Path(__file__).resolve().parent / "tidal_session.json"
 
-    # Try loading existing session
+    # Try loading existing session from disk
     if session_file.exists():
         try:
             session.load_session_from_file(str(session_file))
@@ -48,7 +55,7 @@ def get_tidal_session():
         except Exception as e:
             logger.error(f"Failed to load Tidal session: {e}")
 
-    # Interactive OAuth device flow
+    # Interactive OAuth device flow (runs at most once per process)
     print("\n--- TIDAL AUTHENTICATION REQUIRED ---")
     print("A persistent Tidal connection is needed to search for tracks.")
     print("Please follow the link below to link this application to your Tidal account.")
@@ -62,10 +69,12 @@ def get_tidal_session():
             return session
         else:
             print("Authentication failed.")
-            return None
     except Exception as e:
         print(f"Auth error: {e}")
-        return None
+
+    # Mark as unavailable so we never prompt again this run
+    _tidal_session_cache = _TIDAL_UNAVAILABLE
+    return None
 
 if __name__ == "__main__":
     setup_logging = logging.basicConfig(level=logging.DEBUG)
