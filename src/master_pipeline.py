@@ -1394,7 +1394,7 @@ class MasterPipeline:
 
                 lookup_kwargs = dict(
                     sp=sp,
-                    fetch_audio_features_flag=True,
+                    fetch_audio_features_flag=False,  # Endpoint removed by Spotify Nov 2024
                     local_duration=local_duration,
                     known_year=known_year,
                     use_musicbrainz=self.config.use_musicbrainz,
@@ -1484,16 +1484,36 @@ class MasterPipeline:
         """
         Try to identify track using audio fingerprinting (AcoustID).
 
+        Prefers the original file from config.input_dir (unprocessed, best for
+        fingerprint accuracy). Falls back to the output folder's full_mix.
+
         Returns metadata dict or None if not found.
         """
         from core.file_utils import get_stem_files
         import subprocess
 
-        stems = get_stem_files(folder, include_full_mix=True)
-        if 'full_mix' not in stems:
-            return None
+        # Prefer original source file from input_dir — it's unprocessed and
+        # identical to the released track. The output full_mix is the same audio
+        # but may have been re-encoded or (if vocal_removal is on) modified.
+        audio_path = None
+        if self.config.input_dir and self.config.input_dir != self.working_dir:
+            # Input dir may mirror the output structure (folder.name subdir) or
+            # contain loose audio files at root level.
+            candidate_dir = self.config.input_dir / folder.name
+            if candidate_dir.exists():
+                audio_extensions = ['flac', 'wav', 'aiff', 'mp3', 'm4a', 'aac', 'ogg']
+                for ext in audio_extensions:
+                    hits = list(candidate_dir.glob(f'*.{ext}'))
+                    if hits:
+                        audio_path = hits[0]
+                        logger.debug(f"Fingerprinting from input_dir: {audio_path.name}")
+                        break
 
-        audio_path = stems['full_mix']
+        if audio_path is None:
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                return None
+            audio_path = stems['full_mix']
 
         try:
             # Generate fingerprint with fpcalc

@@ -9,11 +9,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Module-level singleton — avoids re-authenticating on every lookup_track() call.
+_tidal_session_cache = None
+
 def get_tidal_session():
     """
-    Returns an authenticated tidalapi Session object, 
+    Returns an authenticated tidalapi Session object,
     or None if tidalapi is not installed or auth fails.
+
+    Caches the session as a module-level singleton so subsequent calls
+    within the same process skip file I/O and re-authentication entirely.
     """
+    global _tidal_session_cache
+    if _tidal_session_cache is not None:
+        return _tidal_session_cache
+
     try:
         import tidalapi
     except ImportError:
@@ -21,33 +31,34 @@ def get_tidal_session():
         return None
 
     session = tidalapi.Session()
-    
-    # Define session file path relative to this script
-    current_dir = Path(__file__).resolve().parent
-    session_file = current_dir / "tidal_session.json"
-    
+
+    # Session file lives next to this module
+    session_file = Path(__file__).resolve().parent / "tidal_session.json"
+
     # Try loading existing session
     if session_file.exists():
         try:
             session.load_session_from_file(str(session_file))
             if session.check_login():
-                logger.debug("Tidal session loaded successfully from file")
+                logger.debug("Tidal session loaded from file")
+                _tidal_session_cache = session
                 return session
             else:
-                logger.info("Tidal session in file expired. Requires re-auth.")
+                logger.info("Tidal session expired — re-authentication required")
         except Exception as e:
             logger.error(f"Failed to load Tidal session: {e}")
-    
-    # If we get here, we need to authenticate
+
+    # Interactive OAuth device flow
     print("\n--- TIDAL AUTHENTICATION REQUIRED ---")
     print("A persistent Tidal connection is needed to search for tracks.")
     print("Please follow the link below to link this application to your Tidal account.")
-    
+
     try:
         session.login_oauth_simple()
         if session.check_login():
             print("Authentication successful! Saving session...")
             session.save_session_to_file(str(session_file))
+            _tidal_session_cache = session
             return session
         else:
             print("Authentication failed.")
