@@ -764,7 +764,7 @@
         }
       } else if (mode === 'radar') {
         const t = document.getElementById('sel-radar-track').value;
-        lines.push('<span class="feat">Radar: ' + t + '</span> \u2014 <span class="desc">Normalized values (0\u20131) on curated features. Red = above mean, Blue = below mean.</span>');
+        lines.push('<span class="feat">Radar: ' + t + '</span> \u2014 <span class="desc">Each bar = one curated feature, normalized 0\u20131 across the dataset. <b style="color:#e94560;">Red</b> = above dataset mean, <b style="color:#00d2ff;">Blue</b> = below. Ghost bars show the dataset average. Click bars to select features & find similar tracks.</span>');
       } else if (mode === 'heatmap') {
         const n = getDispFeatures().length;
         lines.push('<span class="feat">Pearson r matrix</span> \u2014 <span class="desc">' + n + ' features. Click a cell to jump to Scatter.</span>');
