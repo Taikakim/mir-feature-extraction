@@ -609,32 +609,14 @@ class MasterPipeline:
         if shutdown_requested.is_set():
             return _shutdown_exit()
 
+        _ran_track_analysis = False
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
-            # Onset detection + first-stage features catch-up, controlled by
-            # rhythm.onsets in config (independent of track_analysis: false).
-            # _migrate_track_features_to_crops() (Stage 4 pre-pass) then
-            # propagates fresh syncopation/complexity/per-stem values to crops.
-            if not self.config.skip_onset_analysis:
-                folders = self._get_source_folders()
-                if folders:
-                    logger.info("[2b] Onset Detection (catch-up pass)")
-                    self._run_onset_analysis(folders)
-                    logger.info("[2d] First-Stage Features (catch-up pass)")
-                    self._run_first_stage_features(folders)
         elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
-            # Same catch-up: onset detection gated on rhythm.onsets, first-stage
-            # features gated on their own skip flags via should_process().
-            if not self.config.skip_onset_analysis:
-                folders = self._get_source_folders()
-                if folders:
-                    logger.info("[2b] Onset Detection (catch-up pass)")
-                    self._run_onset_analysis(folders)
-                    logger.info("[2d] First-Stage Features (catch-up pass)")
-                    self._run_first_stage_features(folders)
         elif not self.config.skip_track_analysis:
             self._run_track_analysis()
+            _ran_track_analysis = True
             state.mark_stage_completed('track_analysis')
             state.save()
             _flush_tunableop_results()
@@ -646,6 +628,19 @@ class MasterPipeline:
                 logger.debug(f"DataStore.bootstrap (track): {_ds_exc}")
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
+
+        # Onset detection + first-stage features catch-up.
+        # Runs after any Stage 2 branch except when _run_track_analysis() already
+        # handled it.  Gated on rhythm.onsets (skip_onset_analysis).
+        # _migrate_track_features_to_crops() (Stage 4 pre-pass) then propagates
+        # fresh syncopation/complexity/per-stem values to crops.
+        if not _ran_track_analysis and not self.config.skip_onset_analysis:
+            folders = self._get_source_folders()
+            if folders:
+                logger.info("[2b] Onset Detection (catch-up pass)")
+                self._run_onset_analysis(folders)
+                logger.info("[2d] First-Stage Features (catch-up pass)")
+                self._run_first_stage_features(folders)
 
         # Stage 3: Create Crops
         if shutdown_requested.is_set():
