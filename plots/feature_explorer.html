@@ -955,8 +955,14 @@
       const r = corrcoef(x, y);
       const ux = UNITS[kx] && UNITS[kx] !== '-' ? ' [' + UNITS[kx] + ']' : '';
       const uy = UNITS[ky] && UNITS[ky] !== '-' ? ' [' + UNITS[ky] + ']' : '';
-      const hover = names.map((n, j) =>
-        '<b>' + n + '</b><br>' + kx + ': ' + x[j].toFixed(4) + '<br>' + ky + ': ' + y[j].toFixed(4));
+      const hover = names.map((n, j) => {
+        let h = '<b>' + n + '</b><br>' + kx + ': ' + x[j].toFixed(4) + '<br>' + ky + ': ' + y[j].toFixed(4);
+        if (colorMode && colorMode !== '__outliers__' && DATA[colorMode]) {
+          const cv = DATA[colorMode][trackIdxs[j]];
+          h += '<br>' + colorMode + ': ' + (cv !== null && isFinite(cv) ? cv.toFixed(4) : 'N/A');
+        }
+        return h;
+      });
 
       let traces;
       if (colorMode === '__outliers__' && x.length > 0) {
@@ -1390,8 +1396,18 @@
       // Render track list
       const list = document.getElementById('nn-track-list');
       if (!list) return;
-      list.innerHTML = top.map((item, rank) => {
+      // Render legend
+      const legend = '<div style="font-size:9px;color:#777;padding:4px 0 6px;border-bottom:1px solid #1a2040;margin-bottom:4px;">' +
+        '<span style="display:inline-block;width:12px;height:5px;background:#e94560;border-radius:1px;vertical-align:middle;"></span> track value &nbsp;' +
+        '<span style="display:inline-block;width:1px;height:7px;background:#ffd700;vertical-align:middle;"></span> reference &nbsp;' +
+        '<span style="color:#555;">bg = feature range</span></div>';
+      list.innerHTML = legend + top.map((item, rank) => {
         const t = item.idx;
+        // External link
+        let linkHtml = '';
+        if (SPOTIFY[t]) linkHtml = '<a href="https://open.spotify.com/track/' + SPOTIFY[t] + '" target="_blank" style="color:#1db954;font-size:10px;text-decoration:none;" title="Spotify">\uD83C\uDFB5</a>';
+        else linkHtml = '<a href="https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[t])) + '" target="_blank" style="color:#00d2ff;font-size:10px;text-decoration:none;" title="Tidal">\uD83C\uDF0A</a>';
+        if (MBIDS[t]) linkHtml += ' <a href="https://musicbrainz.org/recording/' + MBIDS[t] + '" target="_blank" style="color:#e94560;font-size:10px;text-decoration:none;" title="MusicBrainz">\uD83D\uDCC0</a>';
         let barsHtml = '<div style="display:flex;gap:2px;margin-top:2px;">';
         nnFeats.forEach((f, fi) => {
           const v = DATA[f] ? DATA[f][t] : null;
@@ -1404,8 +1420,8 @@
             '</div>';
         });
         barsHtml += '</div>';
-        return '<div class="nn-row" onclick="showTrackPanel(' + t + ',' + JSON.stringify(nnFeats) + ')">' +
-          '<div style="font-size:10px;color:#ccc;">' + (rank + 1) + '. ' + TRACKS[t] + '</div>' +
+        return '<div class="nn-row" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + t + '];setMode(\'radar\')">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:10px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + (rank + 1) + '. ' + TRACKS[t] + '</span><span style="flex-shrink:0;margin-left:4px;">' + linkHtml + '</span></div>' +
           '<div style="font-size:9px;color:#666;">' + item.dist.toFixed(3) + '</div>' +
           barsHtml + '</div>';
       }).join('');

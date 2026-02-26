@@ -44,6 +44,12 @@ from src.tools.tidal_auth import get_tidal_session
 
 logger = logging.getLogger(__name__)
 
+# Suppress verbose HTTP-level logging from spotipy and its dependencies.
+# Without this, DEBUG mode prints the full raw response body for every API
+# call — including the enormous available_markets list on every track.
+for _noisy in ('spotipy', 'urllib3', 'requests', 'urllib3.connectionpool'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # Try importing APIs
 try:
     import spotipy

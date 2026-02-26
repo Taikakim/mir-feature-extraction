@@ -83,7 +83,8 @@ my_music/
     drums.mp3, bass.mp3, other.mp3, vocals.mp3
     Artist - Album - Track.INFO
     Artist - Album - Track.BEATS_GRID
-    Artist - Album - Track.ONSETS
+    Artist - Album - Track.ONSETS       ← required for syncopation/complexity
+    Artist - Album - Track.DOWNBEATS
 ```
 
 **Supported formats:** .mp3, .wav, .flac, .ogg, .m4a (m4a via pydub/ffmpeg fallback)
@@ -136,10 +137,15 @@ See [MUSIC_FLAMINGO.md](MUSIC_FLAMINGO.md) for setup and model details.
 
 | Module | Purpose |
 |--------|---------|
-| `tools/track_metadata_lookup.py` | Spotify/MusicBrainz metadata with scored matching |
+| `tools/track_metadata_lookup.py` | Spotify → MusicBrainz → Tidal metadata with scored matching; ISRC-based Tidal lookup; AcoustID fingerprinting fallback |
+| `tools/tidal_auth.py` | Tidal OAuth device-flow session management (singleton, persists to `tidal_session.json`) |
 | `tools/create_training_crops.py` | Beat-aligned training crops with feature migration |
 | `tools/statistical_analysis.py` | Feature statistics, correlation, VIF, PCA, clustering, MI across .INFO files |
 | `transcription/drums/adtof.py` | MIDI drum transcription (GPU) |
+
+**Note:** Spotify's `/v1/audio-features/` endpoint was removed for standard developer apps in Nov 2024 (returns 403). Fields like `spotify_energy`, `spotify_valence` etc. are no longer populated. Spotify search, album, and artist endpoints remain available.
+
+Metadata lookups run on **source track folders only** and are propagated to all crop INFOs via `_migrate_track_features_to_crops()`. Crops are never fingerprinted or looked up individually. Per-source retry logic ensures Spotify rate-limited tracks are retried on subsequent runs.
 
 ---
 
@@ -234,7 +240,7 @@ GGUF models in `models/LMM/`. Phase 4 requires `autoawq` + patched Qwen2.5-Omni 
 
 **Classification (2):** danceability, atonality
 
-**Metadata (variable):** release_year, artists, label, genres, popularity, spotify_id, + Spotify audio features
+**Metadata (variable):** `release_year`, `release_date`, `album`, `artists`, `label`, `genres`, `popularity`, `spotify_id`, `musicbrainz_id`, `isrc`, `tidal_id`, `tidal_url`. Spotify audio features (`spotify_energy` etc.) removed Nov 2024.
 
 **AI Descriptions (text, configurable):** Prompt keys depend on `flamingo_prompts` config. Default: `music_flamingo_brief`, `music_flamingo_technical`, `music_flamingo_genre_mood_inst`, `music_flamingo_instrumentation`, `music_flamingo_very_brief`. Optional Granite revision keys: e.g. `music_flamingo_short_mood`, `music_flamingo_short_technical`.
 

@@ -78,6 +78,7 @@ Track Name/
   vocals.mp3
   Track Name.INFO         # All features (JSON, append-only)
   Track Name.BEATS_GRID   # Beat timestamps
+  Track Name.ONSETS       # Onset timestamps (required for syncopation/complexity)
   Track Name.DOWNBEATS    # Downbeat timestamps
 ```
 
@@ -91,9 +92,13 @@ Track Name/
 
 **Granite Revision:** `classification/granite_revision.py`. PASS 4b in `pipeline.py` runs Granite-tiny (llama-cpp-python) to condense Flamingo descriptions into short summaries. Runs independently of `--skip-flamingo` — set `flamingo_revision.enabled: false` in config to disable. Scans the entire crops directory each run so interrupted runs are caught up automatically. `reset()` called before every inference to avoid KV cache cascade failures.
 
-**Metadata Lookup:** `tools/track_metadata_lookup.py` searches Spotify and MusicBrainz. Candidates scored by duration match (0.5), year match (0.3), artist similarity (0.2). Controlled by `metadata.use_spotify` and `metadata.use_musicbrainz` config flags.
+**Metadata Lookup:** `tools/track_metadata_lookup.py` searches Spotify → MusicBrainz → Tidal. Candidates scored by duration match (0.5), year match (0.3), artist similarity (0.2). Tidal looked up via ISRC obtained from Spotify result. Saves: `release_year`, `artists`, `label`, `genres`, `popularity`, `album`, `spotify_id`, `musicbrainz_id`, `isrc`, `tidal_id`, `tidal_url`. Controlled by `metadata.use_spotify`, `metadata.use_musicbrainz`. Per-source skip logic: a track missing `spotify_id` is retried even if `musicbrainz_id` exists (handles Spotify rate limits). AcoustID fingerprinting prefers original file from `paths.input` over output `full_mix`. Tidal session cached as module-level singleton (`_TIDAL_UNAVAILABLE` sentinel prevents re-auth storms). Spotify `/v1/audio-features/` removed Nov 2024 — endpoint disabled. Verbose Spotify HTTP logging (available_markets) suppressed at WARNING level. Lookups run on **source track folders only** — never on crops. `_migrate_track_features_to_crops()` propagates all `TRANSFERRABLE_FEATURES` (including Tidal/ISRC) to crop INFOs.
 
 **Captioning Benchmark:** `tests/poc_lmm_revise.py` -- 5-phase comparison (Flamingo baseline, genre-hint, LLM revision, Qwen2.5-Omni, ensemble). GGUF models in `models/LMM/`. Chat templates: Qwen3=ChatML, GPT-OSS=Harmony, Granite=start_of_role/end_of_role. llama-cpp-python `type_k`/`type_v` must be integers not strings.
+
+**Onset Detection:** `rhythm/onsets.py`. Combined beat+onset worker `process_folder_rhythm()` in `pipeline_workers.py` handles both `.BEATS_GRID` and `.ONSETS` in one subprocess, loading audio once. Controlled by `rhythm.onsets: true` in config — runs as a catch-up pass independently of `track_analysis: false`. Required by `analyze_syncopation()` and `rhythmic_complexity`.
+
+**Stage 2 Catch-up:** After any Stage 2 branch (skip-to-crop, already-complete, disabled, or never-run), the pipeline runs a unified catch-up: 2b onset detection (`rhythm.onsets`), 2c metadata lookup (`metadata.enabled`), 2d first-stage features. PASS 1 timbral timeout: uses `cf_wait(timeout=300)` instead of `as_completed()` — hung `timbral_models.timbral_reverb()` workers are abandoned after 5 minutes without blocking the pipeline.
 
 **Statistical Analysis:** `tools/statistical_analysis.py`. Scans `.INFO` files recursively. Basic stats + outlier detection per feature. `--per-track` aggregates crops to one value per track. `--top N --key bpm` queries ranked values. Feature selection: `--vif`, `--pca`, `--cluster`, `--mi`, `--feature-select` (all). Plots (heatmap, dendrogram, scree, VIF bar) via `--plots-dir`.
 
@@ -144,3 +149,5 @@ import torch  # now safe
 - **Madmom:** CPU-only (NumPy/Cython neural networks, no GPU support).
 - **Audiobox Aesthetics ONNX:** Not exportable — WavLM attention uses non-contiguous tensor views that break both dynamo and legacy tracer. Runs as PyTorch ROCm.
 - **GMI ONNX first-run JIT:** Genre model takes ~29s to JIT compile kernels on first inference per process. Mood/instrument ~0.4-0.6s. Subsequent calls are <1ms.
+- **Spotify audio features:** `/v1/audio-features/` returns 403 for all standard API apps since Nov 2024. Disabled in pipeline (`fetch_audio_features_flag=False`). The endpoint is gone permanently.
+- **timbral_models hang:** `timbral_reverb()` can loop forever on pathological audio. PASS 1 uses `cf_wait(timeout=300)` — hung crops are skipped and retried next run.
