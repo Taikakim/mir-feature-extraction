@@ -38,11 +38,15 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
     # Define output keys for each feature type (must check ALL, not just one)
     LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+    SYNCOPATION_KEYS = ['syncopation', 'on_beat_ratio']
+    COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
+    PER_STEM_RHYTHM_KEYS = ['onset_density_bass', 'onset_density_other']
+    PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
 
     # Import here to avoid issues with multiprocessing
     from core.file_locks import FileLock
     from core.file_utils import get_stem_files
-    from core.json_handler import get_info_path, safe_update, should_process
+    from core.json_handler import get_info_path, read_info, safe_update, should_process
 
     # Use file lock to prevent race conditions
     with FileLock(folder) as lock:
@@ -52,6 +56,10 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
         try:
             from spectral.spectral_features import analyze_spectral_features
             from timbral.loudness import analyze_file_loudness
+            from rhythm.syncopation import analyze_syncopation
+            from rhythm.complexity import analyze_rhythmic_complexity
+            from rhythm.per_stem_rhythm import analyze_per_stem_rhythm
+            from harmonic.per_stem_harmonic import analyze_per_stem_harmonics
 
             stems = get_stem_files(folder, include_full_mix=True)
             if 'full_mix' not in stems:
@@ -59,21 +67,58 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
 
             full_mix = stems['full_mix']
             info_path = get_info_path(full_mix)
+            # Read .INFO once; pass to all should_process() calls to avoid
+            # repeated HDD seeks on the same file.
+            existing = read_info(info_path) if info_path.exists() else {}
             results = {}
 
             # Loudness - check ALL output keys
-            if should_process(info_path, LOUDNESS_KEYS, should_overwrite('loudness')):
+            if should_process(info_path, LOUDNESS_KEYS, should_overwrite('loudness'), existing=existing):
                 try:
                     results.update(analyze_file_loudness(full_mix))
                 except Exception:
                     pass  # Non-critical
 
             # Spectral - check ALL output keys
-            if should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral')):
+            if should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral'), existing=existing):
                 try:
                     results.update(analyze_spectral_features(full_mix))
                 except Exception:
                     pass  # Non-critical
+
+            # Syncopation
+            if should_process(info_path, SYNCOPATION_KEYS, should_overwrite('syncopation'), existing=existing):
+                try:
+                    results.update(analyze_syncopation(folder))
+                except FileNotFoundError:
+                    pass  # Normal if beats/onsets aren't available
+                except Exception:
+                    pass
+
+            # Complexity
+            if should_process(info_path, COMPLEXITY_KEYS, should_overwrite('complexity'), existing=existing):
+                try:
+                    results.update(analyze_rhythmic_complexity(folder))
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+
+            # Per Stem Rhythm
+            if should_process(info_path, PER_STEM_RHYTHM_KEYS, should_overwrite('per_stem_rhythm'), existing=existing):
+                try:
+                    res = analyze_per_stem_rhythm(folder)
+                    if res: results.update(res)
+                except Exception:
+                    pass
+
+            # Per Stem Harmonic
+            if should_process(info_path, PER_STEM_HARMONIC_KEYS, should_overwrite('per_stem_harmonic'), existing=existing):
+                try:
+                    res = analyze_per_stem_harmonics(folder)
+                    if res: results.update(res)
+                except Exception:
+                    pass
 
             if results:
                 safe_update(info_path, results)

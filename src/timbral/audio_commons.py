@@ -75,7 +75,7 @@ def analyze_brightness(audio_path: str | Path) -> float:
         return brightness
 
     except Exception as e:
-        logger.error(f"Error analyzing brightness: {e}")
+        logger.debug(f"Error analyzing brightness: {e}")
         raise
 
 
@@ -105,7 +105,7 @@ def analyze_roughness(audio_path: str | Path) -> float:
         return roughness
 
     except Exception as e:
-        logger.error(f"Error analyzing roughness: {e}")
+        logger.debug(f"Error analyzing roughness: {e}")
         raise
 
 
@@ -135,7 +135,7 @@ def analyze_hardness(audio_path: str | Path) -> float:
         return hardness
 
     except Exception as e:
-        logger.error(f"Error analyzing hardness: {e}")
+        logger.debug(f"Error analyzing hardness: {e}")
         raise
 
 
@@ -165,7 +165,7 @@ def analyze_depth(audio_path: str | Path) -> float:
         return depth
 
     except Exception as e:
-        logger.error(f"Error analyzing depth: {e}")
+        logger.debug(f"Error analyzing depth: {e}")
         raise
 
 
@@ -195,7 +195,7 @@ def analyze_booming(audio_path: str | Path) -> float:
         return booming
 
     except Exception as e:
-        logger.error(f"Error analyzing booming: {e}")
+        logger.debug(f"Error analyzing booming: {e}")
         raise
 
 
@@ -230,7 +230,7 @@ def analyze_reverb(audio_path: str | Path) -> float:
         return reverb
 
     except Exception as e:
-        logger.error(f"Error analyzing reverberation: {e}")
+        logger.debug(f"Error analyzing reverberation: {e}")
         raise
 
 
@@ -260,7 +260,7 @@ def analyze_sharpness(audio_path: str | Path) -> float:
         return sharpness
 
     except Exception as e:
-        logger.error(f"Error analyzing sharpness: {e}")
+        logger.debug(f"Error analyzing sharpness: {e}")
         raise
 
 
@@ -290,7 +290,7 @@ def analyze_warmth(audio_path: str | Path) -> float:
         return warmth
 
     except Exception as e:
-        logger.error(f"Error analyzing warmth: {e}")
+        logger.debug(f"Error analyzing warmth: {e}")
         raise
 
 
@@ -376,7 +376,7 @@ def analyze_all_timbral_features(audio_path: str | Path,
                 value = all_features[feature_name](analysis_path)
                 results[feature_name] = value
             except Exception as e:
-                logger.error(f"Could not analyze {feature_name}: {e}")
+                logger.debug(f"Could not analyze {feature_name}: {e}")
     finally:
         # Clean up tmpfs file
         if tmpfs_path is not None and tmpfs_path.exists():

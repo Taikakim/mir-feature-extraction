@@ -263,7 +263,12 @@ def safe_update(file_path: str | Path, updates: Dict[str, Any], file_type: str =
     logger.info(f"Safely updated {len(updates)} keys in {file_path}")
 
 
-def should_process(info_path: str | Path, output_keys: list, overwrite: bool = False) -> bool:
+def should_process(
+    info_path: str | Path,
+    output_keys: list,
+    overwrite: bool = False,
+    existing: Optional[Dict[str, Any]] = None,
+) -> bool:
     """
     Universal check: Should we process this file?
 
@@ -285,6 +290,9 @@ def should_process(info_path: str | Path, output_keys: list, overwrite: bool = F
         output_keys: List of keys that the operation will produce
                      (e.g., ['lufs', 'lra'] for loudness analysis)
         overwrite: If True, always returns True (force processing)
+        existing: Optional pre-loaded dict from a previous read_info() call.
+                  When provided the file read is skipped entirely (HDD optimisation).
+                  Callers that pass nothing get the original behaviour unchanged.
 
     Returns:
         True if processing should occur, False if it should be skipped
@@ -300,14 +308,18 @@ def should_process(info_path: str | Path, output_keys: list, overwrite: bool = F
     if overwrite:
         return True
 
+    # Fast path: caller already has the dict in memory — skip the file read
+    if existing is not None:
+        return any(key not in existing for key in output_keys)
+
     info_path = Path(info_path)
     if not info_path.exists():
         return True
 
     try:
-        existing = read_info(info_path)
+        existing_data = read_info(info_path)
         # Process if ANY output key is missing
-        return any(key not in existing for key in output_keys)
+        return any(key not in existing_data for key in output_keys)
     except Exception:
         # If we can't read the file, process it
         return True
