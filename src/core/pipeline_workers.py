@@ -227,6 +227,55 @@ def process_demucs_subprocess(args: Tuple[Path, Path, str, int, str, int]) -> Tu
         return (folder_name, False, elapsed, str(e))
 
 
+def process_folder_onsets(args: Tuple[Path, bool]) -> Tuple[str, str, int, str]:
+    """
+    Worker function for parallel onset detection.
+
+    Detects onsets in a track's full_mix, writes a .ONSETS timestamp file
+    alongside the audio, and merges onset statistics into the .INFO file.
+
+    Args:
+        args: Tuple of (folder_path, overwrite)
+
+    Returns:
+        Tuple of (folder_name, status, onset_count, message)
+        status: 'success' | 'skipped' | 'failed'
+    """
+    folder, overwrite = args
+    folder_name = folder.name
+
+    from core.file_locks import FileLock
+
+    with FileLock(folder) as lock:
+        if not lock.acquired:
+            return (folder_name, 'failed', 0, 'Could not acquire lock')
+
+        try:
+            from core.file_utils import get_stem_files
+            from core.json_handler import get_info_path, safe_update
+            from rhythm.onsets import analyze_onsets_with_save
+
+            onsets_file = folder / f"{folder_name}.ONSETS"
+
+            # Skip if .ONSETS file already exists and not overwriting
+            if onsets_file.exists() and not overwrite:
+                return (folder_name, 'skipped', 0, '')
+
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                return (folder_name, 'failed', 0, 'No full_mix found')
+
+            results, _ = analyze_onsets_with_save(stems['full_mix'], save_onsets=True)
+
+            info_path = get_info_path(stems['full_mix'])
+            safe_update(info_path, results)
+
+            return (folder_name, 'success', results.get('onset_count', 0), '')
+
+        except Exception as e:
+            return (folder_name, 'failed', 0, str(e))
+
+
 # Aliases for backward compatibility with underscore-prefixed names
 _process_folder_features = process_folder_features
 _process_folder_crops = process_folder_crops
