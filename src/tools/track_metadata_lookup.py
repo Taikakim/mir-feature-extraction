@@ -918,11 +918,11 @@ def batch_process_metadata(root_directory: Path, overwrite: bool = False) -> Dic
             
             # Note: process_folder returns None if skipped, Dict if changed
             res = process_folder(
-                folder, 
-                sp=sp, 
+                folder,
+                sp=sp,
                 dry_run=False,
                 force_metadata=overwrite,
-                fetch_audio_features=True # Generally want this for batch
+                fetch_audio_features=False  # Spotify removed this endpoint (403 since Nov 2024)
             )
             
             if res is None:
