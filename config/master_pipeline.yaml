@@ -76,6 +76,10 @@ rhythm:
   # These features are extracted for full tracks and migrated to crops
   enabled: false
   workers: 11                     # Parallel workers for beat/downbeat detection
+  # Onset detection (.ONSETS files) — required for syncopation and rhythmic
+  # complexity. Runs as a catch-up pass even when track_analysis: false.
+  # Uses the same worker pool as beat detection.
+  onsets: true
 
 # =============================================================================
 # CROPPING
@@ -255,7 +259,7 @@ vocal_removal:
 # FILENAME CLEANUP
 # =============================================================================
 filename_cleanup:
-  enabled: true                  # Clean filenames for T5 tokenizer compatibility
+  enabled: false                  # Clean filenames for T5 tokenizer compatibility
                                  # Converts accented chars to ASCII, normalizes spaces/dashes
 
 # =============================================================================

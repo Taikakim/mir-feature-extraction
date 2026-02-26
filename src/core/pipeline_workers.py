@@ -276,6 +276,92 @@ def process_folder_onsets(args: Tuple[Path, bool]) -> Tuple[str, str, int, str]:
             return (folder_name, 'failed', 0, str(e))
 
 
+def process_folder_rhythm(args: Tuple[Path, bool]) -> Tuple[str, str, str]:
+    """
+    Combined worker: beat grid + onset detection for one track folder.
+
+    Runs whatever is still missing (.BEATS_GRID and/or .ONSETS).
+    Loads audio once with librosa for onset detection; madmom (used for beat
+    detection) reads the file independently via its own reader.
+
+    Args:
+        args: Tuple of (folder_path, overwrite)
+
+    Returns:
+        Tuple of (folder_name, status, message)
+        status: 'success' | 'skipped' | 'failed'
+    """
+    folder, overwrite = args
+    folder_name = folder.name
+
+    from core.file_locks import FileLock
+
+    with FileLock(folder) as lock:
+        if not lock.acquired:
+            return (folder_name, 'failed', 'Could not acquire lock')
+
+        try:
+            from core.file_utils import get_stem_files
+            from core.json_handler import get_info_path, safe_update
+
+            beats_file = folder / f"{folder_name}.BEATS_GRID"
+            onsets_file = folder / f"{folder_name}.ONSETS"
+            beats_needed = not beats_file.exists() or overwrite
+            onsets_needed = not onsets_file.exists() or overwrite
+
+            if not beats_needed and not onsets_needed:
+                return (folder_name, 'skipped', '')
+
+            stems = get_stem_files(folder, include_full_mix=True)
+            if 'full_mix' not in stems:
+                return (folder_name, 'failed', 'No full_mix found')
+
+            full_mix = stems['full_mix']
+            info_path = get_info_path(full_mix)
+            results = {}
+
+            # Beat detection — madmom reads the file via its own reader
+            if beats_needed:
+                from rhythm.beat_grid import create_beat_grid
+                create_beat_grid(full_mix, save_grid=True)
+
+            # Onset detection — load audio once with librosa, reuse for analysis
+            if onsets_needed:
+                import librosa
+                from core.common import clamp_feature_value
+                from rhythm.onsets import (detect_onsets, calculate_onset_density,
+                                           analyze_onset_statistics, save_onset_times)
+
+                audio, sr = librosa.load(str(full_mix), sr=None, mono=True)
+                duration = len(audio) / sr
+                onset_times, onset_strengths = detect_onsets(audio, sr)
+
+                onset_density = calculate_onset_density(onset_times, duration)
+                strength_stats = analyze_onset_statistics(onset_strengths)
+
+                onset_results = {
+                    'onset_count': int(len(onset_times)),
+                    'onset_density': float(onset_density),
+                    **strength_stats,
+                }
+                for k, v in onset_results.items():
+                    onset_results[k] = clamp_feature_value(k, v)
+
+                save_onset_times(onset_times, onsets_file)
+                results.update(onset_results)
+
+            if results:
+                safe_update(info_path, results)
+
+            done = []
+            if beats_needed: done.append('beats')
+            if onsets_needed: done.append('onsets')
+            return (folder_name, 'success', '+'.join(done))
+
+        except Exception as e:
+            return (folder_name, 'failed', str(e))
+
+
 # Aliases for backward compatibility with underscore-prefixed names
 _process_folder_features = process_folder_features
 _process_folder_crops = process_folder_crops

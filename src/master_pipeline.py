@@ -127,6 +127,7 @@ class MasterPipelineConfig:
 
     # Rhythm analysis
     rhythm_workers: int = 4  # Parallel workers for beat/downbeat detection
+    skip_onset_analysis: bool = False  # When True, skip .ONSETS generation
 
     # Feature settings
     skip_loudness: bool = False
@@ -285,6 +286,7 @@ class MasterPipelineConfig:
 
             # Rhythm
             rhythm_workers=rhythm.get('workers', 4),
+            skip_onset_analysis=not rhythm.get('onsets', True),
 
             # Features
             skip_loudness=not features.get('loudness', True),
@@ -379,6 +381,7 @@ class MasterPipelineConfig:
             },
             'rhythm': {
                 'workers': self.rhythm_workers,
+                'onsets': not self.skip_onset_analysis,
             },
             'cropping': {
                 'length_samples': self.crop_length_samples,
@@ -608,11 +611,11 @@ class MasterPipeline:
 
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
-            # Run onset detection + first-stage features catch-up so newly-enabled
-            # keys (syncopation, complexity, per-stem rhythm/harmonic) are computed
-            # on tracks. _migrate_track_features_to_crops() (Stage 4 pre-pass) then
-            # propagates the fresh values into every crop INFO.
-            if not self.config.skip_track_analysis:
+            # Onset detection + first-stage features catch-up, controlled by
+            # rhythm.onsets in config (independent of track_analysis: false).
+            # _migrate_track_features_to_crops() (Stage 4 pre-pass) then
+            # propagates fresh syncopation/complexity/per-stem values to crops.
+            if not self.config.skip_onset_analysis:
                 folders = self._get_source_folders()
                 if folders:
                     logger.info("[2b] Onset Detection (catch-up pass)")
@@ -621,10 +624,9 @@ class MasterPipeline:
                     self._run_first_stage_features(folders)
         elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
-            # Run onset detection + first-stage features so any keys enabled since
-            # the last full run are filled in. Each feature guards itself with
-            # should_process(), so already-present keys are skipped.
-            if not self.config.skip_track_analysis:
+            # Same catch-up: onset detection gated on rhythm.onsets, first-stage
+            # features gated on their own skip flags via should_process().
+            if not self.config.skip_onset_analysis:
                 folders = self._get_source_folders()
                 if folders:
                     logger.info("[2b] Onset Detection (catch-up pass)")
@@ -1202,45 +1204,38 @@ class MasterPipeline:
         logger.info(fmt_success(f"Created {success_count} instrumental mixes"))
 
     def _run_rhythm_analysis(self, folders: List[Path]):
-        """Run beat grid and onset detection."""
-        from rhythm.beat_grid import batch_create_beat_grids
-
-        try:
-            stats = batch_create_beat_grids(
-                self.working_dir,
-                overwrite=self.config.should_overwrite('beats'),
-                workers=self.config.rhythm_workers,
-            )
-            logger.info(f"Beat grids: {stats.get('success', 0)} new, "
-                        f"{stats.get('skipped', 0)} skipped")
-        except Exception as e:
-            logger.error(f"Beat grid analysis failed: {e}")
-            self.stats.errors.append(f"Beats: {e}")
-
-        # Onset detection — required by syncopation analysis
+        """Run beat grid + onset detection as a single combined parallel pass."""
         self._run_onset_analysis(folders)
+
+    def _run_onset_analysis_legacy(self, folders):
+        """Kept for reference — replaced by combined worker in _run_onset_analysis."""
 
     def _run_onset_analysis(self, folders: List[Path]):
         """
-        Run parallel onset detection for a list of track folders.
+        Run combined beat-grid + onset detection for a list of track folders.
 
-        Writes a .ONSETS timestamp file per folder and merges onset
-        statistics (onset_count, onset_density, etc.) into .INFO.
-        Skips folders whose .ONSETS file already exists.
+        Uses process_folder_rhythm which handles both in one subprocess, loading
+        audio once with librosa for onset detection while madmom reads for beats.
+        Skips any folder where both .BEATS_GRID and .ONSETS already exist.
+        Gated by config rhythm.onsets (skip_onset_analysis).
         """
+        if self.config.skip_onset_analysis:
+            logger.debug("Onset analysis skipped (rhythm.onsets: false)")
+            return
+
         from concurrent.futures import ProcessPoolExecutor, as_completed
-        from core.pipeline_workers import process_folder_onsets
+        from core.pipeline_workers import process_folder_rhythm
 
         overwrite = self.config.should_overwrite('beats')
         num_workers = self.config.rhythm_workers
         args_list = [(folder, overwrite) for folder in folders]
 
         success = skipped = failed = 0
-        progress = ProgressBar(len(folders), desc="Onsets")
+        progress = ProgressBar(len(folders), desc="Rhythm")
 
         if num_workers <= 1:
             for i, args in enumerate(args_list, 1):
-                folder_name, status, _, msg = process_folder_onsets(args)
+                folder_name, status, msg = process_folder_rhythm(args)
                 if status == 'success':
                     success += 1
                 elif status == 'skipped':
@@ -1248,14 +1243,14 @@ class MasterPipeline:
                 else:
                     failed += 1
                     if msg:
-                        logger.debug(f"Onsets {folder_name}: {msg}")
+                        logger.debug(f"Rhythm {folder_name}: {msg}")
                 logger.info(progress.update(i))
         else:
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                futures = {executor.submit(process_folder_onsets, args): args[0]
+                futures = {executor.submit(process_folder_rhythm, args): args[0]
                            for args in args_list}
                 for i, future in enumerate(as_completed(futures), 1):
-                    folder_name, status, _, msg = future.result()
+                    folder_name, status, msg = future.result()
                     if status == 'success':
                         success += 1
                     elif status == 'skipped':
@@ -1263,11 +1258,11 @@ class MasterPipeline:
                     else:
                         failed += 1
                         if msg:
-                            logger.debug(f"Onsets {folder_name}: {msg}")
+                            logger.debug(f"Rhythm {folder_name}: {msg}")
                     logger.info(progress.update(i))
 
         logger.info(progress.finish(
-            f"Onsets: {success} new, {skipped} skipped, {failed} failed"
+            f"Rhythm: {success} new, {skipped} skipped, {failed} failed"
         ))
 
     def _run_metadata_lookup(self, folders: List[Path]):
