@@ -40,6 +40,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.core.common import setup_logging
 from src.core.json_handler import safe_update, get_info_path
 from src.core.file_utils import find_organized_folders, get_stem_files
+from src.tools.tidal_auth import get_tidal_session
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,7 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
         - genres: Artist genres (array, requires extra API call if fetch_genres=True)
         - popularity: Track popularity (0-100)
         - spotify_id: Spotify track ID
+        - isrc: International Standard Recording Code
     """
     if not sp:
         return None
@@ -312,6 +314,7 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
                 'duration_s': duration_s,
                 'popularity': track.get('popularity'),
                 'spotify_id': track['id'],
+                'isrc': track.get('external_ids', {}).get('isrc'),
                 'artist_id': track['artists'][0]['id'] if track['artists'] else None,
                 '_album_id': album['id'],
             }
@@ -563,6 +566,22 @@ def lookup_track(track_name: str, artist_hint: str = None, sp=None,
         # Rate limiting for MusicBrainz (max 1 req/sec per their guidelines)
         time.sleep(1.0)
 
+    # Strategy 3: Tidal API using perfectly matched ISRC
+    if result and result.get('isrc'):
+        tidal_session = get_tidal_session()
+        if tidal_session:
+            try:
+                tidal_tracks = tidal_session.get_tracks_by_isrc(result['isrc'])
+                if tidal_tracks:
+                    # Filter out unavailable tracks if possible
+                    available_tracks = [t for t in tidal_tracks if getattr(t, 'available', True)]
+                    t = available_tracks[0] if available_tracks else tidal_tracks[0]
+                    result['tidal_id'] = t.id
+                    result['tidal_url'] = t.get_url()
+                    logger.debug(f"Found via Tidal: {t.name} (ID: {t.id})")
+            except Exception as e:
+                logger.debug(f"Tidal ISRC search failed: {e}")
+
     return result
 
 
@@ -758,6 +777,10 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
                 info_data['spotify_id'] = result['spotify_id']
             if result.get('musicbrainz_id'):
                 info_data['musicbrainz_id'] = result['musicbrainz_id']
+            if result.get('tidal_id'):
+                info_data['tidal_id'] = result['tidal_id']
+            if result.get('tidal_url'):
+                info_data['tidal_url'] = result['tidal_url']
             
             # Audio features (if available)
             for key in ['spotify_acousticness', 'spotify_energy', 'spotify_instrumentalness',
