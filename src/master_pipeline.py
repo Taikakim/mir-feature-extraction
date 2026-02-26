@@ -1329,14 +1329,17 @@ class MasterPipeline:
                 source = 'unknown'
 
             # Skip only when every currently-enabled source is satisfied.
-            # Checking OR across all sources was wrong: a track with musicbrainz_id
-            # but no spotify_id (Spotify rate-limited) would be permanently skipped
-            # even after the rate limit resets.
+            # Per-source checks prevent permanently skipping tracks that were only
+            # partially resolved (e.g. Spotify rate-limited but MB succeeded).
             spotify_done = (not self.config.use_spotify
                             or 'spotify_id' in existing_info)
             mb_done = (not self.config.use_musicbrainz
                        or 'musicbrainz_id' in existing_info)
-            if spotify_done and mb_done:
+            # Tidal lookup requires an ISRC (obtained from Spotify). It's only
+            # possible if Spotify is enabled and returned an ISRC.
+            tidal_possible = self.config.use_spotify and 'isrc' in existing_info
+            tidal_done = (not tidal_possible or 'tidal_id' in existing_info)
+            if spotify_done and mb_done and tidal_done:
                 if not self.config.should_overwrite('metadata'):
                     continue  # All enabled sources satisfied
 
@@ -1453,11 +1456,21 @@ class MasterPipeline:
                         if result.get('album'):
                             info_data['album'] = result['album']
 
-                        # IDs
+                        # Album
+                        if result.get('album'):
+                            info_data['album'] = result['album']
+
+                        # IDs and cross-service links
                         if result.get('spotify_id'):
                             info_data['spotify_id'] = result['spotify_id']
                         if result.get('musicbrainz_id'):
                             info_data['musicbrainz_id'] = result['musicbrainz_id']
+                        if result.get('isrc'):
+                            info_data['isrc'] = result['isrc']
+                        if result.get('tidal_id'):
+                            info_data['tidal_id'] = result['tidal_id']
+                        if result.get('tidal_url'):
+                            info_data['tidal_url'] = result['tidal_url']
 
                         # Spotify audio features (if available)
                         spotify_features = [

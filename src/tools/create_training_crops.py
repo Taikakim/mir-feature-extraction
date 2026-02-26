@@ -109,15 +109,19 @@ TRANSFERRABLE_FEATURES = [
     'track_metadata_year',
     'track_metadata_genre',
 
-    # Core Metadata (from track_metadata_lookup.py / Spotify / MusicBrainz)
+    # Core Metadata (from track_metadata_lookup.py / Spotify / MusicBrainz / Tidal)
     'release_year',
     'release_date',
+    'album',
     'artists',
     'label',
     'genres',
     'popularity',
+    'isrc',
     'spotify_id',
     'musicbrainz_id',
+    'tidal_id',
+    'tidal_url',
 
     # Music Flamingo descriptions
     'music_flamingo_full',
