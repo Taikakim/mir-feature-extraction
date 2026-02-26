@@ -250,9 +250,9 @@ class EssentiaAnalyzer:
             # Get mean predictions across time frames
             predictions_mean = np.mean(activations, axis=0)
 
-            # Classes are ["tonal", "atonal"]
-            # Use atonal probability (index 1) as atonality score
-            atonal_prob = float(predictions_mean[1])
+            # Classes are ["atonal", "tonal"] according to model metadata
+            # Use atonal probability (index 0) as atonality score
+            atonal_prob = float(predictions_mean[0])
 
             # Clamp to valid range
             atonality = clamp_feature_value('atonality', atonal_prob)

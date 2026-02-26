@@ -437,10 +437,10 @@ def analyze_atonality(audio_path: str | Path, audio: Optional[np.ndarray] = None
         # Get mean predictions across time frames
         predictions_mean = np.mean(activations, axis=0)
 
-        # Classes are ["tonal", "atonal"]
-        # We want the atonal probability (index 1)
-        tonal_prob = float(predictions_mean[0])
-        atonal_prob = float(predictions_mean[1])
+        # Classes are ["atonal", "tonal"] according to model metadata
+        # We want the atonal probability (index 0)
+        atonal_prob = float(predictions_mean[0])
+        tonal_prob = float(predictions_mean[1])
 
         # Use atonal probability as the atonality score
         atonality = atonal_prob
