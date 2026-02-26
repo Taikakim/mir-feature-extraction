@@ -662,6 +662,9 @@ class MasterPipeline:
                 else:
                     if self.ui: self.ui.set_stage('onset_analysis', 'skipped')
 
+                if shutdown_requested.is_set():
+                    return _shutdown_exit()
+
                 # 2c: Spotify / MusicBrainz lookup (controlled by metadata.enabled)
                 # Per-source skip logic inside _run_metadata_lookup() ensures
                 # rate-limited Spotify tracks are retried on future runs.
@@ -672,6 +675,9 @@ class MasterPipeline:
                     if self.ui: self.ui.set_stage('metadata_lookup', 'done')
                 else:
                     if self.ui: self.ui.set_stage('metadata_lookup', 'skipped')
+
+                if shutdown_requested.is_set():
+                    return _shutdown_exit()
 
                 # 2d: First-stage features (loudness, spectral, timbral, etc.)
                 logger.info("[2d] First-Stage Features (catch-up pass)")
@@ -935,6 +941,10 @@ class MasterPipeline:
         if self.ui: self.ui.set_stage('onset_analysis', 'done')
         logger.info(fmt_dim(f"    Rhythm analysis completed in {rhythm_time:.1f}s"))
 
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — stopping track analysis after rhythm.")
+            return
+
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
         logger.info("\n[2c] Metadata Lookup")
         if self.config.skip_metadata:
@@ -948,6 +958,10 @@ class MasterPipeline:
                 items_processed=self.stats.tracks_metadata_found)
             if self.ui: self.ui.set_stage('metadata_lookup', 'done')
             logger.info(fmt_dim(f"    Metadata lookup completed in {metadata_time:.1f}s"))
+
+        if shutdown_requested.is_set():
+            logger.info("Shutdown requested — stopping track analysis after metadata.")
+            return
 
         # Sub-stage 2d: First-stage features (migrated to crops)
         logger.info("\n[2d] First-Stage Features")
@@ -1624,6 +1638,7 @@ class MasterPipeline:
 
     def _run_first_stage_features(self, folders: List[Path]):
         """Extract features that will be migrated to crops (parallel processing)."""
+        from core.graceful_shutdown import shutdown_requested
         num_workers = self.config.feature_workers
 
         if num_workers <= 1:
@@ -1650,6 +1665,9 @@ class MasterPipeline:
 
             # Process results as they complete
             for i, future in enumerate(as_completed(future_to_folder), 1):
+                if shutdown_requested.is_set():
+                    logger.info("Shutdown requested — stopping first-stage features.")
+                    break
                 folder = future_to_folder[future]
                 try:
                     folder_name, success, message = future.result()
