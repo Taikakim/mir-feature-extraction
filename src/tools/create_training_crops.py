@@ -138,6 +138,16 @@ TRANSFERRABLE_FEATURES = [
     'spotify_key',
     'spotify_mode',
     'spotify_tempo',
+
+    # Track-level rhythm features (computed once per track, valid for all its crops)
+    'syncopation',
+    'on_beat_ratio',
+    'rhythmic_complexity',
+    'rhythmic_evenness',
+    'onset_density_bass',
+    'onset_density_other',
+    'harmonic_movement_bass',
+    'harmonic_movement_other',
 ]
 
 # Features that are good to have but don't warn if missing
@@ -1077,6 +1087,22 @@ def create_crops_for_file(folder_path: Path,
         preloaded_mix = mix_audio
         preloaded_stems = preload_stems(folder_path, sr)
         logger.info(f"Pre-loaded mix: {preloaded_mix.shape[0]} samples, {len(preloaded_stems)} stems")
+
+        # Resync duration to actual decoded length.
+        # sf.info().frames (metadata) can diverge from sf.read() for MP3/VBR:
+        # encoder delay, gapless trimming, and bitrate-estimated frame counts
+        # all cause the decoded sample count to be shorter than the header reports.
+        # If we don't correct this, crop positions calculated from the inflated
+        # total_samples will run past the end of preloaded_mix, producing
+        # empty NumPy slices that pydub encodes as 1-2KB stub MP3 files.
+        actual_decoded_samples = preloaded_mix.shape[0]
+        if actual_decoded_samples != total_samples:
+            logger.info(
+                f"  Sample count: metadata={total_samples}, decoded={actual_decoded_samples}"
+                f" — using decoded length to avoid empty crop slices"
+            )
+            total_samples = actual_decoded_samples
+            duration_sec = total_samples / sr
     else:
         if stem_paths:
             logger.info(f"Found {len(stem_paths)} stems (lossless: seek-read per crop)")
@@ -1285,6 +1311,13 @@ def create_crops_for_file(folder_path: Path,
         # Read crop segment (from RAM if preloaded, else seeked read from disk)
         if preloaded_mix is not None:
             crop_audio = preloaded_mix[actual_start_sample:actual_end_sample].copy()
+            if crop_audio.shape[0] == 0:
+                # Slice landed past the end of the decoded audio — stop here.
+                logger.warning(
+                    f"Empty crop slice at sample {actual_start_sample}–{actual_end_sample} "
+                    f"(decoded mix has {len(preloaded_mix)} samples). Stopping crop loop."
+                )
+                break
         else:
             try:
                 crop_audio, _ = seeked_read(full_mix_path, actual_start_sample, n_frames)

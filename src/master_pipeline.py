@@ -133,6 +133,8 @@ class MasterPipelineConfig:
     skip_spectral: bool = False
     skip_chroma: bool = False
     skip_timbral: bool = False
+    skip_syncopation: bool = False
+    skip_complexity: bool = False
     skip_essentia: bool = False
     essentia_genre: bool = True
     essentia_mood: bool = True
@@ -145,6 +147,8 @@ class MasterPipelineConfig:
         'peak_threshold': -20.0,
     })
     skip_audiobox: bool = False
+    skip_per_stem_rhythm: bool = False
+    skip_per_stem_harmonic: bool = False
     skip_per_stem: bool = False
 
     # Music Flamingo
@@ -287,6 +291,8 @@ class MasterPipelineConfig:
             skip_spectral=not features.get('spectral', True),
             skip_chroma=not features.get('chroma', True),
             skip_timbral=not features.get('timbral', True),
+            skip_syncopation=not features.get('syncopation', True),
+            skip_complexity=not features.get('complexity', True),
             skip_essentia=not features.get('essentia', True),
             essentia_genre=features.get('essentia_genre', True),
             essentia_mood=features.get('essentia_mood', True),
@@ -299,6 +305,8 @@ class MasterPipelineConfig:
                 'peak_threshold': float(vocal_content.get('peak_threshold', -20.0)),
             },
             skip_audiobox=not features.get('audiobox', True),
+            skip_per_stem_rhythm=not features.get('per_stem_rhythm', True),
+            skip_per_stem_harmonic=not features.get('per_stem_harmonic', True),
             skip_per_stem=not features.get('per_stem', True),
 
             # Music Flamingo
@@ -385,8 +393,12 @@ class MasterPipelineConfig:
                 'spectral': not self.skip_spectral,
                 'chroma': not self.skip_chroma,
                 'timbral': not self.skip_timbral,
+                'syncopation': not self.skip_syncopation,
+                'complexity': not self.skip_complexity,
                 'essentia': not self.skip_essentia,
                 'audiobox': not self.skip_audiobox,
+                'per_stem_rhythm': not self.skip_per_stem_rhythm,
+                'per_stem_harmonic': not self.skip_per_stem_harmonic,
                 'per_stem': not self.skip_per_stem,
             },
             'music_flamingo': {
@@ -598,11 +610,27 @@ class MasterPipeline:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
         elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
+            # Still run lightweight first-stage features — cheap CPU-only pass that
+            # fills in any keys that were newly enabled since the last run
+            # (syncopation, complexity, per_stem_rhythm, per_stem_harmonic, etc.).
+            # Each feature guards itself with should_process(), so already-present
+            # keys are skipped automatically.
+            if not self.config.skip_track_analysis:
+                folders = self._get_source_folders()
+                if folders:
+                    logger.info("[2d] First-Stage Features (catch-up pass)")
+                    self._run_first_stage_features(folders)
         elif not self.config.skip_track_analysis:
             self._run_track_analysis()
             state.mark_stage_completed('track_analysis')
             state.save()
             _flush_tunableop_results()
+            # Consolidate .INFO files into a single dataset.json for fast analysis
+            try:
+                from core.data_store import DataStore
+                DataStore.bootstrap(self.working_dir)
+            except Exception as _ds_exc:
+                logger.debug(f"DataStore.bootstrap (track): {_ds_exc}")
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
@@ -630,6 +658,16 @@ class MasterPipeline:
             state.mark_stage_completed('crop_analysis')
             state.save()
             _flush_tunableop_results()
+            # Consolidate crop .INFO files into a single dataset.json
+            try:
+                from core.data_store import DataStore
+                crops_dir = getattr(self, 'crops_dir', None)
+                if crops_dir is None:
+                    crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+                if crops_dir.exists():
+                    DataStore.bootstrap(crops_dir)
+            except Exception as _ds_exc:
+                logger.debug(f"DataStore.bootstrap (crops): {_ds_exc}")
         else:
             logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
 
@@ -1490,11 +1528,19 @@ class MasterPipeline:
         try:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
+            from rhythm.syncopation import analyze_syncopation
+            from rhythm.complexity import analyze_rhythmic_complexity
+            from rhythm.per_stem_rhythm import analyze_per_stem_rhythm
+            from harmonic.per_stem_harmonic import analyze_per_stem_harmonics
             from core.json_handler import should_process
 
             # Define output keys for each feature type
             LOUDNESS_KEYS = ['lufs', 'lra']
             SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+            SYNCOPATION_KEYS = ['syncopation', 'on_beat_ratio']
+            COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
+            PER_STEM_RHYTHM_KEYS = ['onset_density_bass', 'onset_density_other']
+            PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
 
             progress = ProgressBar(len(folders), desc="Features")
 
@@ -1510,21 +1556,58 @@ class MasterPipeline:
 
                 full_mix = stems['full_mix']
                 info_path = get_info_path(full_mix)
+                # Read .INFO once; pass to all should_process() calls to avoid
+                # repeated HDD seeks on the same file.
+                existing = read_info(info_path) if info_path.exists() else {}
                 results = {}
 
                 # Loudness - check ALL output keys
-                if should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness')):
+                if should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness'), existing=existing):
                     try:
                         results.update(analyze_file_loudness(full_mix))
                     except Exception as e:
                         logger.debug(f"Loudness failed: {e}")
 
                 # Spectral - check ALL output keys
-                if should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral')):
+                if should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral'), existing=existing):
                     try:
                         results.update(analyze_spectral_features(full_mix))
                     except Exception as e:
                         logger.debug(f"Spectral failed: {e}")
+
+                # Syncopation
+                if not self.config.skip_syncopation and should_process(info_path, SYNCOPATION_KEYS, self.config.should_overwrite('syncopation'), existing=existing):
+                    try:
+                        results.update(analyze_syncopation(folder))
+                    except FileNotFoundError:
+                        pass  # Normal if beats/onsets aren't available
+                    except Exception as e:
+                        logger.debug(f"Syncopation failed: {e}")
+
+                # Complexity
+                if not self.config.skip_complexity and should_process(info_path, COMPLEXITY_KEYS, self.config.should_overwrite('complexity'), existing=existing):
+                    try:
+                        results.update(analyze_rhythmic_complexity(folder))
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        logger.debug(f"Complexity failed: {e}")
+
+                # Per Stem Rhythm
+                if not self.config.skip_per_stem_rhythm and should_process(info_path, PER_STEM_RHYTHM_KEYS, self.config.should_overwrite('per_stem_rhythm'), existing=existing):
+                    try:
+                        res = analyze_per_stem_rhythm(folder)
+                        if res: results.update(res)
+                    except Exception as e:
+                        logger.debug(f"Per-stem rhythm failed: {e}")
+
+                # Per Stem Harmonic
+                if not self.config.skip_per_stem_harmonic and should_process(info_path, PER_STEM_HARMONIC_KEYS, self.config.should_overwrite('per_stem_harmonic'), existing=existing):
+                    try:
+                        res = analyze_per_stem_harmonics(folder)
+                        if res: results.update(res)
+                    except Exception as e:
+                        logger.debug(f"Per-stem harmonic failed: {e}")
 
                 if results:
                     safe_update(info_path, results)
@@ -1738,6 +1821,75 @@ class MasterPipeline:
 
         logger.info(progress.finish(f"{total_crops} crops created"))
 
+    # Track-level features that are not per-crop but are valid for all crops of a track.
+    # These are computed in Stage 2 and must be propagated to existing crop INFOs.
+    _TRACK_FEATURES_TO_MIGRATE = [
+        'syncopation',
+        'on_beat_ratio',
+        'rhythmic_complexity',
+        'rhythmic_evenness',
+        'onset_density_bass',
+        'onset_density_other',
+        'harmonic_movement_bass',
+        'harmonic_movement_other',
+    ]
+
+    def _migrate_track_features_to_crops(self, crops_dir: Path):
+        """
+        Copy track-level features (syncopation, complexity, per-stem rhythm/harmonic)
+        from each track's .INFO file into every crop .INFO under crops_dir.
+
+        This is a catch-up pass for crops that were created before these features were
+        added to TRANSFERRABLE_FEATURES, or when a Stage 2 re-run adds new keys.
+
+        Only writes keys that are present in the track INFO but absent in the crop INFO
+        (respects existing values, never overwrites).
+        """
+        from core.file_utils import find_crop_folders, find_crop_files
+        from core.json_handler import read_info, safe_update
+
+        keys = self._TRACK_FEATURES_TO_MIGRATE
+        migrated_crops = 0
+        skipped_folders = 0
+
+        crop_folders = find_crop_folders(crops_dir)
+        if not crop_folders:
+            return
+
+        logger.info(f"[4-pre] Migrating track features to crops ({len(crop_folders)} folders)...")
+
+        for crop_folder in crop_folders:
+            # Derive matching track folder name (crop folder == track folder name)
+            track_name = crop_folder.name
+            track_info_path = self.working_dir / track_name / f"{track_name}.INFO"
+
+            if not track_info_path.exists():
+                skipped_folders += 1
+                logger.debug(f"  No track INFO for {track_name}, skipping migration")
+                continue
+
+            track_data = read_info(track_info_path)
+            # Collect only keys that are present in track INFO
+            to_copy = {k: track_data[k] for k in keys if k in track_data}
+            if not to_copy:
+                continue
+
+            # Apply to each crop INFO that is missing any of these keys
+            for crop_file in find_crop_files(crop_folder):
+                crop_info_path = crop_file.with_suffix('.INFO')
+                if not crop_info_path.exists():
+                    continue
+                crop_data = read_info(crop_info_path)
+                missing = {k: v for k, v in to_copy.items() if k not in crop_data}
+                if missing:
+                    safe_update(crop_info_path, missing)
+                    migrated_crops += 1
+
+        if migrated_crops > 0:
+            logger.info(fmt_dim(f"    Migrated track features to {migrated_crops} crop INFOs"))
+        if skipped_folders > 0:
+            logger.debug(f"    Skipped {skipped_folders} folders (no track INFO found)")
+
     def _run_crop_analysis(self):
         """Stage 4: Analyze all crops."""
         logger.info("\n" + fmt_header("=" * 70))
@@ -1772,6 +1924,10 @@ class MasterPipeline:
             return
 
         logger.info(f"Found {len(all_crops)} crops to analyze")
+
+        # Propagate track-level features (syncopation, complexity, per-stem rhythm/harmonic)
+        # to all crop INFOs. This is idempotent: only fills in missing keys.
+        self._migrate_track_features_to_crops(crops_dir)
 
         # Check if stems exist or need Demucs
         sample_crop = all_crops[0]
