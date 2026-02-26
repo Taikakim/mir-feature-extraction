@@ -22,8 +22,9 @@ import re
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 
 try:
     from rich.console import Console, Group
@@ -99,14 +100,38 @@ class TUILogHandler(logging.Handler):
             pass
 
 
-# ── Module-level TUI-active flag (read by ProgressBar) ─────────────────────────
+# ── Module-level state (singleton reference + active flag) ────────────────────
 
 _tui_active = False
+_current_ui: Optional['PipelineUI'] = None  # set by PipelineUI.start()
+
 
 def is_tui_active() -> bool:
-    """Returns True while the TUI dashboard is running (ProgressBar uses this
-    to suppress its own inline output)."""
+    """Returns True while the TUI dashboard is running."""
     return _tui_active
+
+
+@contextmanager
+def suspend_tui_for_io() -> Generator:
+    """Context manager: temporarily suspend the TUI so interactive terminal
+    I/O (OAuth prompts, URLs, etc.) is visible to the user.
+
+    Usage::
+
+        from core.pipeline_ui import suspend_tui_for_io
+        with suspend_tui_for_io():
+            print("Visit: https://...")
+            wait_for_user_input()
+    """
+    ui = _current_ui
+    if ui is not None and ui.is_active:
+        ui.suspend()
+        try:
+            yield
+        finally:
+            ui.resume()
+    else:
+        yield
 
 
 # ── Main class ─────────────────────────────────────────────────────────────────
@@ -163,6 +188,7 @@ class PipelineUI:
         self._log_path: str = 'pipeline.log'
         self._start_time: float = time.time()
         self._tracks_total: int = 0
+        self._suspended: bool = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -214,14 +240,52 @@ class PipelineUI:
 
         self._active = True
         _tui_active = True
+        global _current_ui
+        _current_ui = self
+
+    def suspend(self):
+        """Temporarily stop the Live display so the normal terminal is visible.
+        Stops the refresh thread and exits the alternate-buffer mode.
+        Call resume() to bring the dashboard back."""
+        if not self._active or self._suspended:
+            return
+        # Stop refresh thread first
+        self._stop_event.set()
+        if self._refresh_thread:
+            self._refresh_thread.join(timeout=1.5)
+        # Exit alternate buffer
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+        self._suspended = True
+
+    def resume(self):
+        """Restart the Live display after suspend()."""
+        if not self._active or not self._suspended:
+            return
+        if self._live:
+            try:
+                self._live.start()
+            except Exception:
+                pass
+        # Restart refresh thread
+        self._stop_event.clear()
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop, daemon=True, name='PipelineUI-refresh'
+        )
+        self._refresh_thread.start()
+        self._suspended = False
 
     def stop(self):
         """Stop the TUI.  The caller should print a final summary afterwards."""
-        global _tui_active
+        global _tui_active, _current_ui
         if not self._active:
             return
 
         _tui_active = False
+        _current_ui = None
         self._stop_event.set()
         if self._refresh_thread:
             self._refresh_thread.join(timeout=2.0)

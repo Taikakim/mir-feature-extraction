@@ -55,22 +55,29 @@ def get_tidal_session():
         except Exception as e:
             logger.error(f"Failed to load Tidal session: {e}")
 
-    # Interactive OAuth device flow (runs at most once per process)
-    print("\n--- TIDAL AUTHENTICATION REQUIRED ---")
-    print("A persistent Tidal connection is needed to search for tracks.")
-    print("Please follow the link below to link this application to your Tidal account.")
-
+    # Interactive OAuth device flow (runs at most once per process).
+    # Suspend the TUI (if active) so the URL and prompts are visible.
     try:
-        session.login_oauth_simple()
-        if session.check_login():
-            print("Authentication successful! Saving session...")
-            session.save_session_to_file(str(session_file))
-            _tidal_session_cache = session
-            return session
-        else:
-            print("Authentication failed.")
-    except Exception as e:
-        print(f"Auth error: {e}")
+        from core.pipeline_ui import suspend_tui_for_io as _suspend_tui
+    except ImportError:
+        from contextlib import nullcontext as _suspend_tui
+
+    with _suspend_tui():
+        print("\n--- TIDAL AUTHENTICATION REQUIRED ---")
+        print("A persistent Tidal connection is needed to search for tracks.")
+        print("Please follow the link below to link this application to your Tidal account.")
+
+        try:
+            session.login_oauth_simple()
+            if session.check_login():
+                print("Authentication successful! Saving session...")
+                session.save_session_to_file(str(session_file))
+                _tidal_session_cache = session
+                return session
+            else:
+                print("Authentication failed.")
+        except Exception as e:
+            print(f"Auth error: {e}")
 
     # Mark as unavailable so we never prompt again this run
     _tidal_session_cache = _TIDAL_UNAVAILABLE
