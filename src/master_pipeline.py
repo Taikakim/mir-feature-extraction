@@ -601,9 +601,11 @@ class MasterPipeline:
         else:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED"))
 
-        # Stage 1c: Extract audio file metadata (MP3 tags, etc.)
-        if not skip_to_crop_analysis:
-            self._run_metadata_extraction()
+        # Stage 1c: Extract audio file metadata (ID3 tags, etc.)
+        # Always runs — has its own internal skip check ('track_metadata_artist' in .INFO).
+        # Not gated on skip_to_crop_analysis: crops may exist but ID3 data may still
+        # be missing from track .INFO files.
+        self._run_metadata_extraction()
 
         # Stage 2: Full Track Analysis (GPU: BS-RoFormer, Demucs)
         if shutdown_requested.is_set():
@@ -629,16 +631,25 @@ class MasterPipeline:
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
 
-        # Onset detection + first-stage features catch-up.
-        # Runs after any Stage 2 branch except when _run_track_analysis() already
-        # handled it.  Gated on rhythm.onsets (skip_onset_analysis).
-        # _migrate_track_features_to_crops() (Stage 4 pre-pass) then propagates
-        # fresh syncopation/complexity/per-stem values to crops.
-        if not _ran_track_analysis and not self.config.skip_onset_analysis:
+        # Catch-up pass for stages 2b/2c/2d — runs whenever _run_track_analysis()
+        # was bypassed (track_analysis: false, crops already exist, or previous run).
+        # Each sub-stage has its own guard so it's safe to call unconditionally.
+        if not _ran_track_analysis:
             folders = self._get_source_folders()
             if folders:
-                logger.info("[2b] Onset Detection (catch-up pass)")
-                self._run_onset_analysis(folders)
+                # 2b: Onset + beat detection (controlled by rhythm.onsets config)
+                if not self.config.skip_onset_analysis:
+                    logger.info("[2b] Onset Detection (catch-up pass)")
+                    self._run_onset_analysis(folders)
+
+                # 2c: Spotify / MusicBrainz lookup (controlled by metadata.enabled)
+                # Per-source skip logic inside _run_metadata_lookup() ensures
+                # rate-limited Spotify tracks are retried on future runs.
+                if not self.config.skip_metadata:
+                    logger.info("[2c] Metadata Lookup (catch-up pass)")
+                    self._run_metadata_lookup(folders)
+
+                # 2d: First-stage features (loudness, spectral, timbral, etc.)
                 logger.info("[2d] First-Stage Features (catch-up pass)")
                 self._run_first_stage_features(folders)
 
