@@ -1431,7 +1431,7 @@
         else if (svc === 'musicbrainz') { href = MBIDS[idx] ? 'https://musicbrainz.org/recording/' + MBIDS[idx] : ''; hasLink = !!MBIDS[idx]; }
         else if (svc === 'beatport') { href = 'https://www.beatport.com/search?q=' + encodeURIComponent(searchName(name)); }
         const lk = hasLink && href ? '<a class="tl-link" href="' + href + '" target="_blank">\u2197</a>' : '<span class="tl-link" style="opacity:0.3;">\u2014</span>';
-        return '<div class="tl-item" onclick="showTrackPanel(' + idx + ',[])">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
+        return '<div class="tl-item" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + idx + '];setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
       }).join('');
     }
     function clearTrackList() {

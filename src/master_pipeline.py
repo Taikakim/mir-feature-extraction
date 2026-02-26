@@ -608,6 +608,16 @@ class MasterPipeline:
 
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
+            # Still run the lightweight first-stage features catch-up so newly-enabled
+            # keys (syncopation, complexity, per-stem rhythm/harmonic) are computed on
+            # tracks even when all crops already exist and stages 1-3 are skipped.
+            # _migrate_track_features_to_crops() (Stage 4 pre-pass) then propagates
+            # the fresh track data into every crop INFO.
+            if not self.config.skip_track_analysis:
+                folders = self._get_source_folders()
+                if folders:
+                    logger.info("[2d] First-Stage Features (catch-up pass)")
+                    self._run_first_stage_features(folders)
         elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
             # Still run lightweight first-stage features — cheap CPU-only pass that
