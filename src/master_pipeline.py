@@ -448,6 +448,7 @@ class MasterPipeline:
         self.config = config
         self.stats = PipelineStats()
         self._state = None  # Set in run()
+        self.ui = None       # Set by main() when --no-ui is not passed
 
         # Determine working directory
         if config.output_dir:
@@ -566,6 +567,9 @@ class MasterPipeline:
                 logger.info(f"Indexed {len(source_folders)} tracks, "
                             f"total audio: {fmt_notification(f'{duration_mins:.1f} minutes')}")
 
+        if self.ui:
+            self.ui.set_tracks_total(len(source_folders))
+
         if crops_dir.exists() and not self.config.should_overwrite('crops'):
             # Count tracks and existing crops
             if source_folders:
@@ -592,20 +596,27 @@ class MasterPipeline:
         # Stage 1: Organization
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED (crops exist)"))
+            if self.ui: self.ui.set_stage('organize', 'skipped')
         elif state.is_stage_completed('organize') and not self.config.should_overwrite('organize'):
             logger.info(fmt_dim("\n[STAGE 1] Organization: COMPLETE (previous run)"))
+            if self.ui: self.ui.set_stage('organize', 'done')
         elif not self.config.skip_organize:
+            if self.ui: self.ui.set_stage('organize', 'running')
             self._run_organization()
+            if self.ui: self.ui.set_stage('organize', 'done')
             state.mark_stage_completed('organize')
             state.save()
         else:
             logger.info(fmt_dim("\n[STAGE 1] Organization: SKIPPED"))
+            if self.ui: self.ui.set_stage('organize', 'skipped')
 
         # Stage 1c: Extract audio file metadata (ID3 tags, etc.)
         # Always runs — has its own internal skip check ('track_metadata_artist' in .INFO).
         # Not gated on skip_to_crop_analysis: crops may exist but ID3 data may still
         # be missing from track .INFO files.
+        if self.ui: self.ui.set_stage('metadata_id3', 'running')
         self._run_metadata_extraction()
+        if self.ui: self.ui.set_stage('metadata_id3', 'done')
 
         # Stage 2: Full Track Analysis (GPU: BS-RoFormer, Demucs)
         if shutdown_requested.is_set():
@@ -614,11 +625,15 @@ class MasterPipeline:
         _ran_track_analysis = False
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED (crops exist)"))
+            if self.ui: self.ui.set_stage('track_analysis', 'skipped')
         elif state.is_stage_completed('track_analysis') and not self.config.should_overwrite('demucs'):
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: COMPLETE (previous run)"))
+            if self.ui: self.ui.set_stage('track_analysis', 'done')
         elif not self.config.skip_track_analysis:
+            if self.ui: self.ui.set_stage('track_analysis', 'running')
             self._run_track_analysis()
             _ran_track_analysis = True
+            if self.ui: self.ui.set_stage('track_analysis', 'done')
             state.mark_stage_completed('track_analysis')
             state.save()
             _flush_tunableop_results()
@@ -630,6 +645,7 @@ class MasterPipeline:
                 logger.debug(f"DataStore.bootstrap (track): {_ds_exc}")
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
+            if self.ui: self.ui.set_stage('track_analysis', 'skipped')
 
         # Catch-up pass for stages 2b/2c/2d — runs whenever _run_track_analysis()
         # was bypassed (track_analysis: false, crops already exist, or previous run).
@@ -640,18 +656,28 @@ class MasterPipeline:
                 # 2b: Onset + beat detection (controlled by rhythm.onsets config)
                 if not self.config.skip_onset_analysis:
                     logger.info("[2b] Onset Detection (catch-up pass)")
+                    if self.ui: self.ui.set_stage('onset_analysis', 'running')
                     self._run_onset_analysis(folders)
+                    if self.ui: self.ui.set_stage('onset_analysis', 'done')
+                else:
+                    if self.ui: self.ui.set_stage('onset_analysis', 'skipped')
 
                 # 2c: Spotify / MusicBrainz lookup (controlled by metadata.enabled)
                 # Per-source skip logic inside _run_metadata_lookup() ensures
                 # rate-limited Spotify tracks are retried on future runs.
                 if not self.config.skip_metadata:
                     logger.info("[2c] Metadata Lookup (catch-up pass)")
+                    if self.ui: self.ui.set_stage('metadata_lookup', 'running')
                     self._run_metadata_lookup(folders)
+                    if self.ui: self.ui.set_stage('metadata_lookup', 'done')
+                else:
+                    if self.ui: self.ui.set_stage('metadata_lookup', 'skipped')
 
                 # 2d: First-stage features (loudness, spectral, timbral, etc.)
                 logger.info("[2d] First-Stage Features (catch-up pass)")
+                if self.ui: self.ui.set_stage('first_features', 'running')
                 self._run_first_stage_features(folders)
+                if self.ui: self.ui.set_stage('first_features', 'done')
 
         # Stage 3: Create Crops
         if shutdown_requested.is_set():
@@ -659,21 +685,28 @@ class MasterPipeline:
 
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED (crops exist)"))
+            if self.ui: self.ui.set_stage('cropping', 'skipped')
         elif state.is_stage_completed('cropping') and not self.config.should_overwrite('crops'):
             logger.info(fmt_dim("\n[STAGE 3] Cropping: COMPLETE (previous run)"))
+            if self.ui: self.ui.set_stage('cropping', 'done')
         elif not self.config.skip_crops:
+            if self.ui: self.ui.set_stage('cropping', 'running')
             self._run_cropping()
+            if self.ui: self.ui.set_stage('cropping', 'done')
             state.mark_stage_completed('cropping')
             state.save()
         else:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED"))
+            if self.ui: self.ui.set_stage('cropping', 'skipped')
 
         # Stage 4: Crop Analysis (GPU: Audiobox, Essentia)
         if shutdown_requested.is_set():
             return _shutdown_exit()
 
         if not self.config.skip_crop_analysis:
+            if self.ui: self.ui.set_stage('crop_analysis', 'running')
             self._run_crop_analysis()
+            if self.ui: self.ui.set_stage('crop_analysis', 'done')
             state.mark_stage_completed('crop_analysis')
             state.save()
             _flush_tunableop_results()
@@ -689,16 +722,19 @@ class MasterPipeline:
                 logger.debug(f"DataStore.bootstrap (crops): {_ds_exc}")
         else:
             logger.info(fmt_dim("\n[STAGE 4] Crop Analysis: SKIPPED"))
+            if self.ui: self.ui.set_stage('crop_analysis', 'skipped')
 
         # Finalize timing
         self.stats.run_end_time = time.time()
         total_time = self.stats.total_time
 
-        # Print summary to console
-        self._print_summary(total_time)
-
-        # Write statistics to log file
+        # Write statistics to log file (always — goes to pipeline.log too)
         self._write_stats_log()
+
+        # Print summary to console — deferred to main() so it appears after the
+        # TUI has exited and the normal terminal has been restored.
+        if not (self.ui and self.ui.is_active):
+            self._print_summary(total_time)
 
         state.save()
         stop_shutdown_listener()
@@ -891,30 +927,37 @@ class MasterPipeline:
 
         # Sub-stage 2b: Beat/onset/downbeat detection
         logger.info("\n[2b] Rhythm Analysis (beats, onsets, downbeats)")
+        if self.ui: self.ui.set_stage('onset_analysis', 'running')
         self.stats.start_operation('rhythm')
         self._run_rhythm_analysis(folders)
         rhythm_time = self.stats.end_operation('rhythm', items_processed=len(folders),
             audio_duration=self.stats.total_audio_duration)
+        if self.ui: self.ui.set_stage('onset_analysis', 'done')
         logger.info(fmt_dim(f"    Rhythm analysis completed in {rhythm_time:.1f}s"))
 
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
         logger.info("\n[2c] Metadata Lookup")
         if self.config.skip_metadata:
             logger.info("Metadata lookup disabled in config")
+            if self.ui: self.ui.set_stage('metadata_lookup', 'skipped')
         else:
+            if self.ui: self.ui.set_stage('metadata_lookup', 'running')
             self.stats.start_operation('metadata')
             self._run_metadata_lookup(folders)
             metadata_time = self.stats.end_operation('metadata',
                 items_processed=self.stats.tracks_metadata_found)
+            if self.ui: self.ui.set_stage('metadata_lookup', 'done')
             logger.info(fmt_dim(f"    Metadata lookup completed in {metadata_time:.1f}s"))
 
         # Sub-stage 2d: First-stage features (migrated to crops)
         logger.info("\n[2d] First-Stage Features")
+        if self.ui: self.ui.set_stage('first_features', 'running')
         self.stats.start_operation('first_stage_features')
         self._run_first_stage_features(folders)
         features_time = self.stats.end_operation('first_stage_features',
             items_processed=len(folders),
             audio_duration=self.stats.total_audio_duration)
+        if self.ui: self.ui.set_stage('first_features', 'done')
         logger.info(fmt_dim(f"    First-stage features completed in {features_time:.1f}s"))
 
         self.stats.time_track_analysis = time.time() - start_time
@@ -993,6 +1036,9 @@ class MasterPipeline:
                 logger.info("Shutdown requested — stopping stem separation.")
                 break
 
+            if self.ui:
+                self.ui.set_current(file=folder.name, operation='Stem separation',
+                                    done=i - 1, total=len(tracks_to_process))
             logger.info(f"[{i}/{len(tracks_to_process)}] Processing: {folder.name}")
             try:
                 separate_organized_folder(
@@ -1279,6 +1325,7 @@ class MasterPipeline:
         3. Fingerprinting (only as last resort, if use_fingerprinting is True)
         """
         from core.file_utils import get_stem_files
+        from core.graceful_shutdown import shutdown_requested
 
         # Check which tracks need metadata lookup
         tracks_needing_lookup = []
@@ -1367,6 +1414,10 @@ class MasterPipeline:
             sp = init_spotify() if self.config.use_spotify else None
 
             for track_info in tracks_needing_lookup:
+                if shutdown_requested.is_set():
+                    logger.info("Metadata lookup: shutdown requested, stopping.")
+                    break
+
                 folder = track_info['folder']
                 artist = track_info['artist']
                 track_name = track_info['track']
@@ -1453,10 +1504,6 @@ class MasterPipeline:
                             info_data['genres'] = result['genres']
                         if result.get('popularity') is not None:
                             info_data['popularity'] = result['popularity']
-                        if result.get('album'):
-                            info_data['album'] = result['album']
-
-                        # Album
                         if result.get('album'):
                             info_data['album'] = result['album']
 
@@ -2169,7 +2216,18 @@ class MasterPipeline:
             )
 
             pipeline = Pipeline(config)
+
+            # Give the UI refresh thread a live window into crop progress
+            all_crop_files = list(find_crop_files(crops_dir)) if crops_dir.exists() else []
+            if self.ui:
+                self.ui.set_current(file='', operation='Crop feature extraction',
+                                    done=0, total=len(all_crop_files))
+                self.ui.set_crop_progress_source(pipeline.stats, len(all_crop_files))
+
             pipeline.run()
+
+            if self.ui:
+                self.ui.set_crop_progress_source(None, 0)
 
             self.stats.crops_analyzed = pipeline.stats.get('crops_processed', 0)
 
@@ -2421,6 +2479,8 @@ Config file template: config/master_pipeline.yaml
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--feature-workers', type=int,
                         help='Number of parallel workers for feature extraction (default: 8)')
+    parser.add_argument('--no-ui', action='store_true',
+                        help='Disable TUI dashboard — use plain coloured stdout logging instead')
 
     # Generate config template
     parser.add_argument('--generate-config', type=str, metavar='PATH',
@@ -2510,18 +2570,45 @@ Config file template: config/master_pipeline.yaml
     if args.feature_workers is not None:
         config.feature_workers = args.feature_workers
 
-    setup_colored_logging(level=logging.DEBUG if config.verbose else logging.INFO)
-    # Suppress pydub's verbose ffmpeg subprocess logging
-    logging.getLogger("pydub.converter").setLevel(logging.WARNING)
+    log_level = logging.DEBUG if config.verbose else logging.INFO
 
-    # Validate input
+    # Validate input before starting TUI (so errors appear on stdout)
     if not config.input_dir or not config.input_dir.exists():
+        setup_colored_logging(level=log_level)
         logger.error(f"Input path does not exist: {config.input_dir}")
         sys.exit(1)
 
-    # Run pipeline
+    # Suppress pydub's verbose ffmpeg subprocess logging
+    logging.getLogger("pydub.converter").setLevel(logging.WARNING)
+
+    # Create pipeline
     pipeline = MasterPipeline(config)
+
+    if not getattr(args, 'no_ui', False):
+        # TUI mode: redirect logging to file, show dashboard
+        try:
+            from core.pipeline_ui import PipelineUI
+            ui = PipelineUI(stats=pipeline.stats)
+            log_path = (config.output_dir or config.input_dir) / 'pipeline.log'
+            config_label = Path(args.config).name if args.config else ''
+            setup_colored_logging(level=log_level)  # set root level
+            ui.start(config_name=config_label, log_path=log_path)
+            pipeline.ui = ui
+        except Exception as _ui_err:
+            # Fall back gracefully if TUI fails to start
+            setup_colored_logging(level=log_level)
+            logger.warning(f'TUI startup failed ({_ui_err}), using plain logging')
+    else:
+        # Plain coloured logging
+        setup_colored_logging(level=log_level)
+
+    # Run pipeline
     stats = pipeline.run()
+
+    # Stop TUI — restores the normal terminal, then print summary
+    if pipeline.ui and pipeline.ui.is_active:
+        pipeline.ui.stop()
+        pipeline._print_summary(stats.total_time)
 
     # Exit code
     sys.exit(1 if stats.errors else 0)
