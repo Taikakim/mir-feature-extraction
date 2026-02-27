@@ -101,7 +101,7 @@ def init_spotify() -> Optional[object]:
         return spotipy.Spotify(auth_manager=SpotifyClientCredentials(
             client_id=client_id,
             client_secret=client_secret
-        ), requests_timeout=10, retries=3)
+        ), requests_timeout=10, retries=0)
     except Exception as e:
         logger.error(f"Failed to initialize Spotify: {e}")
         return None
@@ -358,6 +358,8 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
         return best_result
         
     except Exception as e:
+        if getattr(e, 'http_status', None) == 429:
+            raise  # Propagate rate-limit so caller can disable Spotify for this run
         logger.debug(f"Spotify search failed for '{track_name}': {e}")
         return None
 

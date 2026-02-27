@@ -20,7 +20,7 @@ Provides safe JSON read/write operations for `.INFO` files.
 - `write_info(file_path, data, merge=True)` - Write to .INFO with optional merge
 - `safe_update(file_path, updates)` - Atomic merge of new keys into .INFO file
 - `get_info_path(audio_file)` - Get .INFO path for an audio file
-- `should_process(info_path, keys, overwrite)` - Check if feature extraction is needed
+- `should_process(info_path, keys, overwrite, existing=None)` - Check if feature extraction is needed; pass `existing` dict to skip disk read
 
 Note: `.MIR` file functions (`read_mir`, `write_mir`, `get_mir_path`) exist but are unused.
 

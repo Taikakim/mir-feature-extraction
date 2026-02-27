@@ -1298,6 +1298,7 @@ class MasterPipeline:
 
         success = skipped = failed = 0
         progress = ProgressBar(len(folders), desc="Rhythm")
+        _rhythm_start = time.time()
 
         if num_workers <= 1:
             for i, args in enumerate(args_list, 1):
@@ -1310,6 +1311,13 @@ class MasterPipeline:
                     failed += 1
                     if msg:
                         logger.debug(f"Rhythm {folder_name}: {msg}")
+                if self.ui:
+                    elapsed = time.time() - _rhythm_start
+                    rate = i / elapsed if elapsed > 0.5 else 0.0
+                    self.ui.set_current(
+                        file=folder_name, operation='Beat detection',
+                        done=i, total=len(folders), rate=rate,
+                    )
                 logger.info(progress.update(i))
         else:
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -1325,6 +1333,13 @@ class MasterPipeline:
                         failed += 1
                         if msg:
                             logger.debug(f"Rhythm {folder_name}: {msg}")
+                    if self.ui:
+                        elapsed = time.time() - _rhythm_start
+                        rate = i / elapsed if elapsed > 0.5 else 0.0
+                        self.ui.set_current(
+                            file=folder_name, operation='Beat detection',
+                            done=i, total=len(folders), rate=rate,
+                        )
                     logger.info(progress.update(i))
 
         logger.info(progress.finish(
@@ -1426,8 +1441,10 @@ class MasterPipeline:
             import soundfile as sf_mod
 
             sp = init_spotify() if self.config.use_spotify else None
+            n_total = len(tracks_needing_lookup)
+            _meta_start = time.time()
 
-            for track_info in tracks_needing_lookup:
+            for _meta_i, track_info in enumerate(tracks_needing_lookup, 1):
                 if shutdown_requested.is_set():
                     logger.info("Metadata lookup: shutdown requested, stopping.")
                     break
@@ -1436,6 +1453,19 @@ class MasterPipeline:
                 artist = track_info['artist']
                 track_name = track_info['track']
                 source = track_info['source']
+
+                if self.ui:
+                    elapsed = time.time() - _meta_start
+                    rate = _meta_i / elapsed if elapsed > 0.5 else 0.0
+                    self.ui.set_current(
+                        file=folder.name,
+                        operation='Metadata lookup',
+                        done=_meta_i,
+                        total=n_total,
+                        rate=rate,
+                    )
+                    if rate > 0:
+                        self.ui.set_feature_rate('Metadata', rate)
 
                 # Get local file duration and existing year for scoring
                 local_duration = None
@@ -1470,25 +1500,36 @@ class MasterPipeline:
 
                 result = None
 
-                if source in ('id3', 'folder'):
-                    result = lookup_track(track_name, artist_hint=artist, **lookup_kwargs)
-                    if result:
-                        logger.debug(f"  {folder.name}: Found via {source} tags")
-                else:
-                    if track_name:
-                        result = lookup_track(track_name, artist_hint=None, **lookup_kwargs)
+                try:
+                    if source in ('id3', 'folder'):
+                        result = lookup_track(track_name, artist_hint=artist, **lookup_kwargs)
+                        if result:
+                            logger.debug(f"  {folder.name}: Found via {source} tags")
+                    else:
+                        if track_name:
+                            result = lookup_track(track_name, artist_hint=None, **lookup_kwargs)
 
-                    if not result and self.config.use_fingerprinting:
-                        logger.debug(f"  {folder.name}: Trying fingerprinting (last resort)...")
-                        fp_result = self._fingerprint_track(folder)
-                        if fp_result:
-                            result = lookup_track(
-                                fp_result.get('track', ''),
-                                artist_hint=fp_result.get('artist'),
-                                **lookup_kwargs,
-                            )
-                            if result:
-                                logger.debug(f"  {folder.name}: Found via fingerprinting")
+                        if not result and self.config.use_fingerprinting:
+                            logger.debug(f"  {folder.name}: Trying fingerprinting (last resort)...")
+                            fp_result = self._fingerprint_track(folder)
+                            if fp_result:
+                                result = lookup_track(
+                                    fp_result.get('track', ''),
+                                    artist_hint=fp_result.get('artist'),
+                                    **lookup_kwargs,
+                                )
+                                if result:
+                                    logger.debug(f"  {folder.name}: Found via fingerprinting")
+                except Exception as _e:
+                    if getattr(_e, 'http_status', None) == 429:
+                        logger.warning(
+                            "Spotify rate limit hit — disabling Spotify for this session. "
+                            "Affected tracks will be retried next run."
+                        )
+                        sp = None
+                        lookup_kwargs['sp'] = None
+                    else:
+                        logger.warning(f"  {folder.name}: lookup_track error: {_e}")
 
                 # Always mark that we attempted lookup (prevents re-querying on restart)
                 stems = get_stem_files(folder, include_full_mix=True)
@@ -1655,6 +1696,7 @@ class MasterPipeline:
         success_count = 0
         fail_count = 0
         progress = ProgressBar(len(folders), desc="Features")
+        _feat_start = time.time()
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit all tasks
@@ -1678,8 +1720,20 @@ class MasterPipeline:
                         fail_count += 1
                         logger.warning(f"{folder_name}: {message}")
                 except Exception as e:
+                    folder_name = folder.name
                     fail_count += 1
-                    logger.error(f"{folder.name}: {e}")
+                    logger.error(f"{folder_name}: {e}")
+
+                if self.ui:
+                    elapsed = time.time() - _feat_start
+                    rate = i / elapsed if elapsed > 0.5 else 0.0
+                    self.ui.set_current(
+                        file=folder_name,
+                        operation='Feature extraction',
+                        done=i,
+                        total=len(folders),
+                        rate=rate,
+                    )
 
                 # Progress bar update
                 logger.info(progress.update(i))
@@ -1709,11 +1763,23 @@ class MasterPipeline:
             PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
 
             progress = ProgressBar(len(folders), desc="Features")
+            _feat_start = time.time()
 
             for i, folder in enumerate(folders, 1):
                 if shutdown_requested.is_set():
                     logger.info("Shutdown requested — stopping feature extraction.")
                     break
+
+                if self.ui:
+                    elapsed = time.time() - _feat_start
+                    rate = i / elapsed if elapsed > 0.5 else 0.0
+                    self.ui.set_current(
+                        file=folder.name,
+                        operation='Feature extraction',
+                        done=i - 1,
+                        total=len(folders),
+                        rate=rate,
+                    )
 
                 stems = get_stem_files(folder, include_full_mix=True)
                 if 'full_mix' not in stems:

@@ -241,15 +241,15 @@
     /* Lasso select sidebar */
     .sel-panel {
       position: fixed;
-      right: 0;
+      left: 0;
       top: 50%;
       transform: translateY(-50%);
       width: 240px;
       max-height: 60vh;
       background: rgba(15, 20, 40, 0.97);
       border: 1px solid #333355;
-      border-right: none;
-      border-radius: 8px 0 0 8px;
+      border-left: none;
+      border-radius: 0 8px 8px 0;
       padding: 10px;
       overflow-y: auto;
       z-index: 200;
@@ -380,6 +380,51 @@
       min-height: 0;
     }
 
+    #sim-search-container {
+      position: relative;
+      min-width: 250px;
+    }
+
+    #sim-search {
+      width: 100%;
+      padding: 4px 6px;
+      background: #0f3460;
+      color: #e0e0e0;
+      border: 1px solid #333355;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+
+    #sim-search-results {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      width: 100%;
+      max-height: 300px;
+      overflow-y: auto;
+      background: #1a2040;
+      border: 1px solid #333355;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      z-index: 1000;
+      display: none;
+    }
+
+    .sim-search-item {
+      padding: 6px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      border-bottom: 1px solid #222244;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sim-search-item:hover {
+      background: #0f3460;
+      color: white;
+    }
+
     #track-list-panel {
       width: 220px;
       flex-shrink: 0;
@@ -478,6 +523,55 @@
       border-radius: 4px;
       font-size: 11px;
     }
+
+    #caption-popup {
+      position: fixed;
+      bottom: 46px;
+      left: 14px;
+      width: 420px;
+      max-height: 50vh;
+      background: rgba(15, 20, 40, 0.97);
+      border: 1px solid #333355;
+      border-radius: 8px;
+      padding: 12px 14px;
+      z-index: 400;
+      font-size: 11px;
+      color: #bbb;
+      overflow-y: auto;
+      display: none;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+    }
+
+    #caption-popup h4 {
+      font-size: 13px;
+      color: #e94560;
+      margin: 0 0 8px;
+    }
+
+    .cap-section {
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #1a2040;
+    }
+
+    .cap-section:last-child {
+      border-bottom: none;
+    }
+
+    .cap-label {
+      font-size: 10px;
+      color: #00d2ff;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .cap-text {
+      font-size: 11px;
+      color: #ccc;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 
@@ -494,6 +588,7 @@
         <button class="mode-btn" id="btn-heatmap" onclick="setMode('heatmap')">Heatmap</button>
         <button class="mode-btn" id="btn-parallel" onclick="setMode('parallel')">Parallel</button>
         <button class="mode-btn" id="btn-similarity" onclick="setMode('similarity')">Similarity</button>
+        <button class="mode-btn" id="btn-classes" onclick="setMode('classes')">Classes</button>
       </div>
     </div>
     <!-- Scatter X -->
@@ -554,7 +649,11 @@
     <!-- Similarity: reference track -->
     <div class="control-group" id="sim-ref-group" style="display:none">
       <label>Reference Track</label>
-      <select id="sel-sim-ref" onchange="updatePlot()" style="min-width:200px;"></select>
+      <div id="sim-search-container">
+        <input type="text" id="sim-search" placeholder="Type 3+ chars to search..." autocomplete="off">
+        <div id="sim-search-results"></div>
+      </div>
+      <select id="sel-sim-ref" onchange="updatePlot()" style="display:none;"></select>
     </div>
     <!-- Similarity: axis features -->
     <div class="control-group" id="sim-xp-group" style="display:none">
@@ -573,6 +672,11 @@
       <label>Y&#8722; Feature</label>
       <select id="sim-yn" onchange="updatePlot()"></select>
     </div>
+    <!-- Classes -->
+    <div class="control-group" id="cls-by-group" style="display:none">
+      <label>Color By Class</label>
+      <select id="cls-by" onchange="updatePlot()"></select>
+    </div>
     <!-- Right-side group -->
     <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
       <div id="trend-group">
@@ -580,8 +684,16 @@
           <input type="checkbox" id="chk-trend" checked onchange="updatePlot()"> Trendline
         </label>
       </div>
+      <div id="cls-trend-group" style="display:none">
+        <label class="chk-label" title="Show OLS trendlines per class">
+          <input type="checkbox" id="chk-class-trend" onchange="updatePlot()"> Class Trends
+        </label>
+      </div>
       <label class="chk-label" title="Show only the 31 most interpretable features">
         <input type="checkbox" id="chk-curated" onchange="toggleCurated()"> Hide confusing stuff
+      </label>
+      <label class="chk-label" id="captions-group" title="Show AI captions on hover (loads 8MB data)">
+        <input type="checkbox" id="chk-captions" onchange="toggleCaptions()"> Captions
       </label>
       <button class="mode-btn" id="formula-toggle" onclick="toggleFormula()">&#x1f9ea; Methods</button>
     </div>
@@ -641,16 +753,21 @@
     </div>
   </div>
 
+  <div id="caption-popup"></div>
+
   <script src="feature_explorer_data.js"></script>
+  <script src="feature_explorer_classes.js"></script>
   <script>
     const CURATED = [
       'atonality', 'booming', 'bpm', 'brightness',
       'content_enjoyment', 'content_usefulness', 'danceability', 'depth', 'hardness',
       'lra', 'lufs', 'lufs_bass', 'lufs_drums', 'lufs_other', 'lufs_vocals',
+      'on_beat_ratio', 'onset_density',
       'popularity', 'production_complexity', 'production_quality', 'release_year', 'reverberation',
+      'rhythmic_complexity', 'rhythmic_evenness',
       'rms_energy_air', 'rms_energy_bass', 'rms_energy_body', 'rms_energy_mid',
       'roughness', 'sharpness', 'spectral_flatness', 'spectral_flux', 'spectral_kurtosis',
-      'spectral_skewness', 'warmth'
+      'spectral_skewness', 'syncopation', 'warmth'
     ];
 
     let mode = 'scatter';
@@ -782,6 +899,9 @@
         if (kxn) entries.push(renderMethodEntry('X\u2212', kxn));
         if (kyp) entries.push(renderMethodEntry('Y+', kyp));
         if (kyn) entries.push(renderMethodEntry('Y\u2212', kyn));
+      } else if (mode === 'classes') {
+        const ck = document.getElementById('cls-by').value || '';
+        lines.push('<span class="feat">Classes: ' + ck.replace(/_/g, ' ') + '</span> \u2014 <span class="desc">Scatter colored by categorical class. Top 20 classes shown (rest grouped as "other"). Click a point to view its Radar.</span>');
       }
       box.innerHTML = lines.join('<br>');
       panel.innerHTML = '<h3>\u{1F9EA} Feature Methods</h3>' + (entries.length ? entries.join('') : '<p style="color:#666;font-size:11px;padding:4px 0;">No per-feature methods for this mode.</p>');
@@ -825,10 +945,23 @@
 
       // Track selects
       ['sel-radar-track', 'sel-sim-ref'].forEach(id => setOpts(id, TRACKS, null, null));
+      if (TRACKS && TRACKS.length > 0 && !globalActiveTrack) {
+        globalActiveTrack = TRACKS[0];
+      }
+      syncTrackSelects();
 
       // NN feature selects (always curated)
       const nnDef = ['bpm', 'lufs', 'brightness', 'warmth', 'danceability'];
       for (let i = 1; i <= 5; i++) setOpts('nn-f' + i, cf, null, nnDef[i - 1]);
+
+      // Class-by dropdown (from CLASSES keys)
+      const cbSel = document.getElementById('cls-by');
+      if (cbSel && typeof CLASSES !== 'undefined') {
+        const prev = cbSel.value;
+        cbSel.innerHTML = '';
+        Object.keys(CLASSES).forEach(k => { const o = document.createElement('option'); o.value = k; o.textContent = k.replace(/_/g, ' '); cbSel.appendChild(o); });
+        if (prev && [...cbSel.options].some(o => o.value === prev)) cbSel.value = prev;
+      }
 
       if (_firstPop && df.length > 1) {
         _firstPop = false;
@@ -850,12 +983,12 @@
     // ---- setMode ---------------------------------------------------------------
     function setMode(m) {
       mode = m;
-      ['scatter', 'quadrant', 'histogram', 'radar', 'heatmap', 'parallel', 'similarity'].forEach(n => {
+      ['scatter', 'quadrant', 'histogram', 'radar', 'heatmap', 'parallel', 'similarity', 'classes'].forEach(n => {
         document.getElementById('btn-' + n).className = 'mode-btn' + (n === m ? ' active' : '');
       });
       const V = {
-        'scatter-controls': m === 'scatter',
-        'scatter-controls-y': m === 'scatter',
+        'scatter-controls': m === 'scatter' || m === 'classes',
+        'scatter-controls-y': m === 'scatter' || m === 'classes',
         'colormode-group': m === 'scatter' || m === 'quadrant',
         'quad-xp': m === 'quadrant',
         'quad-xn': m === 'quadrant',
@@ -868,7 +1001,9 @@
         'sim-xn-group': m === 'similarity',
         'sim-yp-group': m === 'similarity',
         'sim-yn-group': m === 'similarity',
+        'cls-by-group': m === 'classes',
         'trend-group': m === 'scatter',
+        'cls-trend-group': m === 'classes',
       };
       Object.entries(V).forEach(([id, show]) => {
         const el = document.getElementById(id);
@@ -936,6 +1071,7 @@
       else if (mode === 'heatmap') updateHeatmap();
       else if (mode === 'parallel') updateParallel();
       else if (mode === 'similarity') updateSimilarity();
+      else if (mode === 'classes') updateClasses();
     }
 
     // ---- SCATTER ---------------------------------------------------------------
@@ -1159,46 +1295,145 @@
     }
 
     // ---- RADAR -----------------------------------------------------------------
+    let _radarSelections = new Set(); // e.g., 'bpm_0', 'bpm_1'
+
     function updateRadar() {
-      const tName = document.getElementById('sel-radar-track').value;
-      const tIdx = TRACKS.indexOf(tName);
+      const tIdx = TRACKS.indexOf(globalActiveTrack);
       if (tIdx < 0) return;
       const cf = CURATED.filter(f => FEATURES.includes(f) && DATA[f][tIdx] !== null && isFinite(DATA[f][tIdx]));
       if (!cf.length) return;
-      const normV = cf.map(f => {
-        const valid = DATA[f].filter(v => v !== null && isFinite(v));
-        const mn = Math.min(...valid), mx = Math.max(...valid);
-        return mx - mn < 1e-10 ? 0.5 : (DATA[f][tIdx] - mn) / (mx - mn);
-      });
-      const normM = cf.map(f => {
-        const valid = DATA[f].filter(v => v !== null && isFinite(v));
-        const mn = Math.min(...valid), mx = Math.max(...valid), m = mean(valid);
-        return mx - mn < 1e-10 ? 0.5 : (m - mn) / (mx - mn);
-      });
+
+      const rInner = [], rMid = [], rOuter = [];
+      const cInner = [], cMid = [], cOuter = [];
+      const hInner = [], hMid = [], hOuter = [];
+      const lInner = [], lMid = [], lOuter = [];
+      const wInner = [], wMid = [], wOuter = [];
+
       const labels = cf.map(shortLabel);
-      const barColors = normV.map((v, i) => v >= normM[i] ? '#e94560' : '#00d2ff');
-      const borderColors = cf.map(f => _radarSelected.has(f) ? '#ffd700' : 'rgba(0,0,0,0.3)');
-      const borderWidths = cf.map(f => _radarSelected.has(f) ? 2.5 : 0.5);
+      const filterStrings = [];
+      const filterRanges = {};
+
+      cf.forEach((f, i) => {
+        const valid = DATA[f].filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
+        const mn = valid[Math.floor(valid.length * 0.01)] || Math.min(...valid);
+        const mx = valid[Math.floor(valid.length * 0.99)] || Math.max(...valid);
+
+        const rawM = mean(valid);
+        const rawT = DATA[f][tIdx];
+
+        const clmp = x => Math.max(0, Math.min(1, (x - mn) / (mx - mn)));
+        const normM = clmp(rawM);
+        const normT = clmp(rawT);
+
+        const tGtM = rawT >= rawM;
+        const v1 = Math.min(normT, normM);
+        const v2 = Math.max(normT, normM);
+
+        rInner.push(v1);
+        rMid.push(v2 - v1);
+        rOuter.push(1.0 - v2);
+
+        const u = UNITS[f] && UNITS[f] !== '-' ? UNITS[f] : '';
+        const fmt = x => x.toFixed(2) + (u ? ' ' + u : '');
+
+        const sel0 = _radarSelections.has(f + '_0');
+        const sel1 = _radarSelections.has(f + '_1');
+        const sel2 = _radarSelections.has(f + '_2');
+
+        if (tGtM) {
+          cInner.push('rgba(233, 69, 96, 0.4)');
+          cMid.push('rgba(233, 69, 96, 0.9)');
+          hInner.push(`Below Mean (< ${fmt(rawM)})`);
+          hMid.push(`Above Mean, Below Track (${fmt(rawM)} to ${fmt(rawT)})`);
+        } else {
+          cInner.push('rgba(0, 210, 255, 0.9)');
+          cMid.push('rgba(180, 180, 180, 0.3)');
+          hInner.push(`Below Track (< ${fmt(rawT)})`);
+          hMid.push(`Above Track, Below Mean (${fmt(rawT)} to ${fmt(rawM)})`);
+        }
+        cOuter.push('rgba(255, 255, 255, 0.04)');
+        hOuter.push(`Above ${tGtM ? 'Track' : 'Mean'} (> ${fmt(Math.max(rawT, rawM))})`);
+
+        lInner.push(sel0 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wInner.push(sel0 ? 2 : 0.5);
+        lMid.push(sel1 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wMid.push(sel1 ? 2 : 0.5);
+        lOuter.push(sel2 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wOuter.push(sel2 ? 2 : 0.5);
+
+        if (sel0 || sel1 || sel2) {
+          let low = -Infinity, high = Infinity;
+          const b1 = Math.min(rawT, rawM);
+          const b2 = Math.max(rawT, rawM);
+          if (sel0 && sel1 && sel2) { }
+          else if (sel0 && sel1) { high = b2; }
+          else if (sel1 && sel2) { low = b1; }
+          else if (sel0 && sel2) { }
+          else if (sel0) { high = b1; }
+          else if (sel1) { low = b1; high = b2; }
+          else if (sel2) { low = b2; }
+
+          filterRanges[f] = { low, high, sel0, sel1, sel2, b1, b2 };
+
+          let text = shortLabel(f) + ' ';
+          if (sel0 && !sel1 && !sel2) text += `< ${fmt(b1)}`;
+          else if (!sel0 && sel1 && !sel2) text += `[${fmt(b1)} to ${fmt(b2)}]`;
+          else if (!sel0 && !sel1 && sel2) text += `> ${fmt(b2)}`;
+          else if (sel0 && sel1 && !sel2) text += `< ${fmt(b2)}`;
+          else if (!sel0 && sel1 && sel2) text += `> ${fmt(b1)}`;
+          else if (sel0 && !sel1 && sel2) text += `< ${fmt(b1)} OR > ${fmt(b2)}`;
+
+          filterStrings.push(`<span style="background:rgba(255,215,0,0.2);padding:2px 4px;border-radius:3px;">${text}</span>`);
+        }
+      });
+
+      if (Object.keys(filterRanges).length > 0) {
+        const fd = [];
+        for (let t = 0; t < TRACKS.length; t++) {
+          if (t === tIdx) continue;
+          let match = true;
+          for (const [f, bounds] of Object.entries(filterRanges)) {
+            const v = DATA[f][t];
+            if (v === null || !isFinite(v)) { match = false; break; }
+            if (bounds.sel0 && !bounds.sel1 && bounds.sel2) {
+              if (v >= bounds.b1 && v <= bounds.b2) { match = false; break; }
+            } else {
+              if (v < bounds.low || v > bounds.high) { match = false; break; }
+            }
+          }
+          if (match) fd.push(t);
+        }
+        populateTrackList(fd.slice(0, 150));
+      } else {
+        clearTrackList();
+      }
+
       Plotly.react('plot', [
         {
-          type: 'barpolar', r: normV, theta: labels,
-          marker: { color: barColors, opacity: 0.8, line: { color: borderColors, width: borderWidths } }, name: tName
+          type: 'barpolar', r: rInner, theta: labels, name: 'Inner',
+          marker: { color: cInner, line: { color: lInner, width: wInner } }, hovertext: hInner, hoverinfo: 'text'
         },
         {
-          type: 'barpolar', r: normM, theta: labels,
-          marker: { color: 'rgba(180,180,180,0.12)', line: { color: '#556', width: 1 } }, name: 'dataset mean'
-        }
+          type: 'barpolar', r: rMid, theta: labels, name: 'Mid',
+          marker: { color: cMid, line: { color: lMid, width: wMid } }, hovertext: hMid, hoverinfo: 'text'
+        },
+        {
+          type: 'barpolar', r: rOuter, theta: labels, name: 'Outer',
+          marker: { color: cOuter, line: { color: lOuter, width: wOuter } }, hovertext: hOuter, hoverinfo: 'text'
+        },
       ], {
-        title: { text: 'Feature Radar: ' + tName, font: { size: 14 } },
+        title: { text: 'Feature Radar: ' + globalActiveTrack, font: { size: 14 } },
         polar: {
-          radialaxis: { visible: true, range: [0, 1.15], tickfont: { size: 9 }, gridcolor: '#333355' },
+          barmode: 'stack',
+          radialaxis: { visible: true, showticklabels: false, range: [0, 1.0], gridcolor: '#333355' },
           angularaxis: { tickfont: { size: 10 }, gridcolor: '#333355' }, bgcolor: '#16213e'
         },
         template: 'plotly_dark', paper_bgcolor: '#1a1a2e', font: { color: '#cccccc' },
-        showlegend: true, legend: { x: 0.82, y: 0.98, bgcolor: 'rgba(15,52,96,0.8)' },
+        showlegend: false,
         margin: { t: 60, b: 30, l: 30, r: 30 }
       }, { responsive: true });
-      document.getElementById('info-bar').textContent = 'Radar: ' + tName + ' | ' + cf.length + ' features' + (_radarSelected.size ? ' | selected: ' + [..._radarSelected].join(', ') : '');
+
+      let infoHtml = `Radar: <b>${globalActiveTrack}</b> | Click bars to toggle region filters`;
+      if (filterStrings.length > 0) infoHtml += ` | ` + filterStrings.join(' ');
+      document.getElementById('info-bar').innerHTML = infoHtml;
+
       handleRadarClick();
     }
 
@@ -1281,7 +1516,7 @@
 
     // ---- SIMILARITY ------------------------------------------------------------
     function updateSimilarity() {
-      const refName = document.getElementById('sel-sim-ref').value;
+      const refName = globalActiveTrack;
       const refIdx = TRACKS.indexOf(refName);
       if (refIdx < 0) return;
       const kxp = document.getElementById('sim-xp').value;
@@ -1458,41 +1693,232 @@
     }
 
     // ---- Radar multi-select -----------------------------------------------------
-    let _radarSelected = new Set();
     function handleRadarClick() {
-      document.getElementById('plot').on('plotly_click', function (d) {
-        if (d.points && d.points.length > 0 && d.points[0].curveNumber === 0) {
-          const label = d.points[0].theta;
-          const tName = document.getElementById('sel-radar-track').value;
-          const tIdx = TRACKS.indexOf(tName);
+      const pd = document.getElementById('plot');
+      pd.removeAllListeners('plotly_click');
+      pd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const label = pt.theta;
+          const curveIdx = pt.curveNumber; // 0=Inner, 1=Mid, 2=Outer
+          if (!label || curveIdx > 2) return;
+
+          const tIdx = TRACKS.indexOf(globalActiveTrack);
           if (tIdx < 0) return;
           const cf = CURATED.filter(f => FEATURES.includes(f) && DATA[f][tIdx] !== null && isFinite(DATA[f][tIdx]));
           const fIdx = cf.map(shortLabel).indexOf(label);
           if (fIdx < 0) return;
           const feat = cf[fIdx];
-          if (_radarSelected.has(feat)) _radarSelected.delete(feat); else _radarSelected.add(feat);
-          if (_radarSelected.size > 0) {
-            const sf = [..._radarSelected], rv = sf.map(f => DATA[f][tIdx]);
-            const rng = sf.map(f => { const v = DATA[f].filter(x => x !== null && isFinite(x)); return { min: Math.min(...v), max: Math.max(...v) }; });
-            const rn = sf.map((f, i) => { const v = rv[i]; if (v === null) return 0.5; const r = rng[i]; return r.max - r.min < 1e-10 ? 0.5 : (v - r.min) / (r.max - r.min); });
-            const td = [];
-            for (let t = 0; t < TRACKS.length; t++) {
-              if (t === tIdx) continue; let d2 = 0, cnt = 0;
-              for (let fi = 0; fi < sf.length; fi++) {
-                const v = DATA[sf[fi]] ? DATA[sf[fi]][t] : null;
-                if (v !== null && isFinite(v) && rv[fi] !== null) { const r = rng[fi]; const vn = r.max - r.min < 1e-10 ? 0.5 : (v - r.min) / (r.max - r.min); d2 += (vn - rn[fi]) ** 2; cnt++; }
-              }
-              if (cnt > 0) td.push({ idx: t, dist: Math.sqrt(d2 / cnt) });
-            }
-            td.sort((a, b) => a.dist - b.dist);
-            populateTrackList(td.slice(0, 30).map(t => t.idx));
-          } else { clearTrackList(); }
-          document.getElementById('info-bar').textContent = 'Radar: ' + tName + ' | selected: ' + [..._radarSelected].join(', ');
+
+          const blockKey = feat + '_' + curveIdx;
+          if (_radarSelections.has(blockKey)) _radarSelections.delete(blockKey);
+          else _radarSelections.add(blockKey);
+
+          updateRadar();
         }
       });
     }
 
+    // ---- CLASSES ---------------------------------------------------------------
+    const CLASS_COLORS = [
+      '#ff4b4b', '#4cd137', '#00d2ff', '#fbc531', '#9c88ff', '#ff79c6', '#ff9f43', '#0097e6', '#bdc581', '#fd7272',
+      '#5f27cd', '#55efc4', '#81ecec', '#ff7675', '#a29bfe', '#e1b12c', '#00cec9', '#e84393', '#badc58', '#c8d6e5'
+    ];
+    function updateClasses() {
+      if (typeof CLASSES === 'undefined') { document.getElementById('info-bar').textContent = 'Classes data not loaded'; return; }
+      const kx = document.getElementById('sel-x').value;
+      const ky = document.getElementById('sel-y').value;
+      const classKey = document.getElementById('cls-by').value;
+      const showTrend = document.getElementById('chk-class-trend').checked;
+      if (!kx || !ky || !classKey) return;
+      const dx = DATA[kx], dy = DATA[ky], labels = CLASSES[classKey];
+      if (!dx || !dy || !labels) return;
+      // Parse class labels (handle stringified dicts/lists)
+      const parseLabel = v => {
+        if (!v || v === '{}' || v === '[]' || v === "['']" || v.trim() === '') return '';
+        // Dict format: pick top key
+        if (v.startsWith('{')) {
+          const m = v.match(/['"]([^'"]+)['"]/); return m ? m[1] : '';
+        }
+        // List format: pick first item
+        if (v.startsWith('[')) {
+          const m = v.match(/['"]([^'"]+)['"]/); return m ? m[1] : '';
+        }
+        return v;
+      };
+      // Build groups
+      const groups = {};
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (dx[i] === null || dy[i] === null || !isFinite(dx[i]) || !isFinite(dy[i])) continue;
+        let lbl = parseLabel(labels[i]);
+        if (!lbl) lbl = '(unknown)';
+        if (!groups[lbl]) groups[lbl] = { x: [], y: [], names: [], idxs: [] };
+        groups[lbl].x.push(dx[i]); groups[lbl].y.push(dy[i]);
+        groups[lbl].names.push(TRACKS[i]); groups[lbl].idxs.push(i);
+      }
+      // Sort by count, keep top 20 + merge rest into 'other'
+      let sorted = Object.entries(groups).sort((a, b) => b[1].x.length - a[1].x.length);
+      if (sorted.length > 20) {
+        const top = sorted.slice(0, 20);
+        const rest = sorted.slice(20);
+        const other = { x: [], y: [], names: [], idxs: [] };
+        rest.forEach(([, g]) => { other.x.push(...g.x); other.y.push(...g.y); other.names.push(...g.names); other.idxs.push(...g.idxs); });
+        top.push(['(other)', other]);
+        sorted = top;
+      }
+      const ux = UNITS[kx] && UNITS[kx] !== '-' ? ' [' + UNITS[kx] + ']' : '';
+      const uy = UNITS[ky] && UNITS[ky] !== '-' ? ' [' + UNITS[ky] + ']' : '';
+      const traces = sorted.map(([lbl, g], ci) => ({
+        x: g.x, y: g.y, mode: 'markers', type: 'scattergl',
+        marker: { color: CLASS_COLORS[ci % CLASS_COLORS.length], size: 5, opacity: 0.7 },
+        hovertext: g.names.map((n, j) => '<b>' + n + '</b><br>' + kx + ': ' + g.x[j].toFixed(3) + '<br>' + ky + ': ' + g.y[j].toFixed(3) + '<br>' + classKey.replace(/_/g, ' ') + ': ' + lbl),
+        hoverinfo: 'text', name: lbl + ' (' + g.x.length + ')',
+        legendgroup: lbl,
+        customdata: g.idxs
+      }));
+
+      if (showTrend) {
+        sorted.forEach(([lbl, g], ci) => {
+          if (g.x.length < 3) return;
+          const n = g.x.length;
+          const mx = g.x.reduce((a, b) => a + b) / n, my = g.y.reduce((a, b) => a + b) / n;
+          let num = 0, den = 0;
+          for (let i = 0; i < n; i++) { num += (g.x[i] - mx) * (g.y[i] - my); den += (g.x[i] - mx) ** 2; }
+          if (den === 0) return;
+          const s = num / den, ic = my - s * mx;
+          const xmn = Math.min(...g.x), xmx = Math.max(...g.x);
+          traces.push({
+            x: [xmn, xmx], y: [s * xmn + ic, s * xmx + ic], mode: 'lines',
+            line: { color: CLASS_COLORS[ci % CLASS_COLORS.length], width: 2, dash: 'dash' },
+            name: lbl + ' (trend)', hoverinfo: 'skip',
+            legendgroup: lbl,
+            showlegend: false
+          });
+        });
+      }
+
+      Plotly.react('plot', traces, {
+        title: { text: kx + ' vs ' + ky + ' by ' + classKey.replace(/_/g, ' '), font: { size: 15 } },
+        xaxis: { title: kx + ux }, yaxis: { title: ky + uy },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e',
+        font: { color: '#cccccc' }, hoverlabel: { bgcolor: '#0f3460', font: { size: 12, color: 'white' } },
+        showlegend: true, legend: { x: 1.02, y: 1, bgcolor: 'rgba(15,52,96,0.8)', font: { size: 10 } },
+        margin: { t: 46, b: 48, l: 58, r: 180 }
+      }, { responsive: true });
+      const cpd = document.getElementById('plot');
+      cpd.removeAllListeners('plotly_click');
+      cpd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const idx = pt.customdata;
+          if (idx !== undefined) {
+            document.getElementById('sel-radar-track').value = TRACKS[idx];
+            setMode('radar');
+          }
+        }
+      });
+      const totalTracks = sorted.reduce((s, [, g]) => s + g.x.length, 0);
+      document.getElementById('info-bar').textContent = 'Classes: ' + classKey.replace(/_/g, ' ') + ' | ' + sorted.length + ' groups | ' + totalTracks + ' tracks';
+    }
+
+    // ---- Caption Popup ---------------------------------------------------------
+    let _captionsLoaded = false, _captionsLoading = false;
+    function toggleCaptions() {
+      const on = document.getElementById('chk-captions').checked;
+      if (on && !_captionsLoaded && !_captionsLoading) {
+        _captionsLoading = true;
+        document.getElementById('info-bar').textContent = 'Loading captions (8MB)...';
+        const s = document.createElement('script');
+        s.src = 'feature_explorer_captions.js';
+        s.onload = function () {
+          _captionsLoaded = true; _captionsLoading = false;
+          document.getElementById('info-bar').textContent = 'Captions loaded \u2714';
+          setupCaptionHover();
+        };
+        s.onerror = function () {
+          _captionsLoading = false;
+          document.getElementById('info-bar').textContent = '\u26a0 Failed to load captions';
+          document.getElementById('chk-captions').checked = false;
+        };
+        document.head.appendChild(s);
+      } else if (on && _captionsLoaded) {
+        setupCaptionHover();
+      } else {
+        removeCaptionHover();
+        document.getElementById('caption-popup').style.display = 'none';
+      }
+    }
+    let _capHoverBound = false;
+    function setupCaptionHover() {
+      if (_capHoverBound) return;
+      _capHoverBound = true;
+      const pd = document.getElementById('plot');
+      pd.on('plotly_hover', onCaptionHover);
+      pd.on('plotly_unhover', onCaptionUnhover);
+    }
+    function removeCaptionHover() {
+      _capHoverBound = false;
+      const pd = document.getElementById('plot');
+      pd.removeAllListeners('plotly_hover');
+      pd.removeAllListeners('plotly_unhover');
+    }
+    function onCaptionHover(d) {
+      if (!document.getElementById('chk-captions').checked) return;
+      if (!d.points || !d.points.length) return;
+      const pt = d.points[0];
+      const idx = pt.customdata;
+      if (idx === undefined || typeof CAPTIONS === 'undefined') return;
+      const popup = document.getElementById('caption-popup');
+      let html = '<h4>' + TRACKS[idx] + '</h4>';
+      Object.keys(CAPTIONS).forEach(key => {
+        const val = CAPTIONS[key][idx];
+        if (!val || val.trim() === '') return;
+        const label = key.replace(/^music_flamingo_?/, '').replace(/_/g, ' ') || 'full';
+        html += '<div class="cap-section"><div class="cap-label">' + label + '</div><div class="cap-text">' + val.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div></div>';
+      });
+      popup.innerHTML = html;
+      popup.style.display = 'block';
+    }
+    function onCaptionUnhover() {
+      document.getElementById('caption-popup').style.display = 'none';
+    }
+
     // ---- Init ------------------------------------------------------------------
+    document.getElementById('sim-search').addEventListener('input', function (e) {
+      const q = e.target.value.toLowerCase();
+      const resDiv = document.getElementById('sim-search-results');
+      if (q.length < 3) {
+        resDiv.style.display = 'none';
+        return;
+      }
+      resDiv.innerHTML = '';
+      let hits = 0;
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (TRACKS[i].toLowerCase().includes(q)) {
+          const div = document.createElement('div');
+          div.className = 'sim-search-item';
+          div.textContent = TRACKS[i];
+          div.onclick = function () {
+            document.getElementById('sim-search').value = TRACKS[i];
+            document.getElementById('sel-sim-ref').value = TRACKS[i];
+            resDiv.style.display = 'none';
+            updatePlot();
+          };
+          resDiv.appendChild(div);
+          if (++hits >= 150) break;
+        }
+      }
+      if (hits === 0) {
+        resDiv.innerHTML = '<div class="sim-search-item" style="color:#888;cursor:default;">No matches</div>';
+      }
+      resDiv.style.display = 'block';
+    });
+    document.getElementById('sim-search').addEventListener('focus', function (e) { e.target.dispatchEvent(new Event('input')); });
+    document.addEventListener('click', function (e) {
+      const c = document.getElementById('sim-search-container');
+      if (c && !c.contains(e.target)) document.getElementById('sim-search-results').style.display = 'none';
+    });
+
     clearTrackList();
     populateSelects();
     updatePlot();

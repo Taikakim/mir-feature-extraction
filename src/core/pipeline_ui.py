@@ -559,11 +559,26 @@ class PipelineUI:
         table.add_column(min_width=12)
         table.add_column(justify='right')
 
-        t_str = (f'{tracks_processed:,} / {tracks_total:,}'
-                 if tracks_total > 0 else f'{tracks_processed:,}')
+        # Tracks row: show processed/total when stem sep or analysis has run,
+        # otherwise just show total so "0 / 4,494" doesn't look like an error.
+        if tracks_processed > 0:
+            t_str = (f'{tracks_processed:,} / {tracks_total:,}'
+                     if tracks_total > 0 else f'{tracks_processed:,}')
+        elif tracks_total > 0:
+            t_str = f'{tracks_total:,}'
+        else:
+            t_str = '—'
         table.add_row(Text('Tracks', style='dim'), Text(t_str, style='white'))
+
+        if metadata_found > 0:
+            m_str = (f'{metadata_found:,} / {tracks_total:,}'
+                     if tracks_total > 0 else f'{metadata_found:,}')
+        else:
+            m_str = f'{metadata_found:,}'
+        table.add_row(Text('Metadata', style='dim'), Text(m_str, style='white'))
+
         table.add_row(Text('Crops', style='dim'), Text(f'{crops_analyzed:,}', style='white'))
-        table.add_row(Text('Metadata', style='dim'), Text(f'{metadata_found:,}', style='white'))
+
         err_style = 'bold red' if error_count > 0 else 'dim'
         table.add_row(Text('Errors', style='dim'),
                        Text(f'{error_count:,}', style=err_style))

@@ -260,7 +260,7 @@ def safe_update(file_path: str | Path, updates: Dict[str, Any], file_type: str =
     else:
         raise ValueError(f"file_type must be 'INFO' or 'MIR', got: {file_type}")
 
-    logger.info(f"Safely updated {len(updates)} keys in {file_path}")
+    logger.debug(f"Safely updated {len(updates)} keys in {file_path}")
 
 
 def should_process(
