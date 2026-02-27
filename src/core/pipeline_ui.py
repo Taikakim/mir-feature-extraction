@@ -732,10 +732,16 @@ class PipelineUI:
             stage_disabled = bool(stage_ids & disabled_stages) and not (stage_ids - disabled_stages)
 
             if relevant_running:
-                # Currently processing — show progress + rate
+                # Currently processing — show progress + per-group rate if known
                 icon, icon_style, name_style = '▶', 'bold yellow', 'yellow'
                 count_str = f'{prog_done:,}/{prog_total:,}' if prog_total > 0 else ''
-                rate = group_rates.get(label, prog_rate)
+                # Use the group's own measured rate; fall back to global rate only
+                # when this specific group has timing data (avoids all groups showing
+                # the same global throughput number).
+                rate = group_rates.get(label, 0.0)
+                if rate == 0.0 and len(group_rates) == 0:
+                    # No per-group rates at all yet — show global rate
+                    rate = prog_rate
                 if rate >= 10:
                     rate_str = f'@ {rate:,.0f}/s'
                 elif rate > 0:
@@ -765,15 +771,16 @@ class PipelineUI:
                 rate_str = ''
                 rate_style = ''
 
-            # Build label cell: main name + optional coverage % + dim sub-labels
+            # Build label cell: main name + optional coverage %
+            # Sub-keys shown as a dim suffix on the same line (no wrapping rows)
             pct = (feature_coverage or {}).get(label)
-            lbl_t = Text()
+            lbl_t = Text(overflow='ellipsis', no_wrap=True)
             lbl_t.append(label, style=name_style)
             if pct is not None and not relevant_running:
                 lbl_t.append(f' {pct:.0%}', style='dim')
             if len(config_keys) > 1:
                 short = ' · '.join(_KEY_SHORT.get(k, k) for k in config_keys)
-                lbl_t.append(f'\n  {short}', style='dim')
+                lbl_t.append(f'  {short}', style='dim')
 
             table.add_row(
                 Text(icon, style=icon_style),

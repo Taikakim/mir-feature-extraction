@@ -636,7 +636,7 @@ def find_crop_folders(root_directory: str | Path) -> List[Path]:
                 if len(parts) == 2 and parts[1] not in DEMUCS_STEMS:
                     crop_folders.add(audio_file.parent)
 
-    logger.info(f"Found {len(crop_folders)} crop folders in {root_directory}")
+    logger.debug(f"Found {len(crop_folders)} crop folders in {root_directory}")
     return sorted(crop_folders)
 
 

@@ -653,6 +653,9 @@ class Pipeline:
             all_crops = []
             for folder in crop_folders:
                 all_crops.extend(find_crop_files(folder))
+            logger.info(
+                f"Found {len(crop_folders)} crop folders and "
+                f"{len(all_crops):,} crops to analyze in {working_dir}")
         else:
             all_crops = find_crop_files(working_dir)
 
