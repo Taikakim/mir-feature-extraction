@@ -71,6 +71,7 @@ class PipelineConfig:
     skip_rhythm: bool = False
     skip_loudness: bool = False
     skip_spectral: bool = False
+    skip_saturation: bool = False
     skip_harmonic: bool = False
     skip_timbral: bool = False
     skip_classification: bool = False
@@ -202,6 +203,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     # Define all output keys for each feature type (check ALL, not just one)
     LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+    SATURATION_KEYS = ['saturation_ratio', 'saturation_count']
     MULTIBAND_KEYS = ['rms_energy_bass', 'rms_energy_body', 'rms_energy_mid', 'rms_energy_air']
     CHROMA_KEYS = [f'chroma_{i}' for i in range(12)]
     TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
@@ -220,9 +222,12 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         return feat_ow or any(k not in existing_keys for k in keys)
 
     try:
+        generated = []   # e.g. ['loudness(new)', 'spectral(overwrite)', ...]
+
         # Re-import locally for worker process
         from src.timbral.loudness import analyze_file_loudness
         from src.spectral.spectral_features import analyze_spectral_features
+        from src.spectral.saturation import analyze_saturation
         from src.spectral.multiband_rms import analyze_multiband_rms
         from src.harmonic.chroma import analyze_chroma
         from src.core.file_utils import get_crop_stem_files, read_audio
@@ -268,15 +273,18 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         STEM_LOUDNESS_KEYS = [f'lufs_{s}' for s in preloaded_stems]
         if not config_dict.get('skip_loudness'):
             if _needs_processing(LOUDNESS_KEYS, 'loudness'):
+                _op = 'overwrite' if any(k in existing_keys for k in LOUDNESS_KEYS) else 'new'
                 try:
                     results.update(analyze_file_loudness(crop_path, audio=crop_audio, sr=crop_sr))
                     for stem_name, (s_audio, s_sr) in preloaded_stems.items():
                         stem_loud = analyze_file_loudness(
                             stems[stem_name], audio=s_audio, sr=s_sr)
                         results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                    generated.append(f'loudness({_op})')
                 except Exception: pass
             elif preloaded_stems:
                 # Main loudness done, but check if any stem loudness is missing
+                _stem_new = False
                 for stem_name in preloaded_stems:
                     if f'lufs_{stem_name}' not in existing_keys:
                         try:
@@ -284,33 +292,53 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             stem_loud = analyze_file_loudness(
                                 stems[stem_name], audio=s_audio, sr=s_sr)
                             results[f'lufs_{stem_name}'] = stem_loud.get('lufs')
+                            _stem_new = True
                         except Exception: pass
+                if _stem_new:
+                    generated.append('loudness-stems(new)')
 
         # BPM - use pre-loaded mono audio
         if not config_dict.get('skip_rhythm'):
             if overwrite or per_feature_ow.get('rhythm', False) or 'bpm' not in existing_keys:
+                _op = 'overwrite' if 'bpm' in existing_keys else 'new'
                 try:
                     tempo, _ = librosa.beat.beat_track(y=crop_mono, sr=crop_sr)
                     bpm = float(tempo[0]) if hasattr(tempo, '__len__') else float(tempo)
                     results['bpm'] = round(bpm, 1)
+                    generated.append(f'rhythm({_op})')
                 except Exception: pass
 
         # Spectral - pass pre-loaded mono audio
         if not config_dict.get('skip_spectral'):
             if _needs_processing(SPECTRAL_KEYS, 'spectral'):
+                _op = 'overwrite' if any(k in existing_keys for k in SPECTRAL_KEYS) else 'new'
                 try:
                     results.update(analyze_spectral_features(
                         crop_path, audio=crop_mono, sr=crop_sr))
+                    generated.append(f'spectral({_op})')
                 except Exception: pass
             if _needs_processing(MULTIBAND_KEYS, 'spectral'):
+                _op = 'overwrite' if any(k in existing_keys for k in MULTIBAND_KEYS) else 'new'
                 try:
                     results.update(analyze_multiband_rms(
                         crop_path, audio=crop_mono, sr=crop_sr))
+                    generated.append(f'rms({_op})')
+                except Exception: pass
+
+        # Saturation / hard-clipping detection
+        if not config_dict.get('skip_saturation'):
+            if _needs_processing(SATURATION_KEYS, 'saturation'):
+                _op = 'overwrite' if any(k in existing_keys for k in SATURATION_KEYS) else 'new'
+                try:
+                    results.update(analyze_saturation(
+                        crop_path, audio=crop_mono, sr=crop_sr))
+                    generated.append(f'sat({_op})')
                 except Exception: pass
 
         # Chroma - use 'other' stem if available (pre-loaded), else crop mono
         if not config_dict.get('skip_harmonic'):
             if _needs_processing(CHROMA_KEYS, 'harmonic'):
+                _op = 'overwrite' if any(k in existing_keys for k in CHROMA_KEYS) else 'new'
                 try:
                     if 'other' in preloaded_stems:
                         other_audio, other_sr = preloaded_stems['other']
@@ -323,17 +351,27 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                         results.update(analyze_chroma(
                             crop_path, use_stems=False,
                             audio=crop_mono.astype(np.float32), sr=crop_sr))
+                    generated.append(f'chroma({_op})')
                 except Exception: pass
 
         # Timbral - pass pre-loaded audio (writes to /dev/shm RAM disk internally)
+        # Compute only the specific features that are actually missing — avoids
+        # running timbral_reverb (the hang-prone one) when reverberation already exists.
         if timbral_func and not config_dict.get('skip_timbral'):
-            if _needs_processing(TIMBRAL_KEYS, 'timbral'):
+            _timbral_ow = overwrite or per_feature_ow.get('timbral', False)
+            _timbral_missing = [k for k in TIMBRAL_KEYS
+                                if _timbral_ow or k not in existing_keys]
+            if _timbral_missing:
+                _op = 'overwrite' if any(k in existing_keys for k in _timbral_missing) else 'new'
                 try:
                     results.update(timbral_func(
-                        crop_path, audio=crop_audio, sr=crop_sr))
+                        crop_path, audio=crop_audio, sr=crop_sr,
+                        features=_timbral_missing))
+                    generated.append(f'timbral({_op})')
                 except Exception: pass
 
-        return {'path': crop_path, 'results': results, 'success': True}
+        return {'path': crop_path, 'results': results, 'success': True,
+                'generated': generated}
 
     except Exception as e:
         return {'path': crop_path, 'error': str(e), 'success': False}
@@ -973,8 +1011,8 @@ class Pipeline:
         state_lock = threading.Lock()  # Protects concurrent state.save() calls
 
         pass1_needed = not all([self.config.skip_loudness, self.config.skip_rhythm,
-                                self.config.skip_spectral, self.config.skip_harmonic,
-                                self.config.skip_timbral])
+                                self.config.skip_spectral, self.config.skip_saturation,
+                                self.config.skip_harmonic, self.config.skip_timbral])
 
         if pass1_needed:
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
@@ -984,31 +1022,99 @@ class Pipeline:
                 'skip_loudness': self.config.skip_loudness,
                 'skip_rhythm': self.config.skip_rhythm,
                 'skip_spectral': self.config.skip_spectral,
+                'skip_saturation': self.config.skip_saturation,
                 'skip_harmonic': self.config.skip_harmonic,
                 'skip_timbral': self.config.skip_timbral,
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
             }
 
+            # Coverage keys: ALL keys for each FEATURE_GROUPS label.
+            # Checked individually — any missing key for a group means that group
+            # is incomplete, regardless of whether the "sentinel" key is present.
+            _COV_KEY_GROUPS = {
+                'Loudness':  ['lufs', 'lra'],
+                'Spectral':  ['spectral_flatness', 'spectral_flux',
+                              'spectral_skewness', 'spectral_kurtosis'],
+                'Rhythm':    ['bpm'],
+                'Per-Stem':  ['syncopation_drums'],
+                'Chroma':    [f'chroma_{i}' for i in range(12)],
+                'Timbral':   ['brightness', 'roughness', 'hardness', 'depth',
+                              'booming', 'reverberation', 'sharpness', 'warmth'],
+                'Essentia':  ['danceability'],
+                'AudioBox':  ['content_enjoyment'],
+                'Flamingo':  ['music_flamingo_brief'],
+                'Metadata':  ['release_year'],
+            }
+            # Representative single key used for coverage fraction tracking
+            _COV_SENTINEL = {lbl: keys[0] for lbl, keys in _COV_KEY_GROUPS.items()}
+            _cov_counts = {lbl: 0 for lbl in _COV_KEY_GROUPS}
+            _n_total = len(all_crops)
+
             tasks = []
-            for crop_path in all_crops:
+            for _scan_i, crop_path in enumerate(all_crops):
                 info_path = get_crop_info_path(crop_path)
                 existing = read_info(info_path) if info_path.exists() else {}
                 existing_keys = set(existing.keys())
 
+                # Count coverage while we have existing_keys (no extra I/O).
+                # A group is "covered" only if ALL its keys are present.
+                for _lbl, _keys in _COV_KEY_GROUPS.items():
+                    if all(k in existing_keys for k in _keys):
+                        _cov_counts[_lbl] += 1
+
+                # Publish coverage incrementally so TUI shows % from scan start
+                if _n_total > 0 and (_scan_i % 1000 == 0 or _scan_i == _n_total - 1):
+                    self.stats['feature_coverage'] = {
+                        lbl: cnt / _n_total for lbl, cnt in _cov_counts.items()
+                    }
+                    self.stats['feature_coverage_n'] = _n_total
+
+                # Check if this crop needs ANY processing — use ALL keys per group
+                # so a crop missing only one key in a group is still queued.
                 needs_run = False
                 if self.config.overwrite:
                     needs_run = True
                 else:
-                    if not self.config.skip_loudness and (self.config.should_overwrite('loudness') or 'lufs' not in existing_keys): needs_run = True
-                    elif not self.config.skip_loudness and any(f'lufs_{s}' not in existing_keys for s in ['drums', 'bass', 'other', 'vocals']): needs_run = True
-                    elif not self.config.skip_rhythm and (self.config.should_overwrite('rhythm') or 'bpm' not in existing_keys): needs_run = True
-                    elif not self.config.skip_spectral and (self.config.should_overwrite('spectral') or 'spectral_flatness' not in existing_keys): needs_run = True
-                    elif not self.config.skip_harmonic and (self.config.should_overwrite('harmonic') or 'chroma_0' not in existing_keys): needs_run = True
-                    elif not self.config.skip_timbral and (self.config.should_overwrite('timbral') or 'brightness' not in existing_keys): needs_run = True
+                    _ow = self.config.should_overwrite
+                    if not self.config.skip_loudness and (
+                            _ow('loudness') or
+                            any(k not in existing_keys for k in ['lufs', 'lra']) or
+                            any(f'lufs_{s}' not in existing_keys
+                                for s in ['drums', 'bass', 'other', 'vocals'])):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_rhythm and (
+                            _ow('rhythm') or 'bpm' not in existing_keys):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_spectral and (
+                            _ow('spectral') or
+                            any(k not in existing_keys
+                                for k in ['spectral_flatness', 'spectral_flux',
+                                          'spectral_skewness', 'spectral_kurtosis',
+                                          'rms_energy_bass', 'rms_energy_body',
+                                          'rms_energy_mid', 'rms_energy_air',
+                                          'saturation_ratio', 'saturation_count'])):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_harmonic and (
+                            _ow('harmonic') or
+                            any(f'chroma_{i}' not in existing_keys for i in range(12))):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_timbral and (
+                            _ow('timbral') or
+                            any(k not in existing_keys
+                                for k in ['brightness', 'roughness', 'hardness', 'depth',
+                                          'booming', 'reverberation', 'sharpness', 'warmth'])):
+                        needs_run = True
 
                 if needs_run:
                     tasks.append((crop_path, worker_config, existing_keys))
+
+            # Final coverage snapshot (may already be published, ensures consistency)
+            if _n_total > 0:
+                self.stats['feature_coverage'] = {
+                    lbl: cnt / _n_total for lbl, cnt in _cov_counts.items()
+                }
+                self.stats['feature_coverage_n'] = _n_total
 
             if tasks:
                 logger.info(f"  Processing {len(tasks)} files in background (GPU passes run concurrently)...")
@@ -1020,6 +1126,9 @@ class Pipeline:
                         futures_map = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
                         pending = set(futures_map)
                         i = 0
+                        _last_info = None
+                        # Expose currently-pending crops to the TUI (refreshed each iteration)
+                        n_workers = self.config.feature_workers
 
                         while pending:
                             # Wait for the next batch to complete, with a per-crop timeout.
@@ -1027,6 +1136,12 @@ class Pipeline:
                             # If nothing completes in 300s, the remaining workers are hung
                             # (e.g. timbral_models.timbral_reverb on pathological audio).
                             done, pending = cf_wait(pending, timeout=300, return_when=FIRST_COMPLETED)
+
+                            # Expose up to n_workers pending stems to TUI for "Current" panel
+                            self.stats['active_crops'] = [
+                                futures_map[f].stem
+                                for f in list(pending)[:n_workers]
+                            ]
 
                             if not done:
                                 hung = [futures_map[f].name for f in pending]
@@ -1047,16 +1162,53 @@ class Pipeline:
                                         if result['results']:
                                             safe_update(get_crop_info_path(crop_path), result['results'])
                                             self.stats["crops_processed"] += 1
+                                            # Update coverage fractions dynamically
+                                            _n = self.stats.get('feature_coverage_n', 0)
+                                            if _n > 0:
+                                                _cov = self.stats.get('feature_coverage', {})
+                                                _rk  = set(result['results'].keys())
+                                                for _lbl, _ck in _COV_SENTINEL.items():
+                                                    if _ck in _rk and _cov.get(_lbl, 1.0) < 1.0:
+                                                        _cov[_lbl] = min(1.0, _cov.get(_lbl, 0.0) + 1.0 / _n)
+                                            # Verbose per-task log / non-verbose tracker
+                                            gen = result.get('generated', [])
+                                            if gen:
+                                                _ops_new = [g.split('(')[0] for g in gen if '(new)' in g]
+                                                _ops_ow  = [g.split('(')[0] for g in gen if '(overwrite)' in g]
+                                                _action  = ('Generating' if _ops_new and not _ops_ow else
+                                                            'Overwriting' if _ops_ow and not _ops_new else
+                                                            'Generating+overwriting')
+                                                _feats   = ' · '.join(dict.fromkeys(g.split('(')[0] for g in gen))
+                                                _parts   = crop_path.parts
+                                                _short   = '/'.join(_parts[-2:]) if len(_parts) > 2 else str(crop_path)
+                                                if logger.isEnabledFor(logging.DEBUG):
+                                                    logger.debug(
+                                                        f"  [PASS 1 – {_feats}] {_short}"
+                                                        f" — {_action} ({i}/{len(tasks)})")
+                                                else:
+                                                    # stash for the periodic INFO line (feats + action + stem)
+                                                    _last_info = (_feats, _action, crop_path.stem)
+                                            else:
+                                                _last_info = None
                                     else:
+                                        _last_info = None
                                         logger.error(f"  [PASS 1] Failed for {crop_path.name}: {result.get('error')}")
                                         self.stats["crops_failed"] += 1
                                 except Exception as e:
+                                    _last_info = None
                                     logger.error(f"  [PASS 1] Worker exception for {crop_path.name}: {e}")
                                     self.stats["crops_failed"] += 1
 
-                                if i % 10 == 0:
-                                    logger.info(f"  [PASS 1] {i}/{len(tasks)}")
-                                    if state and i % 50 == 0:
+                                if i % 50 == 0:
+                                    if _last_info:
+                                        _li_feats, _li_action, _li_stem = _last_info
+                                        logger.info(
+                                            f"  [PASS 1 – {_li_feats}] {i}/{len(tasks)}"
+                                            f" — {_li_action} {_li_stem}")
+                                    else:
+                                        logger.info(f"  [PASS 1] {i}/{len(tasks)}")
+                                    _last_info = None
+                                    if state:
                                         with state_lock:
                                             state.update_pass_progress('pass_1_cpu', completed=i, total=len(tasks))
                                             state.save()
@@ -1071,6 +1223,7 @@ class Pipeline:
                         # wait=False: don't block on hung workers; they'll be killed
                         # when the Python process exits (worker processes are children).
                         executor.shutdown(wait=False, cancel_futures=True)
+                        self.stats['active_crops'] = []
                         if state:
                             with state_lock:
                                 state.update_pass_progress('pass_1_cpu', completed=len(tasks), total=len(tasks))
@@ -1110,6 +1263,12 @@ class Pipeline:
                     existing = read_info(info_path) if info_path.exists() else {}
                     if self.config.should_overwrite('audiobox') or 'content_enjoyment' not in existing:
                         to_process.append(crop_path)
+
+                # Update AudioBox coverage (pre-pass snapshot)
+                _n = self.stats.get('feature_coverage_n', len(all_crops))
+                if _n > 0:
+                    self.stats.setdefault('feature_coverage', {})['AudioBox'] = (
+                        len(all_crops) - len(to_process)) / _n
 
                 if to_process:
                     # Initialize predictor once
@@ -1207,6 +1366,12 @@ class Pipeline:
                     existing = read_info(info_path) if info_path.exists() else {}
                     if self.config.should_overwrite('essentia') or any(k not in existing for k in ESSENTIA_KEYS):
                         to_process.append(crop_path)
+
+                # Update Essentia coverage (pre-pass snapshot)
+                _n = self.stats.get('feature_coverage_n', len(all_crops))
+                if _n > 0:
+                    self.stats.setdefault('feature_coverage', {})['Essentia'] = (
+                        len(all_crops) - len(to_process)) / _n
 
                 if to_process:
                     # Pre-load all TF models into VRAM before processing
@@ -1353,6 +1518,12 @@ class Pipeline:
                                 to_process.append(crop_path)
                             else:
                                 skipped_by_sampling += 1
+
+                    # Update Flamingo coverage (pre-pass snapshot)
+                    _n = self.stats.get('feature_coverage_n', len(all_crops))
+                    if _n > 0:
+                        self.stats.setdefault('feature_coverage', {})['Flamingo'] = (
+                            len(all_crops) - len(to_process) - skipped_by_sampling) / _n
 
                     if skipped_by_sampling:
                         logger.info(f"  Sampling at {prob:.0%}: {len(to_process)} queued, "

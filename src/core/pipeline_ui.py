@@ -2,15 +2,17 @@
 Pipeline TUI — btop-like static dashboard for MIR pipeline runs.
 
 Redirects all log output to a rotating log file and displays a Rich full-screen
-dashboard with: pipeline stage progress, current operation + progress bar,
-feature throughput table, statistics panel, and a scrolling recent-log panel.
+dashboard with: pipeline stage progress, per-feature status panel, current
+operation + progress bar, statistics panel, and a scrolling recent-log panel.
 
 Usage:
     ui = PipelineUI(stats=pipeline.stats)
     ui.start(config_name='master_pipeline.yaml', log_path=Path('pipeline.log'))
+    ui.set_feature_config(features={'loudness': True, 'timbral': False, ...},
+                          disabled_stages={'organize', 'cropping'})
     ui.set_stage('organize', 'running')
     ui.set_stage('organize', 'done')
-    ui.set_current(file='Artist - Track', operation='Stem separation',
+    ui.set_current(file='Artist - Track', operation='Feature extraction',
                    done=5, total=200)
     ui.stop()  # prints final summary to stdout
 
@@ -24,16 +26,14 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Set, Tuple
 
 try:
     from rich.console import Console, Group
     from rich.layout import Layout
     from rich.live import Live
-    from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
-    from rich import box as rich_box
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -62,12 +62,56 @@ STAGES: List[Tuple[str, str]] = [
     ('granite',         'Granite Revision'),
 ]
 
-# Mapping from PipelineStats.operation_timing keys → display names for throughput table
-OP_DISPLAY: Dict[str, str] = {
-    'bs_roformer':   'BS-RoFormer',
-    'demucs':        'Demucs',
-    'beats':         'Beat / BPM',
-    'onsets':        'Onsets',
+# ── Feature groups ──────────────────────────────────────────────────────────────
+# (group_key, display_label, [feature_config_keys], {stage_ids_where_active})
+FEATURE_GROUPS: List[Tuple[str, str, List[str], Set[str]]] = [
+    ('loudness',  'Loudness',  ['loudness'],
+                               {'first_features', 'crop_analysis'}),
+    ('spectral',  'Spectral',  ['spectral', 'saturation', 'multiband_rms'],
+                               {'first_features', 'crop_analysis'}),
+    ('rhythm',    'Rhythm',    ['syncopation', 'complexity'],
+                               {'first_features'}),
+    ('per_stem',  'Per-Stem',  ['per_stem_rhythm', 'per_stem_harmonic', 'per_stem'],
+                               {'first_features', 'crop_analysis'}),
+    ('chroma',    'Chroma',    ['chroma'],
+                               {'crop_analysis'}),
+    ('timbral',   'Timbral',   ['timbral'],
+                               {'crop_analysis'}),
+    ('essentia',  'Essentia',  ['essentia'],
+                               {'crop_analysis'}),
+    ('audiobox',  'AudioBox',  ['audiobox'],
+                               {'crop_analysis'}),
+    ('flamingo',  'Flamingo',  ['music_flamingo'],
+                               {'flamingo'}),
+    ('granite',   'Granite',   ['granite'],
+                               {'granite'}),
+    ('metadata',  'Metadata',  ['metadata'],
+                               {'metadata_lookup'}),
+]
+
+# Short display names for individual config keys shown as sub-labels
+_KEY_SHORT: Dict[str, str] = {
+    'loudness':          'lufs/lra',
+    'spectral':          'spectral',
+    'saturation':        'sat',
+    'multiband_rms':     'rms',
+    'syncopation':       'syncopation',
+    'complexity':        'complexity',
+    'per_stem_rhythm':   'stem-rhythm',
+    'per_stem_harmonic': 'stem-harm',
+    'per_stem':          'per-stem',
+    'chroma':            'chroma',
+    'timbral':           'timbral',
+    'essentia':          'essentia',
+    'audiobox':          'audiobox',
+    'music_flamingo':    'flamingo',
+    'granite':           'granite',
+    'metadata':          'metadata',
+}
+
+# Mapping from PipelineStats.operation_timing keys → feature group label
+# Used to pull per-feature rates from PipelineStats into the features panel.
+_OP_TO_GROUP_LABEL: Dict[str, str] = {
     'loudness':      'Loudness',
     'spectral':      'Spectral',
     'timbral':       'Timbral',
@@ -75,9 +119,131 @@ OP_DISPLAY: Dict[str, str] = {
     'flamingo':      'Flamingo',
     'granite':       'Granite',
     'metadata':      'Metadata',
-    'crop_features': 'Crop Features',
-    'crop_demucs':   'Crop Stems',
+    'crop_features': 'Spectral',
+    'beats':         'Rhythm',
+    'onsets':        'Rhythm',
 }
+
+
+# ── Bevel panel ────────────────────────────────────────────────────────────────
+
+class BevelPanel:
+    """Panel with gradient bevel border (lofi metal effect).
+
+    The border fades from ``#1B3639`` (dark corners) through ``#00838F``
+    (mid-teal along the sides) to ``#4DB6AC`` (bright highlight at the
+    centre of each edge), giving a subtle embossed/metallic look.
+    """
+
+    _CORNER = '#1B3639'
+    _MID    = '#00838F'
+    _HIGH   = '#4DB6AC'
+    _TL, _TR, _BL, _BR = '╭', '╮', '╰', '╯'
+    _H,  _V             = '─', '│'
+
+    def __init__(self, renderable, title: str = '', padding: tuple = (0, 1)):
+        self._renderable = renderable
+        self._title      = title
+        self._padding    = padding
+
+    @classmethod
+    def _lerp(cls, a: str, b: str, t: float) -> str:
+        """Linear interpolate between two '#RRGGBB' hex colours."""
+        t = max(0.0, min(1.0, t))
+        ar, ag, ab = int(a[1:3], 16), int(a[3:5], 16), int(a[5:7], 16)
+        br, bg, bb = int(b[1:3], 16), int(b[3:5], 16), int(b[5:7], 16)
+        return (f'#{int(ar+(br-ar)*t):02X}'
+                f'{int(ag+(bg-ag)*t):02X}'
+                f'{int(ab+(bb-ab)*t):02X}')
+
+    def _hcolor(self, frac: float) -> str:
+        """Colour for a horizontal border segment.
+        frac=0 → corner (dark); frac=1 → centre (bright highlight)."""
+        if frac < 0.45:
+            return self._lerp(self._CORNER, self._MID, frac / 0.45)
+        return self._lerp(self._MID, self._HIGH, (frac - 0.45) / 0.55)
+
+    def _vcolor(self, frac: float) -> str:
+        """Colour for a vertical border segment.
+        frac=0 → corner (dark); frac=1 → centre of panel height."""
+        return self._lerp(self._CORNER, self._MID, min(1.0, frac * 4.0))
+
+    def __rich_console__(self, console, options):
+        from rich.segment import Segment
+        from rich.style   import Style
+        from rich.text    import Text
+
+        width     = options.max_width
+        ph        = self._padding[1] if len(self._padding) > 1 else 0
+        pv        = self._padding[0]
+        content_w = max(1, width - 2 - ph * 2)
+        inner_w   = width - 2          # chars between the two corner chars
+
+        # Render inner content first (need row count for vertical gradient)
+        rows       = console.render_lines(
+            self._renderable, options.update_width(content_w), pad=True)
+        total_rows = len(rows) + pv * 2
+
+        # ── Parse title ──────────────────────────────────────────────────────
+        title_t     = None
+        title_cells = 0
+        if self._title:
+            title_t     = Text.from_markup(self._title)
+            title_cells = len(title_t.plain) + 2   # space + text + space
+            if title_cells >= inner_w - 2:
+                title_t, title_cells = None, 0
+
+        left_bars  = (inner_w - title_cells) // 2
+        right_bars = inner_w - title_cells - left_bars
+
+        def hfrac(i: int) -> float:
+            """Symmetric frac for horizontal position i: 0 at corners, 1 at centre."""
+            c = (inner_w - 1) / 2.0
+            return 1.0 - abs(i - c) / max(1.0, c)
+
+        # ── Top border ───────────────────────────────────────────────────────
+        top = Text()
+        top.append(self._TL, style=self._CORNER)
+        for i in range(left_bars):
+            top.append(self._H, style=self._hcolor(hfrac(i)))
+        if title_t is not None:
+            top.append(' ', style=self._hcolor(hfrac(left_bars)))
+            top.append_text(title_t)
+            top.append(' ', style=self._hcolor(hfrac(left_bars + title_cells - 1)))
+        for i in range(right_bars):
+            top.append(self._H, style=self._hcolor(hfrac(left_bars + title_cells + i)))
+        top.append(self._TR, style=self._CORNER)
+        yield from console.render(top, options.update_width(width))
+        yield Segment.line()
+
+        # ── Content rows (left/right vertical borders with vertical gradient) ─
+        def _emit(segs, row_idx: int):
+            frac = (1.0 - abs(2.0 * row_idx / max(1, total_rows - 1) - 1.0)
+                    if total_rows > 1 else 1.0)
+            vc = self._vcolor(frac)
+            yield Segment(self._V, Style(color=vc))
+            yield Segment(' ' * ph)
+            yield from segs
+            yield Segment(' ' * ph)
+            yield Segment(self._V, Style(color=vc))
+            yield Segment.line()
+
+        blank = [Segment(' ' * content_w)]
+        for r in range(pv):
+            yield from _emit(blank, r)
+        for r, segs in enumerate(rows):
+            yield from _emit(segs, r + pv)
+        for r in range(pv):
+            yield from _emit(blank, len(rows) + pv + r)
+
+        # ── Bottom border ────────────────────────────────────────────────────
+        bot = Text()
+        bot.append(self._BL, style=self._CORNER)
+        for i in range(inner_w):
+            bot.append(self._H, style=self._hcolor(hfrac(i)))
+        bot.append(self._BR, style=self._CORNER)
+        yield from console.render(bot, options.update_width(width))
+        yield Segment.line()
 
 
 # ── Logging handler ────────────────────────────────────────────────────────────
@@ -167,6 +333,13 @@ class PipelineUI:
         }
         self._stage_start: Dict[str, float] = {}
 
+        # Feature config
+        self._feature_enabled: Dict[str, bool] = {}   # feature_key → enabled
+        self._disabled_stages: Set[str] = set()        # stages disabled in config
+
+        # Per-feature-group rate overrides (label → rate)
+        self._group_rates: Dict[str, float] = {}
+
         # Current operation
         self._current_file: str = ''
         self._current_op: str = ''
@@ -179,9 +352,6 @@ class PipelineUI:
         # Live crop-progress source (dict reference from src/pipeline.py)
         self._crop_stats_dict: Optional[dict] = None
         self._crop_total: int = 0
-
-        # Extra / manual feature rates
-        self._feature_rates: Dict[str, float] = {}
 
         # Pipeline metadata
         self._config_name: str = ''
@@ -244,16 +414,12 @@ class PipelineUI:
         _current_ui = self
 
     def suspend(self):
-        """Temporarily stop the Live display so the normal terminal is visible.
-        Stops the refresh thread and exits the alternate-buffer mode.
-        Call resume() to bring the dashboard back."""
+        """Temporarily stop the Live display so the normal terminal is visible."""
         if not self._active or self._suspended:
             return
-        # Stop refresh thread first
         self._stop_event.set()
         if self._refresh_thread:
             self._refresh_thread.join(timeout=1.5)
-        # Exit alternate buffer
         if self._live:
             try:
                 self._live.stop()
@@ -270,7 +436,6 @@ class PipelineUI:
                 self._live.start()
             except Exception:
                 pass
-        # Restart refresh thread
         self._stop_event.clear()
         self._refresh_thread = threading.Thread(
             target=self._refresh_loop, daemon=True, name='PipelineUI-refresh'
@@ -341,10 +506,27 @@ class PipelineUI:
             self._crop_stats_dict = stats_dict
             self._crop_total = total
 
-    def set_feature_rate(self, feature: str, rate: float):
-        """Manually set a throughput rate (overrides operation_timing derivation)."""
+    def set_feature_config(self, features: Dict[str, bool],
+                           disabled_stages: Optional[Set[str]] = None):
+        """Set which features and stages are enabled/disabled in config.
+
+        Call once after ui.start(), before the pipeline runs.
+
+        Args:
+            features: dict of feature_config_key → enabled_bool
+                      e.g. {'loudness': True, 'timbral': False, ...}
+            disabled_stages: set of stage_ids that are explicitly disabled in
+                             the config (shown in red in the stages panel).
+                             e.g. {'organize', 'track_analysis'}
+        """
         with self._lock:
-            self._feature_rates[feature] = rate
+            self._feature_enabled = dict(features)
+            self._disabled_stages = set(disabled_stages or ())
+
+    def set_feature_rate(self, group_label: str, rate: float):
+        """Manually set a per-feature-group throughput rate (items/s)."""
+        with self._lock:
+            self._group_rates[group_label] = rate
 
     # ── Refresh loop ──────────────────────────────────────────────────────────
 
@@ -360,16 +542,18 @@ class PipelineUI:
     # ── Rendering ─────────────────────────────────────────────────────────────
 
     def _render(self) -> 'Layout':
-        # Snapshot state under lock — minimize lock hold time
+        # Snapshot state under lock
         with self._lock:
             elapsed = time.time() - self._start_time
             stages = dict(self._stages)
+            feature_enabled = dict(self._feature_enabled)
+            disabled_stages = set(self._disabled_stages)
+            group_rates = dict(self._group_rates)
             current_file = self._current_file
             current_op = self._current_op
             prog_done = self._progress_done
             prog_total = self._progress_total
             prog_rate = self._progress_rate
-            feat_rates = dict(self._feature_rates)
             log_msgs = list(self._log_deque)
             config_name = self._config_name
             log_path = self._log_path
@@ -378,13 +562,13 @@ class PipelineUI:
             crop_total = self._crop_total
 
         # ── Derive crop progress ───────────────────────────────────────────
+        # Once crop_stats is set (crop analysis phase), always use crop counts
+        # so the features panel shows crop progress, not leftover track counts.
         if crop_stats is not None and crop_total > 0:
-            crops_done = crop_stats.get('crops_processed', 0)
-            if crops_done >= prog_done:
-                prog_done = crops_done
-                prog_total = crop_total
+            prog_done  = crop_stats.get('crops_processed', 0)
+            prog_total = crop_total
 
-        # ── Derive stats + throughput from PipelineStats ───────────────────
+        # ── Derive stats from PipelineStats ───────────────────────────────
         tracks_processed = 0
         crops_analyzed = 0
         metadata_found = 0
@@ -401,13 +585,20 @@ class PipelineUI:
             metadata_found = getattr(self._stats, 'tracks_metadata_found', 0)
             error_count = len(getattr(self._stats, 'errors', []))
 
-            # Build throughput rates from completed operations
+            # Pull per-feature rates from operation_timing
             op_timing = getattr(self._stats, 'operation_timing', {})
-            for op_key, display_name in OP_DISPLAY.items():
+            for op_key, group_label in _OP_TO_GROUP_LABEL.items():
                 timing = op_timing.get(op_key)
                 if timing and timing.items_per_second > 0:
-                    if display_name not in feat_rates:
-                        feat_rates[display_name] = timing.items_per_second
+                    if group_label not in group_rates:
+                        group_rates[group_label] = timing.items_per_second
+
+        # ── Feature coverage (%) from pipeline's PASS 1 pre-scan ──────────
+        feature_coverage: Dict[str, float] = {}
+        active_crops: List[str] = []
+        if crop_stats is not None:
+            feature_coverage = crop_stats.get('feature_coverage', {})
+            active_crops = crop_stats.get('active_crops', [])
 
         # ── Assemble layout ────────────────────────────────────────────────
         layout = Layout()
@@ -421,8 +612,8 @@ class PipelineUI:
             Layout(name='right', ratio=3),
         )
         layout['left'].split_column(
-            Layout(name='stages', ratio=3),
-            Layout(name='throughput', ratio=2),
+            Layout(name='stages', ratio=2),
+            Layout(name='features', ratio=3),
         )
         layout['right'].split_column(
             Layout(name='current', ratio=2),
@@ -433,15 +624,18 @@ class PipelineUI:
         layout['header'].update(
             self._render_header(config_name, elapsed, log_path))
         layout['stages'].update(
-            self._render_stages(stages))
-        layout['throughput'].update(
-            self._render_throughput(feat_rates))
+            self._render_stages(stages, disabled_stages))
+        layout['features'].update(
+            self._render_features(stages, feature_enabled, disabled_stages,
+                                   prog_done, prog_total, prog_rate, group_rates,
+                                   feature_coverage))
         layout['current'].update(
             self._render_current(current_file, current_op,
-                                  prog_done, prog_total, prog_rate))
+                                  prog_done, prog_total, prog_rate,
+                                  active_crops))
         layout['stats'].update(
             self._render_stats(tracks_processed, tracks_total,
-                                crops_analyzed, metadata_found, error_count))
+                                crops_analyzed, crop_total, metadata_found, error_count))
         layout['log'].update(
             self._render_log(log_msgs))
         layout['footer'].update(
@@ -460,76 +654,155 @@ class PipelineUI:
         if config_name:
             t.append(f'  {config_name}  ', style='dim cyan')
         t.append(f'  {h:02d}:{m:02d}:{s:02d}  ', style='bold cyan')
-        return Panel(t, style='green', box=rich_box.HEAVY_HEAD, padding=(0, 1))
+        return BevelPanel(t, padding=(0, 1))
 
-    def _render_stages(self, stages: Dict[str, Tuple[str, float]]) -> 'Panel':
+    def _render_stages(self, stages: Dict[str, Tuple[str, float]],
+                        disabled_stages: Set[str]) -> 'Panel':
         table = Table(box=None, padding=(0, 1), expand=True, show_header=False)
         table.add_column(width=2)
         table.add_column(min_width=20)
         table.add_column(width=7, justify='right')
 
-        icons = {
-            'pending': ('·', 'dim'),
-            'running': ('▶', 'bold yellow'),
-            'done':    ('✓', 'bold green'),
-            'skipped': ('─', 'dim'),
-            'error':   ('✗', 'bold red'),
+        icon_map = {
+            'pending': ('·', 'dim',       'dim'),
+            'running': ('▶', 'bold yellow','bold yellow'),
+            'done':    ('✓', 'bold green', 'dim green'),
+            'skipped': ('─', 'dim',       'dim'),
+            'error':   ('✗', 'bold red',  'bold red'),
         }
 
         for stage_id, stage_name in STAGES:
             status, elapsed = stages.get(stage_id, ('pending', 0.0))
-            icon, icon_style = icons.get(status, ('·', 'dim'))
-            name_style = icon_style if status not in ('pending', 'skipped') else 'dim'
 
-            if elapsed > 0:
-                elapsed_str = (f'{int(elapsed)//60}:{int(elapsed)%60:02d}'
-                               if elapsed >= 60 else f'{elapsed:.0f}s')
+            # Config-disabled stages get a distinct ✗ treatment
+            if stage_id in disabled_stages and status in ('pending', 'skipped'):
+                icon, icon_style, name_style = '✗', 'dim red', 'dim red'
+                elapsed_str = 'disabled'
             else:
-                elapsed_str = ''
+                icon, icon_style, name_style = icon_map.get(
+                    status, ('·', 'dim', 'dim'))
+                if elapsed > 0:
+                    elapsed_str = (f'{int(elapsed)//60}:{int(elapsed)%60:02d}'
+                                   if elapsed >= 60 else f'{elapsed:.0f}s')
+                else:
+                    elapsed_str = ''
 
             table.add_row(
                 Text(icon, style=icon_style),
                 Text(stage_name, style=name_style),
-                Text(elapsed_str, style='dim'),
+                Text(elapsed_str, style='dim red' if elapsed_str == 'disabled' else 'dim'),
             )
 
-        return Panel(table, title='[bold blue]Pipeline Stages[/]',
-                     border_style='blue', box=rich_box.ROUNDED, padding=(0, 1))
+        return BevelPanel(table, title='[bold blue]Pipeline Stages[/]',
+                          padding=(0, 1))
 
-    def _render_throughput(self, feat_rates: Dict[str, float]) -> 'Panel':
+    def _render_features(self, stages: Dict[str, Tuple[str, float]],
+                          feature_enabled: Dict[str, bool],
+                          disabled_stages: Set[str],
+                          prog_done: int, prog_total: int, prog_rate: float,
+                          group_rates: Dict[str, float],
+                          feature_coverage: Optional[Dict[str, float]] = None) -> 'BevelPanel':
         table = Table(box=None, padding=(0, 1), expand=True, show_header=False)
-        table.add_column(min_width=14)
-        table.add_column(width=6, justify='right')
-        table.add_column(min_width=10)
+        table.add_column(width=2)           # icon
+        table.add_column(min_width=9)       # group name
+        table.add_column(width=11, justify='right')  # N/M count
+        table.add_column(min_width=7, justify='right')  # @ rate/s or status label
 
-        active = {k: v for k, v in feat_rates.items() if v > 0}
-        if not active:
-            table.add_row(Text('No data yet', style='dim'), Text(''), Text(''))
-        else:
-            max_rate = max(active.values(), default=1.0)
-            for name, rate in sorted(active.items(), key=lambda x: -x[1]):
-                bar_len = max(1, int((rate / max_rate) * 10))
-                bar = '█' * bar_len + '░' * (10 - bar_len)
+        active_stages = {sid for sid, (st, _) in stages.items() if st == 'running'}
+        done_stages   = {sid for sid, (st, _) in stages.items() if st == 'done'}
+        skipped_stages = {sid for sid, (st, _) in stages.items()
+                          if st in ('skipped', 'pending')} | disabled_stages
+
+        for group_key, label, config_keys, stage_ids in FEATURE_GROUPS:
+            # Is the group enabled? (any of its config keys enabled)
+            enabled = any(feature_enabled.get(k, True) for k in config_keys)
+
+            if not enabled:
                 table.add_row(
-                    Text(name, style='dim'),
-                    Text(f'{rate:.1f}', style='cyan'),
-                    Text(bar, style='green'),
+                    Text('✗', style='dim red'),
+                    Text(label, style='dim red'),
+                    Text('', style=''),
+                    Text('disabled', style='dim red'),
                 )
+                continue
 
-        return Panel(table, title='[bold blue]Throughput[/] [dim](it/s)[/]',
-                     border_style='blue', box=rich_box.ROUNDED, padding=(0, 1))
+            # Determine group status from relevant stages
+            relevant_running = stage_ids & active_stages
+            all_relevant_done = stage_ids and not (stage_ids - done_stages)
+            stage_disabled = bool(stage_ids & disabled_stages) and not (stage_ids - disabled_stages)
+
+            if relevant_running:
+                # Currently processing — show progress + rate
+                icon, icon_style, name_style = '▶', 'bold yellow', 'yellow'
+                count_str = f'{prog_done:,}/{prog_total:,}' if prog_total > 0 else ''
+                rate = group_rates.get(label, prog_rate)
+                if rate >= 10:
+                    rate_str = f'@ {rate:,.0f}/s'
+                elif rate > 0:
+                    rate_str = f'@ {rate:.1f}/s'
+                else:
+                    rate_str = ''
+                rate_style = 'cyan'
+            elif all_relevant_done:
+                icon, icon_style, name_style = '✓', 'bold green', 'dim green'
+                count_str = ''
+                # Badge features that only ran on tracks when crops are now running
+                if 'crop_analysis' in active_stages and 'crop_analysis' not in stage_ids:
+                    rate_str = 'track'
+                    rate_style = 'dim green'
+                else:
+                    rate_str = ''
+                    rate_style = ''
+            elif stage_disabled:
+                # The whole stage this feature runs in is config-disabled
+                icon, icon_style, name_style = '─', 'dim red', 'dim red'
+                count_str = ''
+                rate_str = 'stage off'
+                rate_style = 'dim red'
+            else:
+                icon, icon_style, name_style = '·', 'dim', 'dim'
+                count_str = ''
+                rate_str = ''
+                rate_style = ''
+
+            # Build label cell: main name + optional coverage % + dim sub-labels
+            pct = (feature_coverage or {}).get(label)
+            lbl_t = Text()
+            lbl_t.append(label, style=name_style)
+            if pct is not None and not relevant_running:
+                lbl_t.append(f' {pct:.0%}', style='dim')
+            if len(config_keys) > 1:
+                short = ' · '.join(_KEY_SHORT.get(k, k) for k in config_keys)
+                lbl_t.append(f'\n  {short}', style='dim')
+
+            table.add_row(
+                Text(icon, style=icon_style),
+                lbl_t,
+                Text(count_str, style='dim'),
+                Text(rate_str, style=rate_style),
+            )
+
+        return BevelPanel(table, title='[bold blue]Features[/]',
+                          padding=(0, 1))
 
     def _render_current(self, current_file: str, current_op: str,
-                         done: int, total: int, rate: float) -> 'Panel':
+                         done: int, total: int, rate: float,
+                         active_crops: Optional[List[str]] = None) -> 'Panel':
         lines = []
 
-        fn = current_file or '—'
-        if len(fn) > 52:
-            fn = '…' + fn[-51:]
-        lines.append(Text(fn, style='bold yellow', overflow='ellipsis', no_wrap=True))
-
-        if current_op:
-            lines.append(Text(current_op, style='cyan'))
+        if active_crops:
+            # Multi-worker mode: show all in-flight crop stems
+            lines.append(Text(current_op or 'Processing', style='cyan'))
+            for stem in active_crops:
+                fn = stem if len(stem) <= 52 else '…' + stem[-51:]
+                lines.append(Text(fn, style='bold yellow', no_wrap=True))
+        else:
+            fn = current_file or '—'
+            if len(fn) > 52:
+                fn = '…' + fn[-51:]
+            lines.append(Text(fn, style='bold yellow', overflow='ellipsis', no_wrap=True))
+            if current_op:
+                lines.append(Text(current_op, style='cyan'))
 
         lines.append(Text(''))
 
@@ -549,18 +822,16 @@ class PipelineUI:
 
             lines.append(Text(f'{done:,} / {total:,}', style='dim'))
 
-        return Panel(Group(*lines), title='[bold blue]Current[/]',
-                     border_style='blue', box=rich_box.ROUNDED, padding=(0, 1))
+        return BevelPanel(Group(*lines), title='[bold blue]Current[/]',
+                          padding=(0, 1))
 
     def _render_stats(self, tracks_processed: int, tracks_total: int,
-                       crops_analyzed: int, metadata_found: int,
-                       error_count: int) -> 'Panel':
+                       crops_analyzed: int, crops_total: int,
+                       metadata_found: int, error_count: int) -> 'Panel':
         table = Table(box=None, padding=(0, 1), expand=True, show_header=False)
         table.add_column(min_width=12)
         table.add_column(justify='right')
 
-        # Tracks row: show processed/total when stem sep or analysis has run,
-        # otherwise just show total so "0 / 4,494" doesn't look like an error.
         if tracks_processed > 0:
             t_str = (f'{tracks_processed:,} / {tracks_total:,}'
                      if tracks_total > 0 else f'{tracks_processed:,}')
@@ -577,14 +848,21 @@ class PipelineUI:
             m_str = f'{metadata_found:,}'
         table.add_row(Text('Metadata', style='dim'), Text(m_str, style='white'))
 
-        table.add_row(Text('Crops', style='dim'), Text(f'{crops_analyzed:,}', style='white'))
+        if crops_analyzed > 0:
+            c_str = (f'{crops_analyzed:,} / {crops_total:,}'
+                     if crops_total > 0 else f'{crops_analyzed:,}')
+        elif crops_total > 0:
+            c_str = f'{crops_total:,}'
+        else:
+            c_str = '—'
+        table.add_row(Text('Crops', style='dim'), Text(c_str, style='white'))
 
         err_style = 'bold red' if error_count > 0 else 'dim'
         table.add_row(Text('Errors', style='dim'),
                        Text(f'{error_count:,}', style=err_style))
 
-        return Panel(table, title='[bold blue]Statistics[/]',
-                     border_style='blue', box=rich_box.ROUNDED, padding=(0, 1))
+        return BevelPanel(table, title='[bold blue]Statistics[/]',
+                          padding=(0, 1))
 
     def _render_log(self, log_msgs: List[Tuple]) -> 'Panel':
         lines = []
@@ -605,8 +883,8 @@ class PipelineUI:
         while len(lines) < 3:
             lines.append(Text(''))
 
-        return Panel(Group(*lines), title='[bold blue]Recent Log[/]',
-                     border_style='blue', box=rich_box.ROUNDED, padding=(0, 1))
+        return BevelPanel(Group(*lines), title='[bold blue]Recent Log[/]',
+                          padding=(0, 1))
 
     def _render_footer(self, log_path: str) -> 'Text':
         t = Text(justify='center')

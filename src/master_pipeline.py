@@ -78,7 +78,10 @@ def _flush_tunableop_results():
     try:
         import torch
         if torch.cuda.tunable.is_enabled():
-            torch.cuda.tunable.write_file()
+            fname = (torch.cuda.tunable.get_filename()
+                     if hasattr(torch.cuda.tunable, 'get_filename') else '')
+            if fname:
+                torch.cuda.tunable.write_file()
     except Exception:
         pass
 
@@ -132,6 +135,7 @@ class MasterPipelineConfig:
     # Feature settings
     skip_loudness: bool = False
     skip_spectral: bool = False
+    skip_saturation: bool = False
     skip_chroma: bool = False
     skip_timbral: bool = False
     skip_syncopation: bool = False
@@ -291,6 +295,7 @@ class MasterPipelineConfig:
             # Features
             skip_loudness=not features.get('loudness', True),
             skip_spectral=not features.get('spectral', True),
+            skip_saturation=not features.get('saturation', True),
             skip_chroma=not features.get('chroma', True),
             skip_timbral=not features.get('timbral', True),
             skip_syncopation=not features.get('syncopation', True),
@@ -394,6 +399,7 @@ class MasterPipelineConfig:
             'features': {
                 'loudness': not self.skip_loudness,
                 'spectral': not self.skip_spectral,
+                'saturation': not self.skip_saturation,
                 'chroma': not self.skip_chroma,
                 'timbral': not self.skip_timbral,
                 'syncopation': not self.skip_syncopation,
@@ -590,7 +596,8 @@ class MasterPipeline:
             state.save()
             stop_shutdown_listener()
             self.stats.run_end_time = time.time()
-            self._print_summary(self.stats.total_time)
+            # Do NOT call _print_summary() here — the TUI is still active at this point.
+            # main() calls _print_summary() after ui.stop() restores the terminal.
             return self.stats
 
         # Stage 1: Organization
@@ -712,6 +719,8 @@ class MasterPipeline:
         if not self.config.skip_crop_analysis:
             if self.ui: self.ui.set_stage('crop_analysis', 'running')
             self._run_crop_analysis()
+            if shutdown_requested.is_set():
+                return _shutdown_exit()
             if self.ui: self.ui.set_stage('crop_analysis', 'done')
             state.mark_stage_completed('crop_analysis')
             state.save()
@@ -1748,6 +1757,7 @@ class MasterPipeline:
         try:
             from timbral.loudness import analyze_file_loudness
             from spectral.spectral_features import analyze_spectral_features
+            from spectral.saturation import analyze_saturation
             from rhythm.syncopation import analyze_syncopation
             from rhythm.complexity import analyze_rhythmic_complexity
             from rhythm.per_stem_rhythm import analyze_per_stem_rhythm
@@ -1757,9 +1767,10 @@ class MasterPipeline:
             # Define output keys for each feature type
             LOUDNESS_KEYS = ['lufs', 'lra']
             SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+            SATURATION_KEYS = ['saturation_ratio', 'saturation_count']
             SYNCOPATION_KEYS = ['syncopation', 'on_beat_ratio']
             COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
-            PER_STEM_RHYTHM_KEYS = ['onset_density_bass', 'onset_density_other']
+            PER_STEM_RHYTHM_KEYS = ['onset_density_average_bass', 'onset_density_average_other']
             PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
 
             progress = ProgressBar(len(folders), desc="Features")
@@ -1806,6 +1817,13 @@ class MasterPipeline:
                         results.update(analyze_spectral_features(full_mix))
                     except Exception as e:
                         logger.debug(f"Spectral failed: {e}")
+
+                # Saturation / hard-clipping detection
+                if should_process(info_path, SATURATION_KEYS, self.config.should_overwrite('saturation'), existing=existing):
+                    try:
+                        results.update(analyze_saturation(full_mix))
+                    except Exception as e:
+                        logger.debug(f"Saturation failed: {e}")
 
                 # Syncopation
                 if not self.config.skip_syncopation and should_process(info_path, SYNCOPATION_KEYS, self.config.should_overwrite('syncopation'), existing=existing):
@@ -2278,6 +2296,7 @@ class MasterPipeline:
                 skip_demucs=True,  # Already done
                 skip_loudness=self.config.skip_loudness,
                 skip_spectral=self.config.skip_spectral,
+                skip_saturation=self.config.skip_saturation,
                 skip_harmonic=self.config.skip_chroma,
                 skip_timbral=self.config.skip_timbral,
                 skip_flamingo=self.config.skip_flamingo,
@@ -2678,6 +2697,38 @@ Config file template: config/master_pipeline.yaml
             setup_colored_logging(level=log_level)  # set root level
             ui.start(config_name=config_label, log_path=log_path)
             pipeline.ui = ui
+            # Tell the TUI which features/stages are config-disabled (shown in red)
+            _disabled_stages = set()
+            if config.skip_organize:         _disabled_stages.add('organize')
+            if config.skip_track_analysis:   _disabled_stages.add('track_analysis')
+            if config.skip_onset_analysis:   _disabled_stages.add('onset_analysis')
+            if config.skip_metadata:         _disabled_stages.add('metadata_lookup')
+            if config.skip_crops:            _disabled_stages.add('cropping')
+            if config.skip_crop_analysis:    _disabled_stages.add('crop_analysis')
+            if config.skip_flamingo:         _disabled_stages.add('flamingo')
+            if not config.flamingo_revision.get('enabled', True):
+                _disabled_stages.add('granite')
+            ui.set_feature_config(
+                features={
+                    'loudness':          not config.skip_loudness,
+                    'spectral':          not config.skip_spectral,
+                    'saturation':        not config.skip_saturation,
+                    'multiband_rms':     True,
+                    'chroma':            not config.skip_chroma,
+                    'timbral':           not config.skip_timbral,
+                    'syncopation':       not config.skip_syncopation,
+                    'complexity':        not config.skip_complexity,
+                    'per_stem_rhythm':   not config.skip_per_stem_rhythm,
+                    'per_stem_harmonic': not config.skip_per_stem_harmonic,
+                    'per_stem':          not config.skip_per_stem,
+                    'essentia':          not config.skip_essentia,
+                    'audiobox':          not config.skip_audiobox,
+                    'music_flamingo':    not config.skip_flamingo,
+                    'granite':           config.flamingo_revision.get('enabled', True),
+                    'metadata':          not config.skip_metadata,
+                },
+                disabled_stages=_disabled_stages,
+            )
         except Exception as _ui_err:
             # Fall back gracefully if TUI fails to start
             setup_colored_logging(level=log_level)
@@ -2689,13 +2740,23 @@ Config file template: config/master_pipeline.yaml
     # Run pipeline
     stats = pipeline.run()
 
-    # Stop TUI — restores the normal terminal, then print summary
+    # Stop TUI — restores the normal terminal
     if pipeline.ui and pipeline.ui.is_active:
         pipeline.ui.stop()
-        pipeline._print_summary(stats.total_time)
 
-    # Exit code
-    sys.exit(1 if stats.errors else 0)
+    # Always print summary (works for both TUI and --no-ui modes)
+    pipeline._print_summary(stats.total_time)
+
+    # Force exit via os._exit() to bypass multiprocessing atexit handlers
+    # that block indefinitely waiting for spawned worker processes to die.
+    # _rocm_clean_exit() (registered via atexit) would do the same thing but
+    # never gets reached because multiprocessing's LIFO-earlier handler blocks.
+    # We replicate its important steps here explicitly.
+    from core.graceful_shutdown import _restore_terminal
+    _restore_terminal()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1 if stats.errors else 0)
 
 
 if __name__ == "__main__":

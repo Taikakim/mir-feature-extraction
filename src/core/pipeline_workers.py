@@ -38,9 +38,10 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
     # Define output keys for each feature type (must check ALL, not just one)
     LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
+    SATURATION_KEYS = ['saturation_ratio', 'saturation_count']
     SYNCOPATION_KEYS = ['syncopation', 'on_beat_ratio']
     COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
-    PER_STEM_RHYTHM_KEYS = ['onset_density_bass', 'onset_density_other']
+    PER_STEM_RHYTHM_KEYS = ['onset_density_average_bass', 'onset_density_average_other']
     PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
 
     # Import here to avoid issues with multiprocessing
@@ -55,6 +56,7 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
 
         try:
             from spectral.spectral_features import analyze_spectral_features
+            from spectral.saturation import analyze_saturation
             from timbral.loudness import analyze_file_loudness
             from rhythm.syncopation import analyze_syncopation
             from rhythm.complexity import analyze_rhythmic_complexity
@@ -83,6 +85,13 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
             if should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral'), existing=existing):
                 try:
                     results.update(analyze_spectral_features(full_mix))
+                except Exception:
+                    pass  # Non-critical
+
+            # Saturation / hard-clipping detection
+            if should_process(info_path, SATURATION_KEYS, should_overwrite('saturation'), existing=existing):
+                try:
+                    results.update(analyze_saturation(full_mix))
                 except Exception:
                     pass  # Non-critical
 

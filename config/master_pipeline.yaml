@@ -107,6 +107,11 @@ features:
   # Spectral features (flatness, flux, skewness, kurtosis)
   spectral: true
 
+  # Saturation / overcompression detection (frame-level peak envelope + hold merge)
+  # Catches soft limiting (~-0.5 dBFS flat tops) and hard clipping.
+  # Outputs: saturation_ratio (0-1 fraction of duration), saturation_count (#events)
+  saturation: true
+
   # Multiband RMS (bass, body, mid, air)
   multiband_rms: true
 
@@ -160,6 +165,7 @@ overwrite:
   complexity: false              # Overwrite existing rhythmic complexity data
   loudness: false                # Overwrite existing loudness data
   spectral: false                # Overwrite existing spectral features
+  saturation: false              # Overwrite existing saturation data
   multiband_rms: false           # Overwrite existing multiband RMS data
   chroma: false                   # Overwrite existing chroma features
   timbral: false                 # Overwrite existing timbral features
@@ -198,7 +204,7 @@ music_flamingo:
   # Granite revision: condense MF output into shorter focused descriptions
   # Each key under prompts → music_flamingo_{key} in .INFO
   revision:
-    enabled: true
+    enabled: false
     model: models/LMM/granite-4.0-h-tiny-GGUF/granite-4.0-h-tiny-Q8_0.gguf
     max_tokens: 512
     temperature: 0.7
@@ -216,7 +222,7 @@ music_flamingo:
 #   2. Folder name (if valid artist exists, no fingerprinting needed)  
 #   3. AcoustID fingerprinting (ONLY as last resort when both above fail)
 metadata:
-  enabled: true
+  enabled: false
   use_spotify: false              # Set to false to skip Spotify (e.g., during rate limit cooldown)
   use_musicbrainz: true          # Set to false to skip MusicBrainz
   use_fingerprinting: true       # Enable AcoustID fingerprinting as LAST RESORT only

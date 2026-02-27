@@ -108,6 +108,10 @@ FEATURE_RANGES: Dict[str, Dict[str, Any]] = {
     'spectral_skewness': {'min': -3.0, 'max': 3.0, 'type': 'number'},
     'spectral_kurtosis': {'min': 0.0, 'max': 10.0, 'type': 'number'},
 
+    # Saturation / hard-clipping (Essentia SaturationDetector)
+    'saturation_ratio': {'min': 0.0, 'max': 1.0, 'type': 'number'},
+    'saturation_count': {'min': 0, 'max': 10000, 'type': 'int'},
+
     # Multiband RMS (in dB)
     'rms_energy_bass': {'min': -60.0, 'max': 0.0, 'type': 'number'},
     'rms_energy_body': {'min': -60.0, 'max': 0.0, 'type': 'number'},

@@ -278,19 +278,12 @@
 
     /* Similarity NN panel */
     #sim-nn-panel {
-      position: fixed;
-      right: 0;
-      top: 50%;
-      transform: translateY(-50%);
       width: 260px;
-      max-height: 75vh;
-      background: rgba(15, 20, 40, 0.97);
-      border: 1px solid #333355;
-      border-right: none;
-      border-radius: 8px 0 0 8px;
+      flex-shrink: 0;
+      background: #0f1a30;
+      border-left: 1px solid #333355;
       padding: 10px;
-      overflow: hidden;
-      z-index: 200;
+      overflow-y: auto;
       display: none;
       flex-direction: column;
     }
@@ -591,6 +584,11 @@
         <button class="mode-btn" id="btn-classes" onclick="setMode('classes')">Classes</button>
       </div>
     </div>
+    <!-- Clear selection -->
+    <div class="control-group">
+      <label>&nbsp;</label>
+      <button class="mode-btn" onclick="clearSelection()" title="Clear lasso/box selection and track list (or press Esc on the plot)">&#x2715; Clear</button>
+    </div>
     <!-- Scatter X -->
     <div class="control-group" id="scatter-controls">
       <label>X Axis</label>
@@ -644,16 +642,18 @@
     <!-- Radar -->
     <div class="control-group" id="radar-controls" style="display:none">
       <label>Track</label>
-      <select id="sel-radar-track" onchange="updatePlot()" style="min-width:200px;"></select>
+      <select id="sel-radar-track" onchange="globalActiveTrack=this.value; syncTrackSelects(true);"
+        style="min-width:200px;"></select>
     </div>
     <!-- Similarity: reference track -->
     <div class="control-group" id="sim-ref-group" style="display:none">
       <label>Reference Track</label>
       <div id="sim-search-container">
-        <input type="text" id="sim-search" placeholder="Type 3+ chars to search..." autocomplete="off">
+        <input type="text" id="sim-search" placeholder="Search track name..." autocomplete="off">
         <div id="sim-search-results"></div>
       </div>
-      <select id="sel-sim-ref" onchange="updatePlot()" style="display:none;"></select>
+      <select id="sel-sim-ref" onchange="globalActiveTrack=this.value; syncTrackSelects(true);"
+        style="display:none;"></select>
     </div>
     <!-- Similarity: axis features -->
     <div class="control-group" id="sim-xp-group" style="display:none">
@@ -710,20 +710,6 @@
     <div id="sel-list"></div>
   </div>
 
-  <div id="sim-nn-panel" style="display:none;flex-direction:column;">
-    <div
-      style="font-size:11px;color:#e94560;font-weight:bold;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #333355;">
-      Most Similar</div>
-    <div id="nn-feat-row">
-      <select id="nn-f1" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-      <select id="nn-f2" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-      <select id="nn-f3" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-      <select id="nn-f4" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-      <select id="nn-f5" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-    </div>
-    <div id="nn-track-list"></div>
-  </div>
-
   <div id="track-panel">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
       <div id="tp-name"></div>
@@ -736,6 +722,19 @@
 
   <div class="main-area">
     <div id="plot"></div>
+    <div id="sim-nn-panel" style="display:none;flex-direction:column;">
+      <div
+        style="font-size:11px;color:#e94560;font-weight:bold;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #333355;">
+        Most Similar</div>
+      <div id="nn-feat-row">
+        <select id="nn-f1" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+        <select id="nn-f2" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+        <select id="nn-f3" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+        <select id="nn-f4" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+        <select id="nn-f5" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+      </div>
+      <div id="nn-track-list"></div>
+    </div>
     <div id="track-list-panel">
       <div class="tl-header">
         <h4 id="tl-title">Tracks</h4>
@@ -774,6 +773,17 @@
     let logX = false, logY = false;
     let showCurated = false;
     let formulaVisible = false;
+    let globalActiveTrack = '';
+
+    function syncTrackSelects(dispatch = false) {
+      const rs = document.getElementById('sel-radar-track');
+      const ss = document.getElementById('sel-sim-ref');
+      const ssi = document.getElementById('sim-search');
+      if (rs && rs.value !== globalActiveTrack) rs.value = globalActiveTrack;
+      if (ss && ss.value !== globalActiveTrack) ss.value = globalActiveTrack;
+      if (ssi && ssi.value !== globalActiveTrack && document.activeElement !== ssi) ssi.value = globalActiveTrack;
+      if (dispatch) updatePlot();
+    }
 
     // ---- Helpers ---------------------------------------------------------------
     function mean(arr) {
@@ -1019,6 +1029,8 @@
 
     // ---- Track panel -----------------------------------------------------------
     function showTrackPanel(idx, featureKeys) {
+      globalActiveTrack = TRACKS[idx];
+      syncTrackSelects();
       const panel = document.getElementById('track-panel');
       document.getElementById('tp-name').textContent = TRACKS[idx];
       const keys = Array.isArray(featureKeys) ? featureKeys : [featureKeys];
@@ -1058,6 +1070,11 @@
     }
     function hideSidebar() {
       document.getElementById('sel-panel').style.display = 'none';
+    }
+    function clearSelection() {
+      hideSidebar();
+      clearTrackList();
+      updatePlot(); // re-renders plot fresh, stripping any selection highlight
     }
 
     // ---- updatePlot dispatcher -------------------------------------------------
@@ -1171,7 +1188,8 @@
           const idx = pt.customdata !== undefined ? pt.customdata : trackIdxs[pt.pointIndex];
           if (idx !== undefined) {
             // Navigate to radar for clicked track
-            document.getElementById('sel-radar-track').value = TRACKS[idx];
+            globalActiveTrack = TRACKS[idx];
+            syncTrackSelects();
             setMode('radar');
           }
         }
@@ -1235,7 +1253,11 @@
         if (d.points && d.points.length > 0) {
           const pt = d.points[0];
           const idx = pt.customdata !== undefined ? pt.customdata : idxs[pt.pointIndex];
-          if (idx !== undefined) showTrackPanel(idx, [kxp, kxn, kyp, kyn]);
+          if (idx !== undefined) {
+            globalActiveTrack = TRACKS[idx];
+            syncTrackSelects();
+            setMode('radar');
+          }
         }
       });
       document.getElementById('info-bar').textContent = 'X: ' + kxp + ' vs ' + kxn + ' | Y: ' + kyp + ' vs ' + kyn + ' | ' + idxs.length + ' tracks';
@@ -1655,7 +1677,7 @@
             '</div>';
         });
         barsHtml += '</div>';
-        return '<div class="nn-row" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + t + '];setMode(\'radar\')">' +
+        return '<div class="nn-row" onclick="globalActiveTrack=TRACKS[' + t + '];syncTrackSelects();setMode(\'radar\')">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:10px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + (rank + 1) + '. ' + TRACKS[t] + '</span><span style="flex-shrink:0;margin-left:4px;">' + linkHtml + '</span></div>' +
           '<div style="font-size:9px;color:#666;">' + item.dist.toFixed(3) + '</div>' +
           barsHtml + '</div>';
@@ -1682,7 +1704,7 @@
         else if (svc === 'musicbrainz') { href = MBIDS[idx] ? 'https://musicbrainz.org/recording/' + MBIDS[idx] : ''; hasLink = !!MBIDS[idx]; }
         else if (svc === 'beatport') { href = 'https://www.beatport.com/search?q=' + encodeURIComponent(searchName(name)); }
         const lk = hasLink && href ? '<a class="tl-link" href="' + href + '" target="_blank">\u2197</a>' : '<span class="tl-link" style="opacity:0.3;">\u2014</span>';
-        return '<div class="tl-item" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + idx + '];setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
+        return '<div class="tl-item" onclick="globalActiveTrack=TRACKS[' + idx + '];syncTrackSelects();setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
       }).join('');
     }
     function clearTrackList() {
@@ -1768,12 +1790,20 @@
       }
       const ux = UNITS[kx] && UNITS[kx] !== '-' ? ' [' + UNITS[kx] + ']' : '';
       const uy = UNITS[ky] && UNITS[ky] !== '-' ? ' [' + UNITS[ky] + ']' : '';
+
+      let oldVis = {};
+      const pd = document.getElementById('plot');
+      if (pd && pd.data && pd.layout && pd.layout.title && pd.layout.title.text && pd.layout.title.text.includes('by ' + classKey.replace(/_/g, ' '))) {
+        pd.data.forEach(t => { if (t.legendgroup) oldVis[t.legendgroup] = t.visible; });
+      }
+
       const traces = sorted.map(([lbl, g], ci) => ({
         x: g.x, y: g.y, mode: 'markers', type: 'scattergl',
         marker: { color: CLASS_COLORS[ci % CLASS_COLORS.length], size: 5, opacity: 0.7 },
         hovertext: g.names.map((n, j) => '<b>' + n + '</b><br>' + kx + ': ' + g.x[j].toFixed(3) + '<br>' + ky + ': ' + g.y[j].toFixed(3) + '<br>' + classKey.replace(/_/g, ' ') + ': ' + lbl),
         hoverinfo: 'text', name: lbl + ' (' + g.x.length + ')',
         legendgroup: lbl,
+        visible: oldVis[lbl] !== undefined ? oldVis[lbl] : true,
         customdata: g.idxs
       }));
 
@@ -1792,6 +1822,7 @@
             line: { color: CLASS_COLORS[ci % CLASS_COLORS.length], width: 2, dash: 'dash' },
             name: lbl + ' (trend)', hoverinfo: 'skip',
             legendgroup: lbl,
+            visible: oldVis[lbl] !== undefined ? oldVis[lbl] : true,
             showlegend: false
           });
         });
@@ -1812,7 +1843,8 @@
           const pt = d.points[0];
           const idx = pt.customdata;
           if (idx !== undefined) {
-            document.getElementById('sel-radar-track').value = TRACKS[idx];
+            globalActiveTrack = TRACKS[idx];
+            syncTrackSelects();
             setMode('radar');
           }
         }
@@ -1884,39 +1916,47 @@
     }
 
     // ---- Init ------------------------------------------------------------------
-    document.getElementById('sim-search').addEventListener('input', function (e) {
-      const q = e.target.value.toLowerCase();
-      const resDiv = document.getElementById('sim-search-results');
-      if (q.length < 3) {
-        resDiv.style.display = 'none';
-        return;
-      }
-      resDiv.innerHTML = '';
+    const simSearch = document.getElementById('sim-search');
+    const simRes = document.getElementById('sim-search-results');
+
+    function renderSimSearch(q) {
+      simRes.innerHTML = '';
       let hits = 0;
       for (let i = 0; i < TRACKS.length; i++) {
-        if (TRACKS[i].toLowerCase().includes(q)) {
+        if (q.length === 0 || TRACKS[i].toLowerCase().includes(q)) {
           const div = document.createElement('div');
           div.className = 'sim-search-item';
           div.textContent = TRACKS[i];
           div.onclick = function () {
-            document.getElementById('sim-search').value = TRACKS[i];
-            document.getElementById('sel-sim-ref').value = TRACKS[i];
-            resDiv.style.display = 'none';
-            updatePlot();
+            globalActiveTrack = TRACKS[i];
+            simSearch.value = TRACKS[i];
+            simRes.style.display = 'none';
+            syncTrackSelects(true);
           };
-          resDiv.appendChild(div);
+          simRes.appendChild(div);
           if (++hits >= 150) break;
         }
       }
       if (hits === 0) {
-        resDiv.innerHTML = '<div class="sim-search-item" style="color:#888;cursor:default;">No matches</div>';
+        simRes.innerHTML = '<div class="sim-search-item" style="color:#888;cursor:default;">No matches</div>';
       }
-      resDiv.style.display = 'block';
+      simRes.style.display = 'block';
+    }
+
+    simSearch.addEventListener('input', e => renderSimSearch(e.target.value.toLowerCase()));
+    simSearch.addEventListener('focus', e => {
+      e.target.value = ''; // Clear to allow instant search across all
+      renderSimSearch('');
     });
-    document.getElementById('sim-search').addEventListener('focus', function (e) { e.target.dispatchEvent(new Event('input')); });
+
     document.addEventListener('click', function (e) {
       const c = document.getElementById('sim-search-container');
-      if (c && !c.contains(e.target)) document.getElementById('sim-search-results').style.display = 'none';
+      if (c && !c.contains(e.target)) {
+        simRes.style.display = 'none';
+        if (simSearch.value === '' && globalActiveTrack) {
+          simSearch.value = globalActiveTrack; // Restore visual name if they clicked away without choosing
+        }
+      }
     });
 
     clearTrackList();
