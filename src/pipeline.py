@@ -1036,19 +1036,48 @@ class Pipeline:
             # Checked individually — any missing key for a group means that group
             # is incomplete, regardless of whether the "sentinel" key is present.
             _COV_KEY_GROUPS = {
-                'Loudness':  ['lufs', 'lra'],
-                'Spectral':  ['spectral_flatness', 'spectral_flux',
-                              'spectral_skewness', 'spectral_kurtosis'],
-                'Rhythm':    ['bpm'],
-                'Per-Stem':  ['syncopation_drums'],
-                'Chroma':    [f'chroma_{i}' for i in range(12)],
-                'Timbral':   ['brightness', 'roughness', 'hardness', 'depth',
-                              'booming', 'reverberation', 'sharpness', 'warmth'],
-                'Essentia':  ['danceability'],
-                'AudioBox':  ['content_enjoyment'],
-                'Flamingo':  ['music_flamingo_brief'],
-                'Metadata':  ['release_year'],
+                'Loudness':   ['lufs', 'lra'],
+                'Spectral':   ['spectral_flatness', 'spectral_flux',
+                               'spectral_skewness', 'spectral_kurtosis'],
+                'Saturation': ['saturation_ratio', 'saturation_count'],
+                'RMS':        ['rms_energy_bass', 'rms_energy_body',
+                               'rms_energy_mid', 'rms_energy_air'],
+                'Rhythm':     ['bpm'],
+                'Per-Stem':   ['syncopation_drums'],
+                'Chroma':     [f'chroma_{i}' for i in range(12)],
+                'Timbral':    ['brightness', 'roughness', 'hardness', 'depth',
+                               'booming', 'reverberation', 'sharpness', 'warmth'],
+                'Essentia':   ['danceability'],
+                'AudioBox':   ['content_enjoyment'],
+                'Flamingo':   ['music_flamingo_brief'],
+                'Metadata':   ['release_year'],
             }
+
+            # Pre-populate coverage from dataset.json (fast: single sequential read).
+            # This shows the TUI meaningful percentages immediately, before the slow
+            # per-file scan loop below completes.
+            _dataset_path = (all_crops[0].parent.parent / 'dataset.json'
+                             if all_crops else None)
+            if _dataset_path and _dataset_path.exists():
+                try:
+                    from core.data_store import DataStore
+                    _ds = DataStore.load(_dataset_path)
+                    _ds_cov = _ds.coverage()  # {feature_key: {"pct": float, ...}}
+                    _n_ds = len(_ds)
+                    if _n_ds > 0:
+                        self.stats['feature_coverage'] = {
+                            lbl: min(
+                                _ds_cov.get(k, {}).get('pct', 0.0) / 100.0
+                                for k in keys
+                            )
+                            for lbl, keys in _COV_KEY_GROUPS.items()
+                        }
+                        self.stats['feature_coverage_n'] = _n_ds
+                        logger.debug(
+                            f"Pre-loaded coverage from dataset.json ({_n_ds} entries)"
+                        )
+                except Exception as _e:
+                    logger.debug(f"Could not pre-load coverage from dataset.json: {_e}")
             # Representative single key used for coverage fraction tracking
             _COV_SENTINEL = {lbl: keys[0] for lbl, keys in _COV_KEY_GROUPS.items()}
             _cov_counts = {lbl: 0 for lbl in _COV_KEY_GROUPS}
@@ -1095,8 +1124,12 @@ class Pipeline:
                                 for k in ['spectral_flatness', 'spectral_flux',
                                           'spectral_skewness', 'spectral_kurtosis',
                                           'rms_energy_bass', 'rms_energy_body',
-                                          'rms_energy_mid', 'rms_energy_air',
-                                          'saturation_ratio', 'saturation_count'])):
+                                          'rms_energy_mid', 'rms_energy_air'])):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_saturation and (
+                            _ow('saturation') or
+                            any(k not in existing_keys
+                                for k in ['saturation_ratio', 'saturation_count'])):
                         needs_run = True
                     if not needs_run and not self.config.skip_harmonic and (
                             _ow('harmonic') or
@@ -1280,42 +1313,57 @@ class Pipeline:
                     batch_size = 16  # Process 16 files per GPU batch
                     logger.info(f"  Processing {len(to_process)} files (batch_size={batch_size})...")
                     progress = ProgressBar(len(to_process), desc="AudioBox")
+                    _ab_done = len(all_crops) - len(to_process)  # already had the feature
 
-                    for batch_start in range(0, len(to_process), batch_size):
-                        if shutdown_requested.is_set():
-                            logger.info("  Shutdown requested — stopping AudioBox pass.")
-                            break
+                    try:
+                        for batch_start in range(0, len(to_process), batch_size):
+                            if shutdown_requested.is_set():
+                                logger.info("  Shutdown requested — stopping AudioBox pass.")
+                                break
 
-                        batch_end = min(batch_start + batch_size, len(to_process))
-                        batch_paths = to_process[batch_start:batch_end]
+                            batch_end = min(batch_start + batch_size, len(to_process))
+                            batch_paths = to_process[batch_start:batch_end]
 
-                        try:
-                            # Process batch
-                            batch_results = analyze_audiobox_aesthetics_batch(batch_paths)
+                            # Tell the TUI what's currently in flight
+                            self.stats['active_crops'] = [p.stem for p in batch_paths]
 
-                            # Save results
-                            for crop_path, results in zip(batch_paths, batch_results):
-                                if results:
-                                    safe_update(get_crop_info_path(crop_path), results)
-                                    self.stats["crops_processed"] += 1
-                                else:
-                                    self.stats["crops_failed"] += 1
-                        except Exception as e:
-                            # Batch failed (likely one corrupt file) — retry individually
-                            logger.warning(f"  AudioBox batch failed, retrying {len(batch_paths)} files individually: {e}")
-                            for crop_path in batch_paths:
-                                try:
-                                    results = analyze_audiobox_aesthetics_batch([crop_path])
-                                    if results and results[0]:
-                                        safe_update(get_crop_info_path(crop_path), results[0])
+                            try:
+                                # Process batch
+                                batch_results = analyze_audiobox_aesthetics_batch(batch_paths)
+
+                                # Save results and update coverage
+                                for crop_path, results in zip(batch_paths, batch_results):
+                                    if results:
+                                        safe_update(get_crop_info_path(crop_path), results)
                                         self.stats["crops_processed"] += 1
+                                        _ab_done += 1
                                     else:
                                         self.stats["crops_failed"] += 1
-                                except Exception as e2:
-                                    logger.error(f"  AudioBox skipping corrupt file {crop_path.name}: {e2}")
-                                    self.stats["crops_failed"] += 1
+                            except Exception as e:
+                                # Batch failed (likely one corrupt file) — retry individually
+                                logger.warning(f"  AudioBox batch failed, retrying {len(batch_paths)} files individually: {e}")
+                                for crop_path in batch_paths:
+                                    try:
+                                        results = analyze_audiobox_aesthetics_batch([crop_path])
+                                        if results and results[0]:
+                                            safe_update(get_crop_info_path(crop_path), results[0])
+                                            self.stats["crops_processed"] += 1
+                                            _ab_done += 1
+                                        else:
+                                            self.stats["crops_failed"] += 1
+                                    except Exception as e2:
+                                        logger.error(f"  AudioBox skipping corrupt file {crop_path.name}: {e2}")
+                                        self.stats["crops_failed"] += 1
 
-                        logger.info(progress.update(batch_end))
+                            # Update coverage after each batch
+                            if _n > 0:
+                                self.stats.setdefault('feature_coverage', {})['AudioBox'] = (
+                                    min(1.0, _ab_done / _n))
+
+                            logger.info(progress.update(batch_end))
+
+                    finally:
+                        self.stats['active_crops'] = []
 
                     logger.info(progress.finish("Complete"))
                 else:
@@ -1377,6 +1425,8 @@ class Pipeline:
                         len(all_crops) - len(to_process)) / _n
 
                 if to_process:
+                    _es_done = len(all_crops) - len(to_process)  # already had the feature
+
                     # Pre-load all TF models into VRAM before processing
                     preload_models(
                         include_voice=self.config.essentia_voice,
@@ -1414,6 +1464,9 @@ class Pipeline:
                             logger.info("  Shutdown requested — stopping Essentia pass.")
                             break
 
+                        # Tell the TUI which file is being processed
+                        self.stats['active_crops'] = [crop_path.stem]
+
                         try:
                             vocals_path = vocals_path_cache.get(crop_path) if self.config.essentia_gender else None
 
@@ -1434,9 +1487,15 @@ class Pipeline:
                             if results:
                                 safe_update(get_crop_info_path(crop_path), results)
                                 self.stats["crops_processed"] += 1
+                                _es_done += 1
                         except Exception as e:
                             logger.error(f"  Essentia failed for {crop_path.name}: {e}")
                             self.stats["crops_failed"] += 1
+
+                        # Update coverage after each crop
+                        if _n > 0:
+                            self.stats.setdefault('feature_coverage', {})['Essentia'] = (
+                                min(1.0, _es_done / _n))
 
                         # Advance prefetcher past this crop (and its vocals stem)
                         prefetcher.mark_processed(crop_path)
@@ -1450,6 +1509,7 @@ class Pipeline:
                                 state.save()
 
                     prefetcher.stop()
+                    self.stats['active_crops'] = []
 
                     # Log per-model timing statistics
                     if timing_acc:
@@ -1544,12 +1604,14 @@ class Pipeline:
                         prefetcher = PathPrefetcher(to_process, buffer_size=8)
                         prefetcher.start()
 
+                        _fl_done = len(all_crops) - len(to_process) - skipped_by_sampling
                         logger.info(f"  Processing {len(to_process)} files (with disk prefetch)...")
                         for i, crop_path in enumerate(to_process, 1):
                             if shutdown_requested.is_set():
                                 logger.info("  Shutdown requested — stopping Flamingo pass.")
                                 break
 
+                            self.stats['active_crops'] = [crop_path.stem]
                             results = {}
                             try:
                                 for prompt_type, prompt_text in prompts_map.items():
@@ -1572,6 +1634,10 @@ class Pipeline:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
                                     safe_update(get_crop_info_path(crop_path), results)
                                     self.stats["crops_processed"] += 1
+                                    _fl_done += 1
+                                    if _n > 0:
+                                        self.stats.setdefault('feature_coverage', {})['Flamingo'] = (
+                                            min(1.0, _fl_done / _n))
 
                                 logger.info(f"  [{i}/{len(to_process)}] {crop_path.name}")
 
@@ -1589,6 +1655,7 @@ class Pipeline:
                                 # Don't break loop, keep processing other files
 
                         prefetcher.stop()
+                        self.stats['active_crops'] = []
                         if state:
                             state.update_pass_progress('pass_4_flamingo', completed=len(to_process), total=len(to_process))
 

@@ -139,7 +139,7 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
 
             # Atomic rename
             temp_path.replace(file_path)
-            logger.debug(f"Successfully wrote {len(data)} keys to {file_path}")
+            logger.debug(f"Wrote {file_path} ({len(data)} keys total)")
 
         except Exception as e:
             # Clean up temp file if it exists

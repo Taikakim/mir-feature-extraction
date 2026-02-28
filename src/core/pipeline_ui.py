@@ -65,28 +65,32 @@ STAGES: List[Tuple[str, str]] = [
 # ── Feature groups ──────────────────────────────────────────────────────────────
 # (group_key, display_label, [feature_config_keys], {stage_ids_where_active})
 FEATURE_GROUPS: List[Tuple[str, str, List[str], Set[str]]] = [
-    ('loudness',  'Loudness',  ['loudness'],
-                               {'first_features', 'crop_analysis'}),
-    ('spectral',  'Spectral',  ['spectral', 'saturation', 'multiband_rms'],
-                               {'first_features', 'crop_analysis'}),
-    ('rhythm',    'Rhythm',    ['syncopation', 'complexity'],
-                               {'first_features'}),
-    ('per_stem',  'Per-Stem',  ['per_stem_rhythm', 'per_stem_harmonic', 'per_stem'],
-                               {'first_features', 'crop_analysis'}),
-    ('chroma',    'Chroma',    ['chroma'],
-                               {'crop_analysis'}),
-    ('timbral',   'Timbral',   ['timbral'],
-                               {'crop_analysis'}),
-    ('essentia',  'Essentia',  ['essentia'],
-                               {'crop_analysis'}),
-    ('audiobox',  'AudioBox',  ['audiobox'],
-                               {'crop_analysis'}),
-    ('flamingo',  'Flamingo',  ['music_flamingo'],
-                               {'flamingo'}),
-    ('granite',   'Granite',   ['granite'],
-                               {'granite'}),
-    ('metadata',  'Metadata',  ['metadata'],
-                               {'metadata_lookup'}),
+    ('loudness',    'Loudness',   ['loudness'],
+                                  {'first_features', 'crop_analysis'}),
+    ('spectral',    'Spectral',   ['spectral'],
+                                  {'first_features', 'crop_analysis'}),
+    ('saturation',  'Saturation', ['saturation'],
+                                  {'first_features', 'crop_analysis'}),
+    ('rms',         'RMS',        ['multiband_rms'],
+                                  {'first_features', 'crop_analysis'}),
+    ('rhythm',      'Rhythm',     ['syncopation', 'complexity'],
+                                  {'first_features'}),
+    ('per_stem',    'Per-Stem',   ['per_stem_rhythm', 'per_stem_harmonic', 'per_stem'],
+                                  {'first_features', 'crop_analysis'}),
+    ('chroma',      'Chroma',     ['chroma'],
+                                  {'crop_analysis'}),
+    ('timbral',     'Timbral',    ['timbral'],
+                                  {'crop_analysis'}),
+    ('essentia',    'Essentia',   ['essentia'],
+                                  {'crop_analysis'}),
+    ('audiobox',    'AudioBox',   ['audiobox'],
+                                  {'crop_analysis'}),
+    ('flamingo',    'Flamingo',   ['music_flamingo'],
+                                  {'flamingo'}),
+    ('granite',     'Granite',    ['granite'],
+                                  {'granite'}),
+    ('metadata',    'Metadata',   ['metadata'],
+                                  {'metadata_lookup'}),
 ]
 
 # Short display names for individual config keys shown as sub-labels
@@ -612,13 +616,13 @@ class PipelineUI:
             Layout(name='right', ratio=3),
         )
         layout['left'].split_column(
-            Layout(name='stages', ratio=2),
-            Layout(name='features', ratio=3),
+            Layout(name='stages', ratio=1),   # fixed-ish: 10 stages, smaller share
+            Layout(name='features', ratio=2), # 13 feature rows — needs more room
         )
         layout['right'].split_column(
-            Layout(name='current', ratio=2),
-            Layout(name='stats', ratio=2),
-            Layout(name='log', ratio=3),
+            Layout(name='current', ratio=3),
+            Layout(name='stats', size=8),     # fixed: 4 data rows + border = 6 min
+            Layout(name='log', ratio=5),      # taller log
         )
 
         layout['header'].update(
@@ -714,13 +718,19 @@ class PipelineUI:
                           if st in ('skipped', 'pending')} | disabled_stages
 
         for group_key, label, config_keys, stage_ids in FEATURE_GROUPS:
+            pct = (feature_coverage or {}).get(label)
+
             # Is the group enabled? (any of its config keys enabled)
             enabled = any(feature_enabled.get(k, True) for k in config_keys)
 
             if not enabled:
+                lbl_t = Text(overflow='ellipsis', no_wrap=True)
+                lbl_t.append(label, style='dim red')
+                if pct is not None:
+                    lbl_t.append(f' {pct:.0%}', style='dim')
                 table.add_row(
                     Text('✗', style='dim red'),
-                    Text(label, style='dim red'),
+                    lbl_t,
                     Text('', style=''),
                     Text('disabled', style='dim red'),
                 )
@@ -730,6 +740,12 @@ class PipelineUI:
             relevant_running = stage_ids & active_stages
             all_relevant_done = stage_ids and not (stage_ids - done_stages)
             stage_disabled = bool(stage_ids & disabled_stages) and not (stage_ids - disabled_stages)
+
+            # During crop analysis, track-only feature groups should never show ▶.
+            # If crop_analysis is active it means first_features has at minimum been
+            # attempted; any remaining 'running' appearance is a TUI refresh artefact.
+            if 'crop_analysis' in active_stages and 'crop_analysis' not in stage_ids:
+                relevant_running = set()
 
             if relevant_running:
                 # Currently processing — show progress + per-group rate if known
@@ -773,10 +789,9 @@ class PipelineUI:
 
             # Build label cell: main name + optional coverage %
             # Sub-keys shown as a dim suffix on the same line (no wrapping rows)
-            pct = (feature_coverage or {}).get(label)
             lbl_t = Text(overflow='ellipsis', no_wrap=True)
             lbl_t.append(label, style=name_style)
-            if pct is not None and not relevant_running:
+            if pct is not None:
                 lbl_t.append(f' {pct:.0%}', style='dim')
             if len(config_keys) > 1:
                 short = ' · '.join(_KEY_SHORT.get(k, k) for k in config_keys)

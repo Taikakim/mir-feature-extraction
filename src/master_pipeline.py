@@ -618,12 +618,14 @@ class MasterPipeline:
             if self.ui: self.ui.set_stage('organize', 'skipped')
 
         # Stage 1c: Extract audio file metadata (ID3 tags, etc.)
-        # Always runs — has its own internal skip check ('track_metadata_artist' in .INFO).
-        # Not gated on skip_to_crop_analysis: crops may exist but ID3 data may still
-        # be missing from track .INFO files.
-        if self.ui: self.ui.set_stage('metadata_id3', 'running')
-        self._run_metadata_extraction()
-        if self.ui: self.ui.set_stage('metadata_id3', 'done')
+        # Gated on metadata.enabled — if the user disables metadata, skip ID3 extraction
+        # and folder renaming (fix_various_artists) as well.
+        if not self.config.skip_metadata:
+            if self.ui: self.ui.set_stage('metadata_id3', 'running')
+            self._run_metadata_extraction()
+            if self.ui: self.ui.set_stage('metadata_id3', 'done')
+        else:
+            if self.ui: self.ui.set_stage('metadata_id3', 'skipped')
 
         # Stage 2: Full Track Analysis (GPU: BS-RoFormer, Demucs)
         if shutdown_requested.is_set():
@@ -2584,6 +2586,9 @@ Config file template: config/master_pipeline.yaml
                         help='Number of parallel workers for feature extraction (default: 8)')
     parser.add_argument('--no-ui', action='store_true',
                         help='Disable TUI dashboard — use plain coloured stdout logging instead')
+    parser.add_argument('--rebuild-dataset', action='store_true',
+                        help='Force rebuild dataset.json from .INFO files before running '
+                             '(use when dataset.json may be out of sync)')
 
     # Generate config template
     parser.add_argument('--generate-config', type=str, metavar='PATH',
@@ -2702,7 +2707,7 @@ Config file template: config/master_pipeline.yaml
             if config.skip_organize:         _disabled_stages.add('organize')
             if config.skip_track_analysis:   _disabled_stages.add('track_analysis')
             if config.skip_onset_analysis:   _disabled_stages.add('onset_analysis')
-            if config.skip_metadata:         _disabled_stages.add('metadata_lookup')
+            if config.skip_metadata:         _disabled_stages.update({'metadata_id3', 'metadata_lookup'})
             if config.skip_crops:            _disabled_stages.add('cropping')
             if config.skip_crop_analysis:    _disabled_stages.add('crop_analysis')
             if config.skip_flamingo:         _disabled_stages.add('flamingo')
@@ -2736,6 +2741,19 @@ Config file template: config/master_pipeline.yaml
     else:
         # Plain coloured logging
         setup_colored_logging(level=log_level)
+
+    # Optionally rebuild dataset.json from .INFO files before running
+    if getattr(args, 'rebuild_dataset', False):
+        try:
+            from core.data_store import DataStore
+            crops_dir = pipeline.working_dir.parent / f"{pipeline.working_dir.name}_crops"
+            if crops_dir.exists():
+                logger.info(f"[--rebuild-dataset] Rebuilding dataset.json from {crops_dir} ...")
+                DataStore.bootstrap(crops_dir)
+            else:
+                logger.warning(f"[--rebuild-dataset] Crops directory not found: {crops_dir}")
+        except Exception as _rds_exc:
+            logger.warning(f"[--rebuild-dataset] Failed: {_rds_exc}")
 
     # Run pipeline
     stats = pipeline.run()
