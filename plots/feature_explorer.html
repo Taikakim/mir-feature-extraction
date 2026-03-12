@@ -289,16 +289,17 @@
     }
 
     #nn-feat-row {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 3px;
       margin-bottom: 6px;
     }
 
     #nn-feat-row select {
-      min-width: 110px;
+      width: 100%;
       font-size: 10px;
-      padding: 3px 5px;
+      padding: 3px 4px;
+      min-width: 0;
     }
 
     #nn-track-list {
@@ -542,6 +543,116 @@
       margin: 0 0 8px;
     }
 
+    /* Latent Player panel */
+    #latent-player {
+      position: fixed;
+      bottom: 46px;
+      right: 14px;
+      width: 300px;
+      background: rgba(15, 20, 40, 0.97);
+      border: 1px solid #333355;
+      border-radius: 8px;
+      padding: 12px 14px;
+      z-index: 401;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+    }
+
+    #latent-player input[type=range] {
+      accent-color: #e94560;
+      cursor: pointer;
+    }
+
+    #lp-play-btn {
+      background: #e94560;
+      border: none;
+      color: white;
+      padding: 5px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+    }
+
+    #lp-play-btn:hover {
+      background: #c03050;
+    }
+
+    /* Crossfader section */
+    #lp-cf-section {
+      border-top: 1px solid #1a2040;
+      margin-top: 8px;
+      padding-top: 8px;
+    }
+    .lp-cf-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 5px;
+    }
+    .lp-cf-label {
+      font-size: 10px;
+      color: #888;
+      min-width: 40px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .lp-cf-row input[type=range] {
+      flex: 1;
+      accent-color: #e94560;
+    }
+    .lp-cf-val {
+      font-size: 10px;
+      color: #ccc;
+      width: 28px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .lp-mode-btn {
+      flex: 1;
+      font-size: 10px;
+      padding: 3px 0;
+      background: #0f1a2e;
+      border: 1px solid #333355;
+      color: #888;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .lp-mode-btn.active {
+      background: #e94560;
+      border-color: #e94560;
+      color: white;
+    }
+    .lp-interp-btn {
+      font-size: 9px;
+      padding: 2px 6px;
+      background: #0f1a2e;
+      border: 1px solid #333355;
+      color: #888;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .lp-interp-btn.active {
+      background: #1a3a60;
+      border-color: #5bc4ff;
+      color: #5bc4ff;
+    }
+
+    .lp-search-results {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      width: 100%;
+      max-height: 180px;
+      overflow-y: auto;
+      background: #0a0f1e;
+      border: 1px solid #333355;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      z-index: 1500;
+      display: none;
+    }
+
     .cap-section {
       margin-bottom: 8px;
       padding-bottom: 6px;
@@ -696,6 +807,7 @@
         <input type="checkbox" id="chk-captions" onchange="toggleCaptions()"> Captions
       </label>
       <button class="mode-btn" id="formula-toggle" onclick="toggleFormula()">&#x1f9ea; Methods</button>
+      <button class="mode-btn" id="btn-lp" onclick="lpTogglePanel()" title="Latent audio player (requires latent_server.py on port 7891)">&#x1f3b5; Latent</button>
     </div>
   </div>
   <div class="help-box" id="help-box"></div>
@@ -727,11 +839,10 @@
         style="font-size:11px;color:#e94560;font-weight:bold;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #333355;">
         Most Similar</div>
       <div id="nn-feat-row">
-        <select id="nn-f1" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-        <select id="nn-f2" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-        <select id="nn-f3" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-        <select id="nn-f4" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
-        <select id="nn-f5" onchange="updateSimNN()" style="min-width:110px;font-size:10px;padding:3px 5px;"></select>
+        <select id="nn-f1" onchange="updateSimNN()"></select>
+        <select id="nn-f2" onchange="updateSimNN()"></select>
+        <select id="nn-f3" onchange="updateSimNN()"></select>
+        <select id="nn-f4" onchange="updateSimNN()"></select>
       </div>
       <div id="nn-track-list"></div>
     </div>
@@ -753,6 +864,156 @@
   </div>
 
   <div id="caption-popup"></div>
+
+  <div id="latent-player" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <span style="font-size:12px;font-weight:bold;color:#e94560;">&#x1f3b5; Latent Player</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span id="lp-server-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e94560;" title="Server status"></span>
+        <span id="lp-server-label" style="font-size:9px;color:#666;">checking…</span>
+      </div>
+      <button onclick="lpTogglePanel()" style="background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 0 0 8px;">&#x2715;</button>
+    </div>
+    <div style="margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;">
+        <span style="font-size:9px;font-weight:bold;color:#e94560;min-width:14px;flex-shrink:0;">A</span>
+        <div style="position:relative;flex:1;">
+          <input type="text" id="lp-a-search" placeholder="Search track…" autocomplete="off"
+            style="width:100%;padding:3px 5px;background:#0f2040;color:#e0e0e0;border:1px solid #333355;border-radius:4px;font-size:10px;box-sizing:border-box;">
+          <div id="lp-a-results" class="lp-search-results"></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <span style="font-size:9px;font-weight:bold;color:#5bc4ff;min-width:14px;flex-shrink:0;">B</span>
+        <div style="position:relative;flex:1;">
+          <input type="text" id="lp-b-search" placeholder="Search or dbl-click list…" autocomplete="off"
+            style="width:100%;padding:3px 5px;background:#0f2040;color:#5bc4ff;border:1px solid #1a3050;border-radius:4px;font-size:10px;box-sizing:border-box;">
+          <div id="lp-b-results" class="lp-search-results"></div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:4px;margin-bottom:8px;">
+      <button class="lp-mode-btn active" id="lp-mode-fullmix"
+        onclick="lpSetMode('fullmix')">Full Mix</button>
+      <button class="lp-mode-btn" id="lp-mode-cf"
+        onclick="lpSetMode('crossfader')">Stem ×fader</button>
+      <button class="lp-mode-btn" id="lp-raw-btn"
+        onclick="lpToggleRaw()"
+        title="Play original source audio instead of VAE-decoded latent">Raw</button>
+    </div>
+    <div id="lp-pos-row" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+      <span id="lp-pos-label-text" style="font-size:10px;color:#888;white-space:nowrap;">Pos</span>
+      <input type="range" id="lp-pos" min="0" max="1" step="0.01" value="0.5"
+        style="flex:1;" oninput="lpOnPosChange(this.value)">
+      <span id="lp-pos-label" style="font-size:10px;color:#ccc;width:28px;text-align:right;">0.50</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <button id="lp-play-btn" onclick="lpPlay()">&#x25b6;</button>
+      <span id="lp-status" style="font-size:10px;color:#888;flex:1;">—</span>
+      <span id="lp-crop-count" style="font-size:10px;color:#555;"></span>
+    </div>
+    <div id="lp-cf-section" style="display:none;">
+      <!-- B position -->
+      <div class="lp-cf-row">
+        <span class="lp-cf-label" style="color:#5bc4ff;">B pos</span>
+        <input type="range" id="lp-cf-bpos" min="0" max="1" step="0.01" value="0.5"
+          oninput="lpCfLabelUpdate('lp-cf-bpos-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-bpos-val" class="lp-cf-val">0.50</span>
+      </div>
+      <!-- Stem alpha sliders -->
+      <div class="lp-cf-row" style="margin-bottom:3px;">
+        <span style="font-size:9px;color:#555;margin-left:46px;flex:1;text-align:left;">← A</span>
+        <span style="font-size:9px;color:#555;text-align:right;">B →</span>
+        <span style="width:28px;"></span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label">Drums</span>
+        <input type="range" id="lp-cf-drums" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-drums-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-drums-val" class="lp-cf-val">0.00</span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label">Bass</span>
+        <input type="range" id="lp-cf-bass" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-bass-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-bass-val" class="lp-cf-val">0.00</span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label">Other</span>
+        <input type="range" id="lp-cf-other" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-other-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-other-val" class="lp-cf-val">0.00</span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label">Vocals</span>
+        <input type="range" id="lp-cf-vocals" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-vocals-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-vocals-val" class="lp-cf-val">0.00</span>
+      </div>
+      <!-- Color anchors (β) -->
+      <div class="lp-cf-row" style="margin-top:4px;">
+        <span class="lp-cf-label" style="color:#e94560;">A color</span>
+        <input type="range" id="lp-cf-betaa" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-betaa-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-betaa-val" class="lp-cf-val">0.00</span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label" style="color:#5bc4ff;">B color</span>
+        <input type="range" id="lp-cf-betab" min="0" max="1" step="0.01" value="0"
+          oninput="lpCfLabelUpdate('lp-cf-betab-val',this.value)"
+          onchange="lpCfOnSliderChange()">
+        <span id="lp-cf-betab-val" class="lp-cf-val">0.00</span>
+      </div>
+      <!-- Interp mode + stop button -->
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+        <button class="lp-interp-btn active" id="lp-interp-slerp"
+          onclick="lpSetInterp('slerp')">Slerp</button>
+        <button class="lp-interp-btn" id="lp-interp-lerp"
+          onclick="lpSetInterp('lerp')">Lerp</button>
+        <span style="flex:1;font-size:9px;color:#555;">α interpolation</span>
+        <button onclick="lpCfStop()"
+          style="font-size:10px;padding:3px 8px;background:#1e2a3a;border:1px solid #334;color:#aaa;border-radius:3px;cursor:pointer;">&#x23f9; Stop</button>
+      </div>
+      <div style="font-size:9px;color:#444;margin-top:4px;">
+        A/B color: pulls stems toward full-mix (adds instrument bleed)
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
+      <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="checkbox" id="lp-loop" onchange="lpOnLoopChange(this.checked)"
+          style="accent-color:#e94560;width:11px;height:11px;">
+        Loop
+      </label>
+      <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer;" id="lp-smartloop-label">
+        <input type="checkbox" id="lp-smartloop" onchange="lpOnSmartLoopChange(this.checked)"
+          style="accent-color:#e94560;width:11px;height:11px;">
+        Smart loop
+      </label>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="checkbox" id="lp-autoload" checked onchange="_lpAutoLoad=this.checked;"
+          style="accent-color:#e94560;width:11px;height:11px;">
+        Auto-load →
+      </label>
+      <span id="lp-autoload-slot"
+        style="font-size:10px;font-weight:bold;color:#ffffff;background:#e94560;
+               padding:1px 6px;border-radius:3px;cursor:pointer;"
+        title="Active auto-load slot (press A or B to switch)"
+        onclick="_lpSetAutoLoadSlot(_lpAutoLoadSlot==='a'?'b':'a')">A</span>
+      <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="checkbox" id="lp-autoplay" onchange="_lpAutoPlay=this.checked;"
+          style="accent-color:#e94560;width:11px;height:11px;">
+        Auto-play
+      </label>
+    </div>
+  </div>
 
   <script src="feature_explorer_data.js"></script>
   <script src="feature_explorer_classes.js"></script>
@@ -961,8 +1222,8 @@
       syncTrackSelects();
 
       // NN feature selects (always curated)
-      const nnDef = ['bpm', 'lufs', 'brightness', 'warmth', 'danceability'];
-      for (let i = 1; i <= 5; i++) setOpts('nn-f' + i, cf, null, nnDef[i - 1]);
+      const nnDef = ['bpm', 'lufs', 'roughness', 'danceability'];
+      for (let i = 1; i <= 4; i++) setOpts('nn-f' + i, cf, null, nnDef[i - 1]);
 
       // Class-by dropdown (from CLASSES keys)
       const cbSel = document.getElementById('cls-by');
@@ -1059,7 +1320,7 @@
       const keys = Array.isArray(featureKeys) ? featureKeys : [];
       list.innerHTML = idxs.map(idx => {
         const vals = keys.map(k => k + ': ' + (DATA[k] && DATA[k][idx] !== null ? DATA[k][idx].toFixed(3) : '?')).join(', ');
-        return '<div class="track-item" onclick="showTrackPanel(' + idx + ',' + JSON.stringify(keys) + ')">' +
+        return '<div class="track-item" data-lp-idx="' + idx + '" onclick="showTrackPanel(' + idx + ',' + JSON.stringify(keys) + ')">' +
           '<div style="color:white;">' + TRACKS[idx] + '</div>' +
           (vals ? '<div style="color:#666;font-size:10px;">' + vals + '</div>' : '') +
           '</div>';
@@ -1566,7 +1827,15 @@
         oX.push(relX[j]); oY.push(relY[j]); oN.push(TRACKS[idx]);
         oD.push(dists[j]); oI.push(idx);
       });
-      const hover = oN.map((n, j) => '<b>' + n + '</b><br>dist: ' + oD[j].toFixed(3));
+      const hover = oN.map((n, j) => {
+        const idx = oI[j];
+        let txt = '<b>' + n + '</b><br>dist: ' + oD[j].toFixed(3);
+        [[kxp, 'X+'], [kxn, 'X\u2212'], [kyp, 'Y+'], [kyn, 'Y\u2212']].forEach(([k, label]) => {
+          const v = DATA[k] ? DATA[k][idx] : null;
+          if (v !== null && isFinite(v)) txt += '<br>' + label + ' ' + k + ': <b>' + v.toFixed(2) + '</b>';
+        });
+        return txt;
+      });
       Plotly.react('plot', [
         {
           x: oX, y: oY, mode: 'markers', type: 'scattergl',
@@ -1619,7 +1888,7 @@
       const refIdx = TRACKS.indexOf(refName);
       if (refIdx < 0) return;
       const nnFeats = [];
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= 4; i++) {
         const sel = document.getElementById('nn-f' + i);
         if (sel && sel.value) nnFeats.push(sel.value);
       }
@@ -1660,27 +1929,36 @@
         '<span style="color:#555;">bg = feature range</span></div>';
       list.innerHTML = legend + top.map((item, rank) => {
         const t = item.idx;
-        // External link
         let linkHtml = '';
         if (SPOTIFY[t]) linkHtml = '<a href="https://open.spotify.com/track/' + SPOTIFY[t] + '" target="_blank" style="color:#1db954;font-size:10px;text-decoration:none;" title="Spotify">\uD83C\uDFB5</a>';
         else linkHtml = '<a href="https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[t])) + '" target="_blank" style="color:#00d2ff;font-size:10px;text-decoration:none;" title="Tidal">\uD83C\uDF0A</a>';
-        if (MBIDS[t]) linkHtml += ' <a href="https://musicbrainz.org/recording/' + MBIDS[t] + '" target="_blank" style="color:#e94560;font-size:10px;text-decoration:none;" title="MusicBrainz">\uD83D\uDCC0</a>';
-        let barsHtml = '<div style="display:flex;gap:2px;margin-top:2px;">';
-        nnFeats.forEach((f, fi) => {
+        if (MBIDS[t]) linkHtml += '\u00a0<a href="https://musicbrainz.org/recording/' + MBIDS[t] + '" target="_blank" style="color:#e94560;font-size:10px;text-decoration:none;" title="MusicBrainz">\uD83D\uDCC0</a>';
+        // Panel is 260px with 10px padding → 240px content.
+        // Bar area = 240 - 28 (dist label) - 4 (gap) = 208px.
+        const barW = Math.floor((208 - (nnFeats.length - 1) * 2) / nnFeats.length);
+        const bars = nnFeats.map((f, fi) => {
           const v = DATA[f] ? DATA[f][t] : null;
           const r = ranges[fi];
           const frac = v !== null && isFinite(v) && r.max - r.min > 1e-10 ? (v - r.min) / (r.max - r.min) : 0.5;
           const rf = refNorm[fi];
-          barsHtml += '<div title="' + f + ': ' + (v !== null ? v.toFixed(2) : 'N/A') + '" style="position:relative;width:22px;height:6px;background:#0f3460;border-radius:1px;overflow:visible;">' +
-            '<div style="width:' + (frac * 100) + '%;height:6px;background:#e94560;opacity:0.8;border-radius:1px;"></div>' +
-            '<div style="position:absolute;top:-1px;left:' + Math.round(rf * 100) + '%;width:1px;height:8px;background:#ffd700;"></div>' +
+          const fillW  = Math.max(0, Math.min(barW, Math.round(frac * barW)));
+          const refX   = Math.max(0, Math.min(barW - 1, Math.round(rf * barW)));
+          return '<div title="' + f + ': ' + (v !== null ? v.toFixed(2) : 'N/A') + '" style="position:relative;width:' + barW + 'px;height:7px;background:#0f3460;border-radius:1px;flex-shrink:0;">' +
+            '<div style="width:' + fillW + 'px;height:7px;background:#e94560;opacity:0.85;border-radius:1px;"></div>' +
+            '<div style="position:absolute;top:-1px;left:' + refX + 'px;width:1px;height:9px;background:#ffd700;"></div>' +
             '</div>';
-        });
-        barsHtml += '</div>';
-        return '<div class="nn-row" onclick="globalActiveTrack=TRACKS[' + t + '];syncTrackSelects();setMode(\'radar\')">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:10px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + (rank + 1) + '. ' + TRACKS[t] + '</span><span style="flex-shrink:0;margin-left:4px;">' + linkHtml + '</span></div>' +
-          '<div style="font-size:9px;color:#666;">' + item.dist.toFixed(3) + '</div>' +
-          barsHtml + '</div>';
+        }).join('');
+        return '<div class="nn-row" data-lp-idx="' + t + '" onclick="globalActiveTrack=TRACKS[' + t + '];syncTrackSelects();setMode(\'radar\')">' +
+          '<div style="display:flex;align-items:center;gap:3px;min-width:0;">' +
+            '<span style="font-size:9px;color:#555;flex-shrink:0;">' + (rank + 1) + '.</span>' +
+            '<span style="font-size:10px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;" title="' + TRACKS[t] + '">' + TRACKS[t] + '</span>' +
+            '<span style="flex-shrink:0;margin-left:2px;">' + linkHtml + '</span>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;gap:4px;margin-top:2px;">' +
+            '<span style="font-size:9px;color:#555;flex-shrink:0;min-width:28px;">' + item.dist.toFixed(3) + '</span>' +
+            '<div style="display:flex;gap:2px;flex-wrap:nowrap;">' + bars + '</div>' +
+          '</div>' +
+          '</div>';
       }).join('');
     }
 
@@ -1704,7 +1982,7 @@
         else if (svc === 'musicbrainz') { href = MBIDS[idx] ? 'https://musicbrainz.org/recording/' + MBIDS[idx] : ''; hasLink = !!MBIDS[idx]; }
         else if (svc === 'beatport') { href = 'https://www.beatport.com/search?q=' + encodeURIComponent(searchName(name)); }
         const lk = hasLink && href ? '<a class="tl-link" href="' + href + '" target="_blank">\u2197</a>' : '<span class="tl-link" style="opacity:0.3;">\u2014</span>';
-        return '<div class="tl-item" onclick="globalActiveTrack=TRACKS[' + idx + '];syncTrackSelects();setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
+        return '<div class="tl-item" data-lp-idx="' + idx + '" onclick="globalActiveTrack=TRACKS[' + idx + '];syncTrackSelects();setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
       }).join('');
     }
     function clearTrackList() {
@@ -1891,8 +2169,8 @@
     function removeCaptionHover() {
       _capHoverBound = false;
       const pd = document.getElementById('plot');
-      pd.removeAllListeners('plotly_hover');
-      pd.removeAllListeners('plotly_unhover');
+      pd.removeListener('plotly_hover', onCaptionHover);
+      pd.removeListener('plotly_unhover', onCaptionUnhover);
     }
     function onCaptionHover(d) {
       if (!document.getElementById('chk-captions').checked) return;
@@ -1914,6 +2192,374 @@
     function onCaptionUnhover() {
       document.getElementById('caption-popup').style.display = 'none';
     }
+
+    // ---- Latent Player ---------------------------------------------------------
+    const LP_SERVER = 'http://localhost:7891';
+
+    // UI state
+    let _lpVisible       = false;
+    let _lpCurrentTrack  = null;
+    let _lpHoverTrack    = null;   // last track hovered, regardless of autoplay
+    let _lpAutoLoadSlot  = 'a';    // which slot hover auto-loads into: 'a' or 'b'
+    let _lpRaw           = false;  // play original source audio instead of VAE decode
+    let _lpHighlightIdx  = null;
+    let _lpBTrack        = null;
+    let _lpBHighlightIdx = null;
+    let _lpAutoLoad      = true;
+    let _lpAutoPlay      = false;
+    let _lpLoop          = false;
+    let _lpSmartLoop     = false;
+    let _lpReady         = false;
+    let _lpDebounceTimer = null;
+    let _lpLeaveTimer    = null;
+
+    // Crossfader state
+    let _lpMode     = 'fullmix';   // 'fullmix' | 'crossfader'
+    let _lpCfInterp = 'slerp';
+    let _lpCfTimer  = null;
+
+    // Web Audio state (gapless looping — <audio loop> always has a seek gap)
+    let _lpAudioCtx    = null;
+    let _lpAudioBuffer = null;
+    let _lpSourceNode  = null;
+    let _lpPauseOffset = 0;
+    let _lpPlayStart   = 0;
+
+    function _lpGetCtx() {
+      if (!_lpAudioCtx) _lpAudioCtx = new AudioContext();
+      if (_lpAudioCtx.state === 'suspended') _lpAudioCtx.resume();
+      return _lpAudioCtx;
+    }
+    function _lpIsPlaying() { return _lpSourceNode !== null; }
+    function _lpBtn(txt) { const b = document.getElementById('lp-play-btn'); if (b) b.textContent = txt; }
+
+    function _lpStartSource(offset) {
+      if (!_lpAudioBuffer) return;
+      const ctx = _lpGetCtx();
+      if (_lpSourceNode) { try { _lpSourceNode.stop(); } catch(e){} _lpSourceNode = null; }
+      const src = ctx.createBufferSource();
+      src.buffer = _lpAudioBuffer;
+      src.loop   = _lpLoop;
+      src.connect(ctx.destination);
+      const off = Math.max(0, offset % _lpAudioBuffer.duration);
+      src.start(0, off);
+      _lpSourceNode = src;
+      _lpPlayStart  = ctx.currentTime - off;
+      _lpBtn('\u23f8');
+      src.onended = () => {
+        if (_lpSourceNode === src) { _lpSourceNode = null; _lpPauseOffset = 0; _lpBtn('\u25b6'); }
+      };
+    }
+
+    function lpStopPlayback() {
+      if (_lpSourceNode) { try { _lpSourceNode.stop(); } catch(e){} _lpSourceNode = null; }
+      _lpPauseOffset = 0;
+      _lpBtn('\u25b6');
+    }
+
+    function lpTogglePanel() {
+      _lpVisible = !_lpVisible;
+      document.getElementById('latent-player').style.display = _lpVisible ? '' : 'none';
+      document.getElementById('btn-lp').classList.toggle('active', _lpVisible);
+      if (_lpVisible) _lpPollStatus();
+    }
+
+    function _lpSetAutoLoadSlot(slot) {
+      _lpAutoLoadSlot = slot;
+      const el = document.getElementById('lp-autoload-slot');
+      if (el) {
+        el.textContent = slot.toUpperCase();
+        el.style.background = slot === 'a' ? '#e94560' : '#5bc4ff';
+        el.style.color = slot === 'a' ? '#ffffff' : '#0a1628';
+      }
+    }
+
+    function lpHover(trackName) {
+      clearTimeout(_lpLeaveTimer);
+      if (trackName) _lpHoverTrack = trackName;
+      if (!_lpVisible || !_lpAutoLoad || !_lpAutoPlay || !trackName) return;
+      clearTimeout(_lpDebounceTimer);
+      if (_lpAutoLoadSlot === 'b') {
+        if (trackName === _lpBTrack) return;
+        _lpDebounceTimer = setTimeout(() => {
+          const pos = parseFloat(document.getElementById('lp-pos').value);
+          lpSetB(trackName);
+          if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
+        }, 350);
+      } else {
+        if (trackName === _lpCurrentTrack) return;
+        _lpDebounceTimer = setTimeout(() => {
+          const pos = parseFloat(document.getElementById('lp-pos').value);
+          lpLoad(trackName, pos);
+        }, 350);
+      }
+    }
+
+    function lpStopOnLeave() {
+      clearTimeout(_lpDebounceTimer);   // cancel any pending hover-load
+      if (!_lpAutoPlay) return;
+      clearTimeout(_lpLeaveTimer);
+      _lpLeaveTimer = setTimeout(lpStopPlayback, 400);
+    }
+
+    function lpLoad(trackName, position) {
+      if (!trackName) return;
+      const pos = (position !== undefined) ? position : parseFloat(document.getElementById('lp-pos').value);
+      _lpCurrentTrack = trackName;
+      _lpHighlightIdx = TRACKS.indexOf(trackName);
+      _lpReady = false;
+      _lpApplyHighlight();
+      const _lpAIn = document.getElementById('lp-a-search'); if (_lpAIn) _lpAIn.value = trackName;
+      document.getElementById('lp-status').textContent = 'Loading\u2026';
+      document.getElementById('lp-crop-count').textContent = '';
+      lpStopPlayback();
+
+      if (_lpMode === 'crossfader') {
+        if (_lpBTrack) lpCrossfade();
+        else document.getElementById('lp-status').textContent = 'Set B track to crossfade';
+        return;
+      }
+
+      const url = LP_SERVER + '/decode?track=' + encodeURIComponent(trackName) +
+                  '&position=' + pos.toFixed(3) +
+                  (_lpSmartLoop ? '&smart_loop=1' : '') +
+                  (_lpRaw ? '&raw=1' : '');
+      fetch(url)
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t || 'HTTP ' + r.status); });
+          const count = r.headers.get('X-Crop-Count');
+          const actual = r.headers.get('X-Crop-Position');
+          if (count) document.getElementById('lp-crop-count').textContent = count + ' crops';
+          if (actual) {
+            const a = parseFloat(actual);
+            document.getElementById('lp-pos').value = a;
+            document.getElementById('lp-pos-label').textContent = a.toFixed(2);
+          }
+          return r.blob();
+        })
+        .then(blob => blob.arrayBuffer())
+        .then(ab   => _lpGetCtx().decodeAudioData(ab))
+        .then(buf  => {
+          _lpAudioBuffer = buf;
+          _lpPauseOffset = 0;
+          _lpReady = true;
+          document.getElementById('lp-status').textContent =
+            'Ready \u2014 ' + buf.duration.toFixed(1) + 's';
+          if (_lpAutoPlay) _lpStartSource(0);
+        })
+        .catch(e => {
+          document.getElementById('lp-status').textContent = 'Error: ' + e.message;
+        });
+    }
+
+    function lpOnLoopChange(v) {
+      _lpLoop = v;
+      if (_lpSourceNode) _lpSourceNode.loop = v;
+      if (!v) { _lpSmartLoop = false; document.getElementById('lp-smartloop').checked = false; }
+    }
+
+    function lpOnSmartLoopChange(v) {
+      _lpSmartLoop = v;
+      if (v) {
+        _lpLoop = true;
+        if (_lpSourceNode) _lpSourceNode.loop = true;
+        document.getElementById('lp-loop').checked = true;
+      }
+      if (_lpCurrentTrack) lpLoad(_lpCurrentTrack);
+    }
+
+    function lpPlay() {
+      if (!_lpReady) {
+        document.getElementById('lp-status').textContent =
+          _lpCurrentTrack ? 'Still loading\u2026' : 'Hover a track first';
+        return;
+      }
+      if (_lpIsPlaying()) {
+        _lpPauseOffset = (_lpGetCtx().currentTime - _lpPlayStart) % _lpAudioBuffer.duration;
+        _lpSourceNode.stop();
+        _lpSourceNode = null;
+        _lpBtn('\u25b6');
+      } else {
+        _lpStartSource(_lpPauseOffset);
+      }
+    }
+
+    function lpOnPosChange(val) {
+      document.getElementById('lp-pos-label').textContent = parseFloat(val).toFixed(2);
+      if (_lpCurrentTrack) {
+        clearTimeout(_lpDebounceTimer);
+        _lpDebounceTimer = setTimeout(() => lpLoad(_lpCurrentTrack, parseFloat(val)), 400);
+      }
+    }
+
+    function _lpOnPlotlyHover(d) {
+      if (!d.points || !d.points.length) return;
+      const idx = d.points[0].customdata;
+      if (idx !== undefined) lpHover(TRACKS[idx]);
+    }
+
+    // ---- Scatter highlights (A = white ring, B = cyan ring) ---------------------
+    function _lpFindXY(idx) {
+      const pd = document.getElementById('plot');
+      if (!pd || !pd.data) return [null, null];
+      for (const t of pd.data) {
+        if (!Array.isArray(t.customdata)) continue;
+        const j = t.customdata.indexOf(idx);
+        if (j >= 0 && Array.isArray(t.x) && Array.isArray(t.y)) return [t.x[j], t.y[j]];
+      }
+      return [null, null];
+    }
+
+    function _lpApplyHighlight() {
+      if (['histogram', 'radar', 'heatmap', 'parallel'].includes(mode)) return;
+      const pd = document.getElementById('plot');
+      if (!pd || !pd.data) return;
+      // Remove existing highlight traces
+      const old = pd.data.reduce((a, t, i) => {
+        if (t.name === '__lp_hl__' || t.name === '__lp_b_hl__') a.push(i); return a;
+      }, []);
+      if (old.length) Plotly.deleteTraces('plot', old);
+      // A highlight — white ring
+      if (_lpHighlightIdx !== null) {
+        const [hx, hy] = _lpFindXY(_lpHighlightIdx);
+        if (hx !== null) Plotly.addTraces('plot', {
+          x: [hx], y: [hy], mode: 'markers', type: 'scatter',
+          marker: { color: '#1a1a2e', size: 12, line: { color: '#ffffff', width: 2.5 } },
+          hoverinfo: 'skip', showlegend: false, name: '__lp_hl__'
+        });
+      }
+      // B highlight — cyan ring
+      if (_lpBHighlightIdx !== null) {
+        const [bx, by] = _lpFindXY(_lpBHighlightIdx);
+        if (bx !== null) Plotly.addTraces('plot', {
+          x: [bx], y: [by], mode: 'markers', type: 'scatter',
+          marker: { color: '#1a1a2e', size: 12, line: { color: '#5bc4ff', width: 2.5 } },
+          hoverinfo: 'skip', showlegend: false, name: '__lp_b_hl__'
+        });
+      }
+    }
+
+    // ---- B slot -----------------------------------------------------------------
+    function lpSetB(trackName) {
+      const name = (trackName !== undefined) ? trackName : _lpCurrentTrack;
+      if (!name) return;
+      _lpBTrack        = name;
+      _lpBHighlightIdx = TRACKS.indexOf(name);
+      const el = document.getElementById('lp-b-search');
+      if (el) el.value = name;
+      _lpApplyHighlight();
+    }
+
+    // ---- Crossfader controls ---------------------------------------------------
+    function lpSetMode(mode) {
+      _lpMode = mode;
+      const isCf = mode === 'crossfader';
+      document.getElementById('lp-cf-section').style.display = isCf ? '' : 'none';
+      document.getElementById('lp-mode-fullmix').classList.toggle('active', !isCf);
+      document.getElementById('lp-mode-cf').classList.toggle('active', isCf);
+      document.getElementById('lp-pos-label-text').textContent = isCf ? 'A pos' : 'Pos';
+      lpStopPlayback();
+    }
+
+    function lpToggleRaw() {
+      _lpRaw = !_lpRaw;
+      document.getElementById('lp-raw-btn').classList.toggle('active', _lpRaw);
+      // Refetch immediately so the toggle is audible on the running loop
+      if (_lpMode === 'crossfader' && _lpCurrentTrack && _lpBTrack) lpCrossfade();
+      else if (_lpCurrentTrack) lpLoad(_lpCurrentTrack);
+    }
+
+    function lpSetInterp(interp) {
+      _lpCfInterp = interp;
+      document.getElementById('lp-interp-slerp').classList.toggle('active', interp === 'slerp');
+      document.getElementById('lp-interp-lerp').classList.toggle('active',  interp === 'lerp');
+    }
+
+    function lpCfLabelUpdate(id, val) {
+      document.getElementById(id).textContent = parseFloat(val).toFixed(2);
+    }
+
+    function lpCfOnSliderChange() {
+      clearTimeout(_lpCfTimer);
+      _lpCfTimer = setTimeout(lpCrossfade, 150);
+    }
+
+    function lpCrossfade() {
+      if (!_lpCurrentTrack || !_lpBTrack) {
+        document.getElementById('lp-status').textContent =
+          _lpCurrentTrack ? 'Set B track first' : 'Set A and B tracks first';
+        return;
+      }
+      const pos_a  = document.getElementById('lp-pos').value;
+      const pos_b  = document.getElementById('lp-cf-bpos').value;
+      const drums  = document.getElementById('lp-cf-drums').value;
+      const bass   = document.getElementById('lp-cf-bass').value;
+      const other  = document.getElementById('lp-cf-other').value;
+      const vocals = document.getElementById('lp-cf-vocals').value;
+      const beta_a = document.getElementById('lp-cf-betaa').value;
+      const beta_b = document.getElementById('lp-cf-betab').value;
+
+      _lpReady = false;
+      lpStopPlayback();
+      document.getElementById('lp-status').textContent = 'Decoding 4 stems\u2026';
+
+      const url = LP_SERVER + '/crossfade'
+        + '?track_a='    + encodeURIComponent(_lpCurrentTrack)
+        + '&track_b='    + encodeURIComponent(_lpBTrack)
+        + '&pos_a='      + parseFloat(pos_a).toFixed(3)
+        + '&pos_b='      + parseFloat(pos_b).toFixed(3)
+        + '&drums='      + parseFloat(drums).toFixed(3)
+        + '&bass='       + parseFloat(bass).toFixed(3)
+        + '&other='      + parseFloat(other).toFixed(3)
+        + '&vocals='     + parseFloat(vocals).toFixed(3)
+        + '&beta_a='     + parseFloat(beta_a).toFixed(3)
+        + '&beta_b='     + parseFloat(beta_b).toFixed(3)
+        + '&interp='     + _lpCfInterp
+        + (_lpSmartLoop ? '&smart_loop=1' : '')
+        + (_lpRaw ? '&raw=1' : '');
+
+      fetch(url)
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t || 'HTTP ' + r.status); });
+          return r.blob();
+        })
+        .then(blob => blob.arrayBuffer())
+        .then(ab   => _lpGetCtx().decodeAudioData(ab))
+        .then(buf  => {
+          _lpAudioBuffer = buf;
+          _lpPauseOffset = 0;
+          _lpReady = true;
+          document.getElementById('lp-status').textContent =
+            'Crossfade ready \u2014 ' + buf.duration.toFixed(1) + 's';
+          _lpStartSource(0);
+        })
+        .catch(e => {
+          document.getElementById('lp-status').textContent = 'Error: ' + e.message;
+        });
+    }
+
+    function lpCfStop() { lpStopPlayback(); }
+
+    // Patch updatePlot so the highlight survives every plot refresh
+    const _lp_origUpdatePlot = updatePlot;
+    updatePlot = function() { _lp_origUpdatePlot(); _lpApplyHighlight(); };
+
+    let _lpServerOk = false;
+    function _lpPollStatus() {
+      fetch(LP_SERVER + '/status', { signal: AbortSignal.timeout(3000) })
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(() => {
+          _lpServerOk = true;
+          document.getElementById('lp-server-dot').style.background = '#4cd137';
+          document.getElementById('lp-server-label').textContent = 'Server OK';
+        })
+        .catch(() => {
+          _lpServerOk = false;
+          document.getElementById('lp-server-dot').style.background = '#e94560';
+          document.getElementById('lp-server-label').textContent = 'Server offline';
+        });
+    }
+    setInterval(_lpPollStatus, 8000);
 
     // ---- Init ------------------------------------------------------------------
     const simSearch = document.getElementById('sim-search');
@@ -1963,6 +2609,102 @@
     populateSelects();
     updatePlot();
     window.addEventListener('resize', () => Plotly.Plots.resize('plot'));
+
+    // Permanent plotly hover/unhover listeners for latent player
+    document.getElementById('plot').on('plotly_hover',   _lpOnPlotlyHover);
+    document.getElementById('plot').on('plotly_unhover', lpStopOnLeave);
+
+    // Global keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+      // Ignore when typing in an input / textarea
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' ||
+          e.target.tagName === 'SELECT') return;
+      if (e.key === 'r' || e.key === 'R') setMode('radar');
+      if ((e.key === 'a' || e.key === 'A') && _lpVisible) {
+        const t = _lpHoverTrack || globalActiveTrack;
+        if (t) lpLoad(t, parseFloat(document.getElementById('lp-pos').value));
+        _lpSetAutoLoadSlot('a');
+      }
+      if ((e.key === 'b' || e.key === 'B') && _lpVisible) {
+        const t = _lpHoverTrack || globalActiveTrack;
+        if (t) lpSetB(t);
+        _lpSetAutoLoadSlot('b');
+      }
+    });
+
+    // Ctrl+wheel: move all stem α crossfaders together (LP must be open in crossfader mode)
+    const _CF_STEM_IDS = ['lp-cf-drums', 'lp-cf-bass', 'lp-cf-other', 'lp-cf-vocals'];
+    document.addEventListener('wheel', function(e) {
+      if (!_lpVisible || _lpMode !== 'crossfader' || !e.ctrlKey) return;
+      e.preventDefault();
+      const step = e.deltaY > 0 ? -0.05 : 0.05;
+      _CF_STEM_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const v = Math.max(0, Math.min(1, parseFloat(el.value) + step));
+        el.value = v.toFixed(2);
+        lpCfLabelUpdate(id + '-val', v.toFixed(2));
+      });
+      lpCfOnSliderChange();
+    }, { passive: false });
+
+    // Mouseover/mouseleave delegation on list panels for latent player
+    ['track-list-body', 'nn-track-list', 'sel-list'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('mouseover', function (e) {
+          const item = e.target.closest('[data-lp-idx]');
+          if (item) lpHover(TRACKS[parseInt(item.dataset.lpIdx)]);
+        });
+        el.addEventListener('mouseleave', lpStopOnLeave);
+      }
+    });
+
+    // ---- LP slot search inputs ------------------------------------------------
+    function _lpRenderSearch(inputEl, resultsEl, q, onSelect) {
+      resultsEl.innerHTML = '';
+      const ql = q.toLowerCase();
+      let hits = 0;
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (q.length === 0 || TRACKS[i].toLowerCase().includes(ql)) {
+          const div = document.createElement('div');
+          div.className = 'sim-search-item';
+          div.textContent = TRACKS[i];
+          div.addEventListener('mousedown', function(e) {
+            e.preventDefault();   // keep focus on input so blur doesn't fire first
+            onSelect(TRACKS[i]);
+            inputEl.value = TRACKS[i];
+            resultsEl.style.display = 'none';
+          });
+          resultsEl.appendChild(div);
+          if (++hits >= 150) break;
+        }
+      }
+      if (hits === 0) {
+        resultsEl.innerHTML = '<div class="sim-search-item" style="color:#888;cursor:default;">No matches</div>';
+      }
+      resultsEl.style.display = 'block';
+    }
+
+    (function() {
+      const aIn  = document.getElementById('lp-a-search');
+      const aRes = document.getElementById('lp-a-results');
+      const bIn  = document.getElementById('lp-b-search');
+      const bRes = document.getElementById('lp-b-results');
+
+      const onA = name => lpLoad(name, parseFloat(document.getElementById('lp-pos').value));
+      const onB = name => lpSetB(name);
+
+      aIn.addEventListener('focus', () => _lpRenderSearch(aIn, aRes, aIn.value, onA));
+      aIn.addEventListener('input', () => _lpRenderSearch(aIn, aRes, aIn.value, onA));
+      aIn.addEventListener('blur',  () => setTimeout(() => { aRes.style.display = 'none'; }, 150));
+
+      bIn.addEventListener('focus', () => _lpRenderSearch(bIn, bRes, bIn.value, onB));
+      bIn.addEventListener('input', () => _lpRenderSearch(bIn, bRes, bIn.value, onB));
+      bIn.addEventListener('blur',  () => setTimeout(() => { bRes.style.display = 'none'; }, 150));
+    })();
+
+    _lpPollStatus();
 
   </script>
 </body>
