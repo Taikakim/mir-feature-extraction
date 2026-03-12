@@ -1287,6 +1287,9 @@
       hideSidebar();
       hideTrackPanel();
       updateHelp();
+      // Force a synchronous reflow so the nn-panel's flex/grid layout is
+      // resolved before Plotly measures the plot container dimensions.
+      if (nnP) void nnP.offsetWidth;
       updatePlot();
     }
 
@@ -1767,9 +1770,13 @@
         values: TRACKS.map((_, i) => DATA[f][i] !== null && isFinite(DATA[f][i]) ? DATA[f][i] : null)
       }));
       const colorVals = TRACKS.map((_, i) => DATA[cf[0]] && DATA[cf[0]][i] !== null ? DATA[cf[0]][i] : 0);
+      // Dark purple→violet scale; low opacity so dense lines don't blind.
+      // colorscale cmin/cmax are left to Plotly auto-range.
+      const _purpleScale = [[0,'#0d0520'],[0.33,'#2e0d5c'],[0.66,'#6b2ca0'],[1,'#a855d4']];
       Plotly.react('plot', [{
         type: 'parcoords',
-        line: { color: colorVals, colorscale: 'Viridis', showscale: true, colorbar: { title: cf[0], thickness: 12 } },
+        line: { color: colorVals, colorscale: _purpleScale, showscale: true,
+                colorbar: { title: cf[0], thickness: 12 }, opacity: 0.25 },
         dimensions: dims
       }], {
         title: { text: 'Parallel Coordinates \u2014 ' + cf.length + ' curated features', font: { size: 15 } },
@@ -1853,7 +1860,8 @@
           marker: { symbol: 'star', size: 20, color: '#ffd700', line: { color: 'white', width: 1 } },
           text: [refName], textposition: 'top center', textfont: { color: '#ffd700', size: 11 },
           name: refName + ' (ref)', hoverinfo: 'text',
-          hovertext: ['<b>' + refName + '</b> (reference)']
+          hovertext: ['<b>' + refName + '</b> (reference)'],
+          customdata: [refIdx]
         }
       ], {
         title: { text: 'Similarity Map \u2014 ' + refName, font: { size: 14 } },
@@ -1870,6 +1878,8 @@
       }, { responsive: true });
       const spd = document.getElementById('plot');
       spd.removeAllListeners('plotly_click');
+      spd.removeAllListeners('plotly_selected');
+      spd.removeAllListeners('plotly_deselect');
       spd.on('plotly_click', function (d) {
         if (d.points && d.points.length > 0) {
           const pt = d.points[0];
@@ -1880,6 +1890,13 @@
           }
         }
       });
+      spd.on('plotly_selected', function (d) {
+        if (d && d.points && d.points.length > 0) {
+          const sel = d.points.map(p => p.customdata).filter(v => v !== undefined);
+          if (sel.length) { showSidebar(sel, [kxp, kxn, kyp, kyn]); populateTrackList(sel); }
+        }
+      });
+      spd.on('plotly_deselect', function () { hideSidebar(); clearTrackList(); });
       document.getElementById('info-bar').textContent = 'Similarity: ' + refName + ' | ' + idxs.length + ' tracks | click to set reference';
       updateSimNN();
     }
