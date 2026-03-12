@@ -653,6 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length",  str(len(wav_bytes)))
         self.send_header("X-Crop-Count",    str(len(crops)))
         self.send_header("X-Crop-Position", f"{best_pos:.4f}")
+        self.send_header("X-Audio-Source",  "raw" if raw else "vae")
         self.end_headers()
         self.wfile.write(wav_bytes)
 
@@ -715,6 +716,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",   "audio/wav")
         self.send_header("Content-Length", str(len(wav_bytes)))
         self.send_header("X-Stems-Found",  ",".join(stems_found))
+        self.send_header("X-Audio-Source", "raw" if raw else "vae")
         self.end_headers()
         self.wfile.write(wav_bytes)
 
