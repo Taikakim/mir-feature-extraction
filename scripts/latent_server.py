@@ -629,8 +629,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         best_npy, best_pos = find_best_crop(crops, position)
+        best_idx = next((i for i, (p, _) in enumerate(crops) if p == best_npy), 0)
         print(f"  decode: {track}  pos={position:.3f}  smart_loop={smart_loop}"
-              f"  raw={raw}  → {best_npy.name} (pos={best_pos:.3f})")
+              f"  raw={raw}  → {best_npy.name} [{best_idx+1}/{len(crops)}] (pos={best_pos:.3f})")
 
         try:
             if raw:
@@ -652,6 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",    "audio/wav")
         self.send_header("Content-Length",  str(len(wav_bytes)))
         self.send_header("X-Crop-Count",    str(len(crops)))
+        self.send_header("X-Crop-Index",    str(best_idx + 1))
         self.send_header("X-Crop-Position", f"{best_pos:.4f}")
         self.send_header("X-Audio-Source",  "raw" if raw else "vae")
         self.end_headers()

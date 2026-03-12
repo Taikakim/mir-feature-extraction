@@ -910,7 +910,7 @@
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
       <button id="lp-play-btn" onclick="lpPlay()">&#x25b6;</button>
       <span id="lp-status" style="font-size:10px;color:#888;flex:1;">—</span>
-      <span id="lp-crop-count" style="font-size:10px;color:#555;"></span>
+      <span id="lp-crop-count" style="font-size:10px;color:#555;" title=""></span>
     </div>
     <div id="lp-cf-section" style="display:none;">
       <!-- B position -->
@@ -2313,7 +2313,8 @@
       _lpApplyHighlight();
       const _lpAIn = document.getElementById('lp-a-search'); if (_lpAIn) _lpAIn.value = trackName;
       document.getElementById('lp-status').textContent = 'Loading\u2026';
-      document.getElementById('lp-crop-count').textContent = '';
+      const _cropEl = document.getElementById('lp-crop-count');
+      _cropEl.textContent = ''; _cropEl.title = '';
       lpStopPlayback();
 
       if (_lpMode === 'crossfader') {
@@ -2330,8 +2331,15 @@
         .then(r => {
           if (!r.ok) return r.text().then(t => { throw new Error(t || 'HTTP ' + r.status); });
           const count = r.headers.get('X-Crop-Count');
+          const idx   = r.headers.get('X-Crop-Index');
           const actual = r.headers.get('X-Crop-Position');
-          if (count) document.getElementById('lp-crop-count').textContent = count + ' crops';
+          const cropEl = document.getElementById('lp-crop-count');
+          if (count && idx) {
+            cropEl.textContent = 'slice ' + idx + '/' + count;
+            cropEl.title = 'position ' + (actual ? parseFloat(actual).toFixed(3) : '?');
+          } else if (count) {
+            cropEl.textContent = count + ' crops';
+          }
           if (actual) {
             const a = parseFloat(actual);
             document.getElementById('lp-pos').value = a;
