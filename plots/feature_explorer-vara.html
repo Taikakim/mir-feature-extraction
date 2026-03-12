@@ -2287,6 +2287,7 @@
           const pos = parseFloat(document.getElementById('lp-pos').value);
           lpSetB(trackName);
           if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
+          else lpLoad(trackName, pos);
         }, 350);
       } else {
         if (trackName === _lpCurrentTrack) return;
