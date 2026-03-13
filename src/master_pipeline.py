@@ -91,6 +91,7 @@ class MasterPipelineConfig:
     """Configuration for the master pipeline."""
     input_dir: Path
     output_dir: Optional[Path] = None
+    latent_dataset_dir: Optional[Path] = None  # Secondary dataset (e.g. pre-encoded latents)
 
     # Device settings
     device: str = 'cuda'
@@ -251,6 +252,7 @@ class MasterPipelineConfig:
         config = cls(
             input_dir=Path(paths['input']) if paths.get('input') else None,
             output_dir=Path(paths['output']) if paths.get('output') else None,
+            latent_dataset_dir=Path(paths['latent_dataset']) if paths.get('latent_dataset') else None,
 
             # Stages (inverted - config has enabled flags, we have skip flags)
             skip_organize=not stages.get('organize', True),
@@ -2042,7 +2044,7 @@ class MasterPipeline:
 
         logger.info(progress.finish(f"{total_crops} crops created"))
 
-    def _migrate_track_features_to_crops(self, crops_dir: Path):
+    def _migrate_track_features_to_crops(self, crops_dir: Path, scan_info_direct: bool = False):
         """
         Copy all TRANSFERRABLE_FEATURES from each track's .INFO into every crop
         .INFO under crops_dir that is missing any of those keys.
@@ -2053,6 +2055,12 @@ class MasterPipeline:
 
         Only writes keys that are present in the track INFO but absent in the crop
         INFO (never overwrites existing values, fully idempotent).
+
+        Args:
+            crops_dir:        Directory containing per-track crop sub-folders.
+            scan_info_direct: When True, discover crop entries by scanning *.INFO
+                              files directly instead of audio files.  Use this for
+                              secondary datasets (e.g. latents) that contain no audio.
         """
         from core.file_utils import find_crop_folders, find_crop_files
         from core.json_handler import read_info, safe_update
@@ -2085,9 +2093,17 @@ class MasterPipeline:
             if not to_copy:
                 continue
 
-            # Apply to each crop INFO that is missing any of these keys
-            for crop_file in find_crop_files(crop_folder):
-                crop_info_path = crop_file.with_suffix('.INFO')
+            # Enumerate crop INFO paths — either by finding audio files (normal crops)
+            # or by scanning *.INFO directly (latent datasets with no audio files).
+            if scan_info_direct:
+                crop_info_paths = sorted(crop_folder.glob('*.INFO'))
+            else:
+                crop_info_paths = [
+                    f.with_suffix('.INFO')
+                    for f in find_crop_files(crop_folder)
+                ]
+
+            for crop_info_path in crop_info_paths:
                 if not crop_info_path.exists():
                     continue
                 crop_data = read_info(crop_info_path)
@@ -2139,6 +2155,11 @@ class MasterPipeline:
         # Propagate track-level features (syncopation, complexity, per-stem rhythm/harmonic)
         # to all crop INFOs. This is idempotent: only fills in missing keys.
         self._migrate_track_features_to_crops(crops_dir)
+
+        # Propagate to secondary dataset (e.g. pre-encoded latents) if configured.
+        if self.config.latent_dataset_dir and self.config.latent_dataset_dir.exists():
+            logger.info(f"[4-pre] Migrating track features to latent dataset: {self.config.latent_dataset_dir}")
+            self._migrate_track_features_to_crops(self.config.latent_dataset_dir, scan_info_direct=True)
 
         # Check if stems exist or need Demucs
         sample_crop = all_crops[0]

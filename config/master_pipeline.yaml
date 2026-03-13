@@ -11,6 +11,7 @@
 paths:
   input: /run/media/kim/LostLands/ai-music/Goa Dataset                    # Required: Input directory (raw audio or organized)
   output: /run/media/kim/LostLands/ai-music/Goa_Separated                  # Output directory for organized files (null = in-place)
+  # latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
 
 # =============================================================================
 # STAGE CONTROL
@@ -19,7 +20,7 @@ stages:
   organize: false                 # Stage 1: Organize raw files into project structure
   track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
   cropping: false                 # Stage 3: Create training crops
-    crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
+  crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
 # SOURCE SEPARATION
