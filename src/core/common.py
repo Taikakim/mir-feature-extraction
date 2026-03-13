@@ -69,6 +69,8 @@ FEATURE_RANGES: Dict[str, Dict[str, Any]] = {
 
     # BPM features
     'bpm': {'min': 40.0, 'max': 300.0, 'type': 'number'},
+    'bpm_madmom': {'min': 0.0, 'max': 300.0, 'type': 'number'},   # 0 = estimation failed
+    'bpm_essentia': {'min': 0.0, 'max': 300.0, 'type': 'number'}, # 0 = estimation failed
     'bpm_is_defined': {'min': 0, 'max': 1, 'type': 'int'},
     'beat_count': {'min': 0, 'max': 1000, 'type': 'int'},
     'beat_regularity': {'min': 0.0, 'max': 1.0, 'type': 'number'},

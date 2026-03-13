@@ -187,6 +187,60 @@ def get_new_path(old_path: Path) -> Tuple[Path, bool]:
     return new_path, changed
 
 
+# INFO file text fields that may contain non-ASCII artist/title names and
+# are used directly in T5 prompts. Only these two need sanitizing — all
+# other text fields (music_flamingo descriptions etc.) are AI-generated English.
+INFO_TEXT_FIELDS = ['track_metadata_artist', 'track_metadata_title']
+
+
+def clean_text_value(text: str) -> str:
+    """
+    Sanitize a metadata text value (artist/title) for T5 tokenizer efficiency.
+    Unlike clean_filename, this skips filesystem-specific transforms (track number
+    stripping, slash removal, etc.) and only normalises Unicode and whitespace.
+    """
+    text = decode_escaped_unicode(text)
+    text = unicodedata.normalize('NFC', text)
+    text = transliterate_to_ascii(text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def sanitize_info_fields(info_path: Path) -> bool:
+    """
+    Rewrite track_metadata_artist and track_metadata_title inside an .INFO file
+    to ASCII-safe equivalents using the same transliteration table as filename
+    cleanup. Only writes the file back if at least one value actually changed.
+
+    Returns True if the file was updated.
+    """
+    import json
+    try:
+        with open(info_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return False
+
+    updates = {}
+    for field in INFO_TEXT_FIELDS:
+        value = data.get(field)
+        if isinstance(value, str):
+            cleaned = clean_text_value(value)
+            if cleaned != value:
+                updates[field] = cleaned
+
+    if not updates:
+        return False
+
+    data.update(updates)
+    try:
+        with open(info_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
 def find_items_to_rename(root_path: Path) -> list:
     """Find all directories and files that need renaming."""
     items = []

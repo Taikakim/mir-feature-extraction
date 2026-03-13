@@ -91,7 +91,6 @@ class MasterPipelineConfig:
     """Configuration for the master pipeline."""
     input_dir: Path
     output_dir: Optional[Path] = None
-    stems_source: Optional[Path] = None  # Pre-existing stems location
 
     # Device settings
     device: str = 'cuda'
@@ -252,7 +251,6 @@ class MasterPipelineConfig:
         config = cls(
             input_dir=Path(paths['input']) if paths.get('input') else None,
             output_dir=Path(paths['output']) if paths.get('output') else None,
-            stems_source=Path(paths['stems_source']) if paths.get('stems_source') else None,
 
             # Stages (inverted - config has enabled flags, we have skip flags)
             skip_organize=not stages.get('organize', True),
@@ -366,7 +364,6 @@ class MasterPipelineConfig:
             'paths': {
                 'input': str(self.input_dir) if self.input_dir else None,
                 'output': str(self.output_dir) if self.output_dir else None,
-                'stems_source': str(self.stems_source) if self.stems_source else None,
             },
             'stages': {
                 'organize': not self.skip_organize,
@@ -520,8 +517,6 @@ class MasterPipeline:
         logger.info(fmt_header("=" * 70))
         logger.info(f"Input:  {fmt_filename(str(self.config.input_dir))}")
         logger.info(f"Output: {fmt_filename(str(self.working_dir))}")
-        if self.config.stems_source:
-            logger.info(f"Stems:  {fmt_filename(str(self.config.stems_source))}")
 
         # Warn about in-place processing
         if self.config.output_dir is None:
@@ -799,28 +794,37 @@ class MasterPipeline:
         logger.info("\n[1b] Filename Cleanup (T5 compatibility)")
 
         try:
-            from preprocessing.filename_cleanup import find_items_to_rename, apply_rename
+            from preprocessing.filename_cleanup import find_items_to_rename, apply_rename, sanitize_info_fields
+            from core.file_utils import get_stem_files
+            from core.json_handler import get_info_path
 
+            # --- 1. Rename folders and sidecar files ---
             items = find_items_to_rename(self.working_dir)
-
-            if not items:
-                logger.info("All filenames are already clean")
-                return
-
-            logger.info(f"Cleaning {len(items)} filenames...")
-
-            # Sort: files first, then directories
             items.sort(key=lambda x: (x['type'] == 'directory', str(x['old_path'])))
+            cleaned_count = sum(1 for item in items if apply_rename(item))
+            if cleaned_count:
+                logger.info(f"Renamed {cleaned_count} paths")
+            else:
+                logger.info("All filenames are already clean")
 
-            cleaned_count = 0
-            for item in items:
-                if apply_rename(item):
-                    cleaned_count += 1
-                    logger.debug(f"Renamed: {item['old_name']} → {item['new_name']}")
-            
-            # Update timing stats with actual count
+            # --- 2. Sanitize artist/title text fields inside every .INFO file ---
+            # Runs unconditionally so late-enabling fixes already-created tracks too.
+            sanitized_count = 0
+            for folder in self.working_dir.iterdir():
+                if not folder.is_dir():
+                    continue
+                stems = get_stem_files(folder, include_full_mix=True)
+                if 'full_mix' not in stems:
+                    continue
+                info_path = get_info_path(stems['full_mix'])
+                if info_path.exists() and sanitize_info_fields(info_path):
+                    sanitized_count += 1
+                    logger.debug(f"Sanitized INFO fields: {folder.name}")
+            if sanitized_count:
+                logger.info(f"Sanitized text fields in {sanitized_count} INFO files")
+
             if 'filename_cleanup' in self.stats.operation_timing:
-                self.stats.operation_timing['filename_cleanup'].items_processed = cleaned_count
+                self.stats.operation_timing['filename_cleanup'].items_processed = cleaned_count + sanitized_count
 
         except Exception as e:
             logger.warning(f"Filename cleanup failed: {e}")
@@ -991,12 +995,6 @@ class MasterPipeline:
         """Run BS-RoFormer separation on all tracks."""
         from preprocessing.bs_roformer_sep import separate_organized_folder, load_bs_roformer
 
-        # Check if using pre-existing stems
-        if self.config.stems_source:
-            logger.info(f"Using pre-existing stems from: {fmt_filename(str(self.config.stems_source))}")
-            self._link_existing_stems(folders)
-            return
-
         model_name = self.config.bs_roformer_model
         model_dir = self.config.bs_roformer_dir
         batch_size = self.config.bs_roformer_batch_size
@@ -1086,12 +1084,6 @@ class MasterPipeline:
 
     def _run_demucs_batch(self, folders: List[Path]):
         """Run Demucs separation on all tracks (parallel subprocess-based)."""
-        # Check if we should use existing stems
-        if self.config.stems_source:
-            logger.info(f"Using pre-existing stems from: {fmt_filename(str(self.config.stems_source))}")
-            self._link_existing_stems(folders)
-            return
-
         num_workers = self.config.demucs_workers
         logger.info(f"Separating stems (model={fmt_notification(self.config.demucs_model)}, "
                     f"shifts={self.config.demucs_shifts}, workers={fmt_notification(str(num_workers))})")
@@ -1189,39 +1181,6 @@ class MasterPipeline:
         except Exception as e:
             logger.error(f"Demucs batch failed: {e}")
             self.stats.errors.append(f"Demucs: {e}")
-
-    def _link_existing_stems(self, folders: List[Path]):
-        """Link or copy stems from pre-existing source."""
-        from core.file_utils import get_stem_files, DEMUCS_STEMS
-
-        for folder in folders:
-            folder_name = folder.name
-            source_folder = self.config.stems_source / folder_name
-
-            if not source_folder.exists():
-                logger.debug(f"No source stems for: {folder_name}")
-                continue
-
-            source_stems = get_stem_files(source_folder)
-
-            for stem_name in DEMUCS_STEMS:
-                if stem_name not in source_stems:
-                    continue
-
-                source_path = source_stems[stem_name]
-                target_path = folder / source_path.name
-
-                if target_path.exists() and not self.config.should_overwrite('demucs'):
-                    continue
-
-                try:
-                    import shutil
-                    shutil.copy2(source_path, target_path)
-                    logger.debug(f"Copied stem: {source_path.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to copy stem {source_path.name}: {e}")
-
-            self.stats.tracks_separated += 1
 
     def _run_stem_quality_check(self, folders: List[Path]):
         """Check stem quality and optionally mix flagged stems back to 'other'."""
@@ -1774,6 +1733,7 @@ class MasterPipeline:
             COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
             PER_STEM_RHYTHM_KEYS = ['onset_density_average_bass', 'onset_density_average_other']
             PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
+            BPM_KEYS = ['bpm_madmom', 'bpm_essentia']
 
             progress = ProgressBar(len(folders), desc="Features")
             _feat_start = time.time()
@@ -1860,6 +1820,15 @@ class MasterPipeline:
                         if res: results.update(res)
                     except Exception as e:
                         logger.debug(f"Per-stem harmonic failed: {e}")
+
+                # BPM — Madmom TempoEstimationProcessor + Essentia RhythmExtractor2013
+                if should_process(info_path, BPM_KEYS, self.config.should_overwrite('bpm'), existing=existing):
+                    try:
+                        from rhythm.bpm import estimate_bpm_madmom, estimate_bpm_essentia
+                        results['bpm_madmom'] = estimate_bpm_madmom(full_mix)
+                        results['bpm_essentia'] = estimate_bpm_essentia(full_mix)
+                    except Exception as e:
+                        logger.debug(f"BPM estimation failed: {e}")
 
                 if results:
                     safe_update(info_path, results)
@@ -2178,7 +2147,7 @@ class MasterPipeline:
 
         has_stems = len([k for k in sample_stems if k != 'source']) >= 4
 
-        if not has_stems and not self.config.stems_source:
+        if not has_stems:
             # Need to run Demucs on crops
             logger.info("\n[4a] Crop Stem Separation (Demucs)")
             self.stats.start_operation('crop_demucs')
@@ -2188,13 +2157,6 @@ class MasterPipeline:
                 items_processed=len(all_crops),
                 audio_duration=crop_audio_duration)
             logger.info(fmt_dim(f"    Crop Demucs completed in {crop_demucs_time:.1f}s"))
-        elif self.config.stems_source:
-            # Crop stems from source
-            logger.info("\n[4a] Cropping stems from source")
-            self.stats.start_operation('crop_stems_copy')
-            self._crop_stems_from_source(crops_dir)
-            stems_copy_time = self.stats.end_operation('crop_stems_copy')
-            logger.info(fmt_dim(f"    Stems copy completed in {stems_copy_time:.1f}s"))
 
         # Run feature extraction on crops
         logger.info("\n[4b] Crop Feature Extraction")
@@ -2263,21 +2225,6 @@ class MasterPipeline:
         except Exception as e:
             logger.error(f"Crop Demucs failed: {e}")
             self.stats.errors.append(f"Crop Demucs: {e}")
-
-    def _crop_stems_from_source(self, crops_dir: Path):
-        """Crop stems from pre-existing source stems."""
-        try:
-            from tools.crop_stems_from_source import batch_crop_stems
-
-            batch_crop_stems(
-                crops_dir,
-                self.config.stems_source,
-                output_format='mp3',
-                overwrite=self.config.should_overwrite('crops'),
-            )
-        except Exception as e:
-            logger.error(f"Stem cropping failed: {e}")
-            self.stats.errors.append(f"Stem cropping: {e}")
 
     def _run_crop_features(self, crops_dir: Path):
         """Run feature extraction on all crops."""
@@ -2539,7 +2486,6 @@ Config file template: config/master_pipeline.yaml
     # Input/output (can be set in config or CLI)
     parser.add_argument('input', nargs='?', help='Input directory (or set in config)')
     parser.add_argument('--output', '-o', help='Output directory')
-    parser.add_argument('--stems-source', help='Pre-existing stems directory')
 
     # Stage control (CLI overrides config)
     parser.add_argument('--skip-organize', action='store_true')
@@ -2627,8 +2573,6 @@ Config file template: config/master_pipeline.yaml
         config.input_dir = Path(args.input)
     if args.output:
         config.output_dir = Path(args.output)
-    if args.stems_source:
-        config.stems_source = Path(args.stems_source)
     if args.skip_organize:
         config.skip_organize = True
     if args.skip_track_analysis:

@@ -26,12 +26,20 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rhythm.beat_grid import load_beat_grid, create_beat_grid
+from rhythm.beat_grid import load_beat_grid, create_beat_grid, MADMOM_AVAILABLE
 from core.json_handler import safe_update, get_info_path
 from core.file_utils import get_stem_files
 from core.common import BEAT_TRACKING_CONFIG, clamp_feature_value
 
 logger = logging.getLogger(__name__)
+
+# Try to import essentia for RhythmExtractor2013
+try:
+    import essentia.standard as es
+    ESSENTIA_AVAILABLE = True
+except ImportError:
+    ESSENTIA_AVAILABLE = False
+    logger.warning("Essentia not available - bpm_essentia will not be computed")
 
 
 def calculate_bpm_from_beats(beat_times: np.ndarray,
@@ -84,7 +92,65 @@ def calculate_bpm_from_beats(beat_times: np.ndarray,
     return float(bpm), stats
 
 
-def find_stable_segments(intervals: np.ndarray, 
+def estimate_bpm_madmom(audio_path: str | Path) -> float:
+    """
+    Estimate BPM using Madmom's TempoEstimationProcessor directly from RNN beat
+    activations, bypassing the post-hoc interval statistics of the beat tracker.
+
+    Returns 0.0 on failure or if Madmom is unavailable.
+    """
+    if not MADMOM_AVAILABLE:
+        logger.warning("Madmom not available for direct BPM estimation")
+        return 0.0
+
+    try:
+        import madmom.features.beats
+        import madmom.features.tempo
+
+        act = madmom.features.beats.RNNBeatProcessor()(str(audio_path))
+        tempo_proc = madmom.features.tempo.TempoEstimationProcessor(fps=100)
+        tempos = tempo_proc(act)  # Nx2: [bpm, strength], sorted by strength desc
+
+        if len(tempos) == 0:
+            return 0.0
+
+        bpm = float(tempos[0, 0])
+        logger.info(f"Madmom tempo estimate: {bpm:.1f} BPM (strength: {tempos[0, 1]:.3f})")
+        return bpm
+
+    except Exception as e:
+        logger.error(f"Madmom BPM estimation failed: {e}")
+        return 0.0
+
+
+def estimate_bpm_essentia(audio_path: str | Path) -> float:
+    """
+    Estimate BPM using Essentia's RhythmExtractor2013 with the multifeature method.
+    Loads audio at 44100 Hz as required by this algorithm.
+
+    Returns 0.0 on failure or if Essentia is unavailable.
+    """
+    if not ESSENTIA_AVAILABLE:
+        logger.warning("Essentia not available for BPM estimation")
+        return 0.0
+
+    try:
+        loader = es.MonoLoader(filename=str(audio_path), sampleRate=44100)
+        audio = loader()
+
+        extractor = es.RhythmExtractor2013(method="multifeature")
+        bpm, ticks, confidence, estimates, bpm_intervals = extractor(audio)
+
+        bpm = float(bpm)
+        logger.info(f"Essentia BPM estimate: {bpm:.1f} (confidence: {float(confidence):.3f})")
+        return bpm
+
+    except Exception as e:
+        logger.error(f"Essentia BPM estimation failed: {e}")
+        return 0.0
+
+
+def find_stable_segments(intervals: np.ndarray,
                          local_threshold: float = 0.05) -> list:
     """
     Find segments of consecutive beats with stable intervals.
@@ -305,53 +371,57 @@ def analyze_folder_bpm(audio_folder: str | Path,
 
     logger.info(f"Analyzing BPM for folder: {audio_folder.name}")
 
-    # Look for beat grid file
+    stems = get_stem_files(audio_folder, include_full_mix=True)
+    full_mix = stems.get('full_mix')
+
+    # Load or create beat grid
     grid_file = audio_folder / f"{audio_folder.name}.BEATS_GRID"
 
     if not grid_file.exists():
         if create_grid_if_missing:
             logger.info("Beat grid not found, creating...")
-            # Find full_mix
-            stems = get_stem_files(audio_folder, include_full_mix=True)
-            if 'full_mix' not in stems:
+            if full_mix is None:
                 raise FileNotFoundError(f"No full_mix file found in {audio_folder}")
-
-            # Create beat grid
-            beat_times, _ = create_beat_grid(stems['full_mix'], save_grid=True)
+            beat_times, _ = create_beat_grid(full_mix, save_grid=True)
         else:
             raise FileNotFoundError(f"Beat grid not found: {grid_file}")
     else:
-        # Load existing beat grid
         beat_times = load_beat_grid(grid_file)
 
     # Get audio duration (optional, for better estimation)
     audio_duration = None
-    try:
-        import soundfile as sf
-        stems = get_stem_files(audio_folder, include_full_mix=True)
-        if 'full_mix' in stems:
-            info = sf.info(str(stems['full_mix']))
-            audio_duration = info.duration
-    except Exception as e:
-        logger.debug(f"Could not get audio duration: {e}")
+    if full_mix is not None:
+        try:
+            import soundfile as sf
+            audio_duration = sf.info(str(full_mix)).duration
+        except Exception as e:
+            logger.debug(f"Could not get audio duration: {e}")
 
-    # Analyze BPM
+    # Analyze BPM (beat-interval based)
     results = analyze_bpm(beat_times, audio_duration)
 
+    # Add direct BPM estimates from Madmom and Essentia
+    if full_mix is not None:
+        results['bpm_madmom'] = estimate_bpm_madmom(full_mix)
+        results['bpm_essentia'] = estimate_bpm_essentia(full_mix)
+    else:
+        results['bpm_madmom'] = 0.0
+        results['bpm_essentia'] = 0.0
+
     logger.info(f"BPM Analysis Results:")
-    logger.info(f"  BPM: {results['bpm']:.1f}")
+    logger.info(f"  BPM (interval): {results['bpm']:.1f}")
+    logger.info(f"  BPM Madmom:     {results['bpm_madmom']:.1f}")
+    logger.info(f"  BPM Essentia:   {results['bpm_essentia']:.1f}")
     logger.info(f"  BPM defined: {'Yes' if results['bpm_is_defined'] else 'No'}")
     logger.info(f"  Beat count: {results['beat_count']}")
     logger.info(f"  Regularity: {results['beat_regularity']:.3f}")
 
     # Save to .INFO file if requested
-    if save_to_info and results:
+    if save_to_info and results and full_mix is not None:
         try:
-            stems = get_stem_files(audio_folder, include_full_mix=True)
-            if 'full_mix' in stems:
-                info_path = get_info_path(stems['full_mix'])
-                safe_update(info_path, results)
-                logger.info(f"Saved BPM features to {info_path.name}")
+            info_path = get_info_path(full_mix)
+            safe_update(info_path, results)
+            logger.info(f"Saved BPM features to {info_path.name}")
         except Exception as e:
             logger.error(f"Error saving results: {e}")
 

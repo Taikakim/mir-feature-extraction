@@ -11,7 +11,6 @@
 paths:
   input: /run/media/kim/LostLands/ai-music/Goa Dataset                    # Required: Input directory (raw audio or organized)
   output: /run/media/kim/LostLands/ai-music/Goa_Separated                  # Output directory for organized files (null = in-place)
-  stems_source: null             # Pre-existing stems directory (skips Demucs if set)
 
 # =============================================================================
 # STAGE CONTROL
@@ -20,7 +19,7 @@ stages:
   organize: false                 # Stage 1: Organize raw files into project structure
   track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
   cropping: false                 # Stage 3: Create training crops
-  crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
+    crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
 # SOURCE SEPARATION
@@ -72,14 +71,13 @@ source_separation:
 # RHYTHM ANALYSIS
 # =============================================================================
 rhythm:
-  # Beat detection uses madmom by default
-  # These features are extracted for full tracks and migrated to crops
-  enabled: false
+  # Controls beat grid + onset detection (sub-stage 2b).
+  # Runs as part of track_analysis, or as a catch-up pass when track_analysis: false.
+  # Set onsets: false to skip this sub-stage (e.g. when .BEATS_GRID/.ONSETS already exist).
+  # BPM estimation (bpm_madmom, bpm_essentia) is NOT controlled here —
+  # it runs in sub-stage 2d and is gated by overwrite.bpm.
+  onsets: false
   workers: 11                     # Parallel workers for beat/downbeat detection
-  # Onset detection (.ONSETS files) — required for syncopation and rhythmic
-  # complexity. Runs as a catch-up pass even when track_analysis: false.
-  # Uses the same worker pool as beat detection.
-  onsets: true
 
 # =============================================================================
 # CROPPING

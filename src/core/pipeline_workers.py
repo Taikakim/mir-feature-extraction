@@ -43,6 +43,7 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
     COMPLEXITY_KEYS = ['rhythmic_complexity', 'rhythmic_evenness']
     PER_STEM_RHYTHM_KEYS = ['onset_density_average_bass', 'onset_density_average_other']
     PER_STEM_HARMONIC_KEYS = ['harmonic_movement_bass', 'harmonic_movement_other']
+    BPM_KEYS = ['bpm_madmom', 'bpm_essentia']
 
     # Import here to avoid issues with multiprocessing
     from core.file_locks import FileLock
@@ -126,6 +127,15 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
                 try:
                     res = analyze_per_stem_harmonics(folder)
                     if res: results.update(res)
+                except Exception:
+                    pass
+
+            # BPM — Madmom TempoEstimationProcessor + Essentia RhythmExtractor2013
+            if should_process(info_path, BPM_KEYS, should_overwrite('bpm'), existing=existing):
+                try:
+                    from rhythm.bpm import estimate_bpm_madmom, estimate_bpm_essentia
+                    results['bpm_madmom'] = estimate_bpm_madmom(full_mix)
+                    results['bpm_essentia'] = estimate_bpm_essentia(full_mix)
                 except Exception:
                     pass
 

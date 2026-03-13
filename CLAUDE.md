@@ -8,6 +8,8 @@ MIR feature extraction pipeline for conditioning Stable Audio Tools. Extracts 97
 
 **Hardware:** AMD RX 9070 XT (RDNA4, 16GB VRAM) + Ryzen 9 9900X, ROCm 7.2, PyTorch ROCm nightly.
 
+See **[TOOLS.md](TOOLS.md)** for the Pitch Shifter GUI and Feature Explorer / Latent Player.
+
 ## Commands
 
 ```bash
