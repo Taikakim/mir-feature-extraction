@@ -9,9 +9,9 @@
 # PATHS
 # =============================================================================
 paths:
-  input: /run/media/kim/LostLands/ai-music/Goa Dataset                    # Required: Input directory (raw audio or organized)
-  output: /run/media/kim/LostLands/ai-music/Goa_Separated                  # Output directory for organized files (null = in-place)
-  # latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
+  input: /run/media/kim/Mantu/ai-music/Goa_Separated                     # Required: Input directory (raw audio or organized)
+  output: /run/media/kim/Mantu/ai-music/Goa_Separated                  # Output directory for organized files (null = in-place)
+  latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
 
 # =============================================================================
 # STAGE CONTROL
@@ -101,31 +101,31 @@ cropping:
 # =============================================================================
 features:
   # Loudness (LUFS/LRA)
-  loudness: true
+  loudness: false
 
   # Spectral features (flatness, flux, skewness, kurtosis)
-  spectral: true
+  spectral: false
 
   # Saturation / overcompression detection (frame-level peak envelope + hold merge)
   # Catches soft limiting (~-0.5 dBFS flat tops) and hard clipping.
   # Outputs: saturation_ratio (0-1 fraction of duration), saturation_count (#events)
-  saturation: true
+  saturation: false
 
   # Multiband RMS (bass, body, mid, air)
-  multiband_rms: true
+  multiband_rms: false
 
   # Harmonic/Chroma (12-bin pitch class)
-  chroma: true
+  chroma: false
 
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
-  timbral: true
+  timbral: false
 
   # Rhythm and syncopation
-  syncopation: true
-  complexity: true
+  syncopation: false
+  complexity: false
 
   # Essentia classification
-  essentia: true
+  essentia: false
   essentia_genre: true         # Genre classification (400 Discogs classes)
   essentia_mood: true          # Mood/theme classification (56 classes)
   essentia_instrument: true    # Instrument detection (40 classes)
@@ -141,12 +141,17 @@ vocal_content:
   peak_threshold: -20.0          # dBFS - peak below this suggests no meaningful signal
 
   # AudioBox aesthetics (content enjoyment, production quality, etc.)
-  audiobox: true
+  audiobox: false
 
   # Per-stem features (requires stems)
-  per_stem_rhythm: true
-  per_stem_harmonic: true
-  per_stem: true
+  per_stem_rhythm: false
+  per_stem_harmonic: false
+  per_stem: false
+
+  # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
+  # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
+  # Set true only for acoustic music where per-segment tempo variation is meaningful.
+  per_crop_bpm: false
 
 # =============================================================================
 # PER-FEATURE OVERWRITE CONTROL
@@ -158,7 +163,7 @@ overwrite:
   demucs: false                  # Overwrite existing stem separations (legacy key)
   source_separation: false       # Overwrite existing stem separations
   beats: false                   # Overwrite existing beat grids
-  bpm: false                     # Overwrite existing BPM data
+  bpm: true                     # Overwrite existing BPM data
   crops: false                   # Overwrite existing training crops
   syncopation: false             # Overwrite existing syncopation data
   complexity: false              # Overwrite existing rhythmic complexity data

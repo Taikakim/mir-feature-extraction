@@ -155,6 +155,7 @@ class MasterPipelineConfig:
     skip_per_stem_rhythm: bool = False
     skip_per_stem_harmonic: bool = False
     skip_per_stem: bool = False
+    per_crop_bpm: bool = False  # When False, BPM is propagated from full-mix; True = re-analyse per crop
 
     # Music Flamingo
     skip_flamingo: bool = False
@@ -315,6 +316,7 @@ class MasterPipelineConfig:
             skip_per_stem_rhythm=not features.get('per_stem_rhythm', True),
             skip_per_stem_harmonic=not features.get('per_stem_harmonic', True),
             skip_per_stem=not features.get('per_stem', True),
+            per_crop_bpm=features.get('per_crop_bpm', False),
 
             # Music Flamingo
             skip_flamingo=not flamingo.get('enabled', True),
@@ -2044,7 +2046,8 @@ class MasterPipeline:
 
         logger.info(progress.finish(f"{total_crops} crops created"))
 
-    def _migrate_track_features_to_crops(self, crops_dir: Path, scan_info_direct: bool = False):
+    def _migrate_track_features_to_crops(self, crops_dir: Path, scan_info_direct: bool = False,
+                                          force_keys: Optional[Set[str]] = None):
         """
         Copy all TRANSFERRABLE_FEATURES from each track's .INFO into every crop
         .INFO under crops_dir that is missing any of those keys.
@@ -2107,9 +2110,12 @@ class MasterPipeline:
                 if not crop_info_path.exists():
                     continue
                 crop_data = read_info(crop_info_path)
-                missing = {k: v for k, v in to_copy.items() if k not in crop_data}
-                if missing:
-                    safe_update(crop_info_path, missing)
+                to_write = {
+                    k: v for k, v in to_copy.items()
+                    if k not in crop_data or (force_keys and k in force_keys)
+                }
+                if to_write:
+                    safe_update(crop_info_path, to_write)
                     migrated_crops += 1
 
         if migrated_crops > 0:
@@ -2152,14 +2158,18 @@ class MasterPipeline:
 
         logger.info(f"Found {len(all_crops)} crops to analyze")
 
-        # Propagate track-level features (syncopation, complexity, per-stem rhythm/harmonic)
-        # to all crop INFOs. This is idempotent: only fills in missing keys.
-        self._migrate_track_features_to_crops(crops_dir)
+        # Propagate track-level features (syncopation, complexity, per-stem rhythm/harmonic,
+        # BPM) to all crop INFOs. Idempotent: only fills missing keys by default.
+        # When overwrite: bpm: true, BPM keys are force-written even if already present.
+        _BPM_KEYS = {'bpm', 'bpm_is_defined', 'beat_count', 'bpm_madmom', 'bpm_essentia'}
+        _force = _BPM_KEYS if self.config.should_overwrite('bpm') else None
+        self._migrate_track_features_to_crops(crops_dir, force_keys=_force)
 
         # Propagate to secondary dataset (e.g. pre-encoded latents) if configured.
         if self.config.latent_dataset_dir and self.config.latent_dataset_dir.exists():
             logger.info(f"[4-pre] Migrating track features to latent dataset: {self.config.latent_dataset_dir}")
-            self._migrate_track_features_to_crops(self.config.latent_dataset_dir, scan_info_direct=True)
+            self._migrate_track_features_to_crops(self.config.latent_dataset_dir,
+                                                   scan_info_direct=True, force_keys=_force)
 
         # Check if stems exist or need Demucs
         sample_crop = all_crops[0]
@@ -2264,6 +2274,7 @@ class MasterPipeline:
                 essentia_workers=self.config.essentia_workers,  # TensorFlow-safe limit
                 skip_organize=True,
                 skip_demucs=True,  # Already done
+                skip_rhythm=not self.config.per_crop_bpm,  # BPM from full-mix by default
                 skip_loudness=self.config.skip_loudness,
                 skip_spectral=self.config.skip_spectral,
                 skip_saturation=self.config.skip_saturation,

@@ -152,12 +152,21 @@ TRANSFERRABLE_FEATURES = [
     'onset_density_other',
     'harmonic_movement_bass',
     'harmonic_movement_other',
+
+    # BPM / beat analysis — transferred from full-mix analysis.
+    # Per-crop BPM re-analysis is disabled by default (per_crop_bpm: false in config)
+    # because short crops (~12s) contain intros/breakdowns where independent tempo
+    # detection is unreliable. Re-enable per-crop analysis for acoustic music via config.
+    'bpm',
+    'bpm_is_defined',
+    'beat_count',
+    'bpm_madmom',
+    'bpm_essentia',
 ]
 
 # Features that are good to have but don't warn if missing
-# NOTE: bpm, beat_count, downbeats are NOT transferred - they're calculated fresh per crop
 OPTIONAL_TRANSFERRABLE = [
-    # Currently empty - crop-specific rhythm features are calculated, not transferred
+    # Currently empty
 ]
 
 # Demucs stem names to crop along with full_mix
