@@ -120,6 +120,10 @@ This project builds on the following open-source work:
 | [timbral_models](https://github.com/AudioCommons/timbral_models) (AudioCommons) | Perceptual timbral features (brightness, hardness, warmth, etc.) |
 | [Plotly](https://plotly.com/) | Interactive feature explorer visualisations |
 | [librosa](https://librosa.org/) | Beat tracking, onset detection, spectral analysis |
+| [Rubber Band Library](https://breakfastquay.com/rubberband/) (Breakfast Quay) | Pitch shifting and time stretching (pitch shifter GUI) |
+| [Bungee](https://github.com/kupix/bungee) / [bungee-python](https://github.com/nathanieljohnston/bungee-python) | Pitch shifting and time stretching (pitch shifter GUI) |
+| [Pedalboard](https://github.com/spotify/pedalboard) (Spotify) | Pitch shifting and time stretching (pitch shifter GUI) |
+| [SoX](https://sox.sourceforge.net/) | Time stretching and pitch shifting via WSOLA/OLA (pitch shifter GUI) |
 
 ## License
 
