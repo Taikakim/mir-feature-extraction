@@ -99,6 +99,28 @@ models/           # GGUF model files (Qwen3, GPT-OSS, Granite, Music Flamingo)
 repos/            # External repos (cloned by setup script, not tracked)
 ```
 
+## Acknowledgements
+
+This project builds on the following open-source work:
+
+| Project | Use |
+|---------|-----|
+| [Essentia](https://github.com/MTG/essentia) (MTG, Universitat Pompeu Fabra) | Genre, mood, instrument, voice classification; danceability, atonality |
+| [AudioBox Aesthetics](https://github.com/facebookresearch/audiobox) (Meta) | Perceptual quality scores (enjoyment, usefulness, production quality/complexity) |
+| [Stable Audio Tools](https://github.com/Stability-AI/stable-audio-tools) (Stability AI) | Target model this pipeline conditions |
+| [Music Flamingo](https://github.com/amazon-science/music-flamingo) (Amazon) | AI music descriptions (8B multimodal LLM) |
+| [Granite](https://github.com/ibm-granite/granite-language-models) (IBM) | Caption revision / condensation |
+| [Qwen2.5-Omni](https://github.com/QwenLM/Qwen2.5-Omni) (Alibaba) | Captioning benchmark reference model |
+| [llama.cpp](https://github.com/ggerganov/llama.cpp) (Georgi Gerganov et al.) | GGUF inference for Music Flamingo and LLM revision |
+| [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training) (Roman Solovyev et al.) | High-quality stem separation |
+| [Hybrid Demucs](https://github.com/facebookresearch/demucs) (Meta) | Fast stem separation |
+| [ADTOF](https://github.com/MZehren/ADTOF) (Mickael Zehren) | Automatic drum transcription to MIDI |
+| [Drumsep](https://github.com/fraunhoferhhi/DrumSep) (Fraunhofer HHI) | Drum stem separation |
+| [madmom](https://github.com/CPJKU/madmom) (CP-JKU Linz) | Tempo estimation |
+| [timbral_models](https://github.com/AudioCommons/timbral_models) (AudioCommons) | Perceptual timbral features (brightness, hardness, warmth, etc.) |
+| [Plotly](https://plotly.com/) | Interactive feature explorer visualisations |
+| [librosa](https://librosa.org/) | Beat tracking, onset detection, spectral analysis |
+
 ## License
 
 TBD
