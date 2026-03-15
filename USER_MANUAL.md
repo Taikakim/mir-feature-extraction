@@ -191,18 +191,20 @@ Re-runs are incremental: tracks whose `.npy` already exists are skipped. Compani
 
 **Stem crops → stem latent dataset (required for BM crossfade):**
 ```bash
-# Encode all stem crops for one track:
+# Encode all tracks at once (model loaded once — use this):
+./encode_stems.py \
+    --source-dir /path/to/Goa_Separated_crops \
+    --stem-dir   /path/to/goa-stems
+
+# Encode a single track folder:
 ./encode_stems.py \
     --track-dir "/path/to/Goa_Separated_crops/Artist - Track" \
     --stem-dir  /path/to/goa-stems
-
-# Or encode all tracks (loop in shell):
-for d in /path/to/Goa_Separated_crops/*/; do
-    ./encode_stems.py --track-dir "$d" --stem-dir /path/to/goa-stems
-done
 ```
 
-Output structure mirrors the source crop directory: `stem_dir/<track_folder>/<crop_name>_<stem>.npy + .json`.
+`--track-dir` points at the per-track subfolder inside the crops directory (e.g. `Goa_Separated_crops/0001 Total Eclipse - Free Lemonade (Live Mix)`), not the root crops directory. Use `--source-dir` with the root to process everything in one pass.
+
+Output structure: `stem_dir/<track_folder>/<crop_name>_<stem>.npy + .json`. Re-runs are incremental (existing `.npy` skipped); `.json` refreshed when source `.INFO` is newer.
 
 The latent server (`scripts/latent_server.py`) reads directory paths from `latent_player.ini`:
 ```ini
