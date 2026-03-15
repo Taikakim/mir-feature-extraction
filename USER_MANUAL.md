@@ -194,12 +194,12 @@ Re-runs are incremental: tracks whose `.npy` already exists are skipped. Compani
 # Encode all tracks at once (model loaded once — use this):
 ./encode_stems.py \
     --source-dir /path/to/Goa_Separated_crops \
-    --stem-dir   /path/to/goa-stems
+    --output-dir /path/to/goa-stems
 
 # Encode a single track folder:
 ./encode_stems.py \
-    --track-dir "/path/to/Goa_Separated_crops/Artist - Track" \
-    --stem-dir  /path/to/goa-stems
+    --track-dir  "/path/to/Goa_Separated_crops/Artist - Track" \
+    --output-dir /path/to/goa-stems
 ```
 
 `--track-dir` points at the per-track subfolder inside the crops directory (e.g. `Goa_Separated_crops/0001 Total Eclipse - Free Lemonade (Live Mix)`), not the root crops directory. Use `--source-dir` with the root to process everything in one pass.
