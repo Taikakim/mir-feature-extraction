@@ -24,6 +24,17 @@ bash scripts/setup_external_repos.sh
 
 **Requirements:** Python 3.12+, NumPy <2.4, AMD ROCm 7.2+ or NVIDIA CUDA, 5-13 GB VRAM.
 
+System packages needed for pitch shifting and audio fingerprinting:
+```bash
+# rubberband (pitch/time shifting backend)
+sudo pacman -S rubberband   # Arch / Manjaro
+sudo apt install rubberband-cli  # Debian/Ubuntu
+
+# fpcalc (AcoustID audio fingerprinting)
+sudo pacman -S chromaprint
+sudo apt install libchromaprint-tools
+```
+
 ROCm env vars are handled automatically by `src/core/rocm_env.py`. See `config/master_pipeline.yaml` for settings.
 
 ---
@@ -158,6 +169,49 @@ python src/tools/create_training_crops.py my_music/ \
 ```
 
 Produces beat-aligned audio crops with per-crop `.INFO` (inherited features + local BPM/beat_count), sliced `.BEATS_GRID`, and `.json` metadata.
+
+---
+
+## Latent Encoding (for the Feature Explorer / Latent Player)
+
+Latents are encoded with scripts in the `stable-audio-tools` repo. Two separate datasets are maintained: full-mix latents (SAT training data) and stem latents (for beat-matched crossfading in the latent player).
+
+**Full-mix crops → training dataset:**
+```bash
+cd /path/to/stable-audio-tools
+
+./encode_dataset.py \
+    --source-dir /path/to/Goa_Separated_crops \
+    --output-dir /path/to/goa-small \
+    --model-config models/checkpoints/small/base_model_config.json \
+    --ckpt-path    models/checkpoints/small/base_model.ckpt
+```
+
+**Stem crops → stem latent dataset (required for BM crossfade):**
+```bash
+# Encode all stem crops for one track:
+./encode_stems.py \
+    --track-dir "/path/to/Goa_Separated_crops/Artist - Track" \
+    --stem-dir  /path/to/goa-stems
+
+# Or encode all tracks (loop in shell):
+for d in /path/to/Goa_Separated_crops/*/; do
+    ./encode_stems.py --track-dir "$d" --stem-dir /path/to/goa-stems
+done
+```
+
+Output structure mirrors the source crop directory: `stem_dir/<track_folder>/<crop_name>_<stem>.npy + .json`.
+
+The latent server (`scripts/latent_server.py`) reads directory paths from `latent_player.ini`:
+```ini
+[server]
+latent_dir    = /path/to/goa-small      # full-mix latents
+stem_dir      = /path/to/goa-stems      # stem latents (BM crossfade)
+raw_audio_dir = /path/to/crops          # source audio (raw=1 and BM re-encoding)
+port = 7891
+```
+
+**Note:** Beat-matched crossfade in the latent player requires stem latents for both tracks. Tracks without stem latents can still use regular latent crossfade; disable the "BM" button or you will get a "Stem latents not found" error.
 
 ---
 

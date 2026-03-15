@@ -16,6 +16,7 @@ av==16.1.0
 beartype==0.18.5
 beautifulsoup4==4.14.3
 bitsandbytes==0.49.1
+bungee-python==0.2.1
 -e git+https://github.com/lucidrains/BS-RoFormer@1ccb8a8b07735bc45161a880419d0b92110eeb63#egg=BS_RoFormer
 certifi==2026.1.4
 cffi==2.0.0
@@ -104,6 +105,8 @@ openunmix==1.3.0
 opt_einsum==3.4.0
 optree==0.18.0
 packaging==26.0
+pedalboard==0.9.22
+pyacoustid==1.3.0
 pandas==2.3.3
 pillow==11.3.0
 pipdeptree==2.30.0
@@ -121,6 +124,7 @@ pydub==0.25.1
 Pygments==2.19.2
 pyloudnorm==0.2.0
 pyparsing==3.3.1
+pyrubberband==0.4.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 pytz==2025.2
@@ -155,6 +159,7 @@ tensorboard==2.20.0
 tensorboard-data-server==0.7.2
 tensorflow_rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/tensorflow_rocm-2.20.0.dev0%2Bselfbuilt-cp312-cp312-manylinux_2_28_x86_64.whl
 termcolor==3.3.0
+tidalapi==0.8.11
 threadpoolctl==3.6.0
 -e git+https://github.com/AudioCommons/timbral_models.git@6a97eec621891a8e875a8968b0ae3fa0e58e2a5c#egg=timbral_models
 tokenizers==0.22.2
