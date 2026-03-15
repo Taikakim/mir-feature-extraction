@@ -187,6 +187,8 @@ cd /path/to/stable-audio-tools
     --ckpt-path    models/checkpoints/small/base_model.ckpt
 ```
 
+Re-runs are incremental: tracks whose `.npy` already exists are skipped. Companion `.json` files are automatically refreshed (without re-encoding) when the source `.INFO` sidecar is newer — so running the MIR pipeline to add new features and then re-running the encoder propagates them to the latent dataset. Use `--force` to re-encode everything.
+
 **Stem crops → stem latent dataset (required for BM crossfade):**
 ```bash
 # Encode all stem crops for one track:
