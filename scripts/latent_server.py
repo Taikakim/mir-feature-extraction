@@ -445,19 +445,22 @@ def beatmatch_crossfade_to_wav(
             audio = t.numpy()
         return audio
 
+    missing_latents: list = []
+    missing_audio:   list = []
+
     for stem in STEMS:
         crops_a = find_stem_crops(dir_a, stem)
         crops_b = find_stem_crops(dir_b, stem)
         npy_a, _ = find_best_crop(crops_a, pos_a) if crops_a else (None, None)
         npy_b, _ = find_best_crop(crops_b, pos_b) if crops_b else (None, None)
         if npy_a is None or npy_b is None:
-            missing.append(stem)
+            missing_latents.append(stem)
             continue
 
         raw_a = _load_stem_raw(npy_a)
         raw_b = _load_stem_raw(npy_b)
         if raw_a is None or raw_b is None:
-            missing.append(stem)
+            missing_audio.append(stem)
             continue
 
         print(f"  bm/{stem} [{algo}]: A {shift_a:+.1f}st ×{stretch_a:.3f}  "
@@ -469,9 +472,14 @@ def beatmatch_crossfade_to_wav(
         stems_b[stem] = _encode_audio(raw_b)   # [1, C, T_b]
 
     if not stems_a:
+        if missing_latents:
+            raise ValueError(
+                f"Stem latents not found for: {', '.join(missing_latents)}. "
+                f"These tracks have not been encoded with stem separation — "
+                f"encode them first or use regular crossfade (no BPM match).")
         raise ValueError(
-            f"No source stem audio found. Missing: {', '.join(missing)}. "
-            f"Check raw_audio_dir and stem file paths.")
+            f"Raw stem audio not found for: {', '.join(missing_audio)}. "
+            f"Check raw_audio_dir ({_raw_audio_dir}) and stem file paths.")
 
     # Full-mix reality anchors — use pre-encoded latents (no pitch/stretch applied)
     crops_fm_a = find_crops(_latent_dir / track_a)
