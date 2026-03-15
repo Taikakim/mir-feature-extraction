@@ -37,6 +37,8 @@ UNITS = {
     "beat_regularity":              "sec",
     "booming":                      "0-100",
     "bpm":                          "BPM",
+    "bpm_essentia":                 "BPM",
+    "bpm_madmom":                   "BPM",
     "brightness":                   "0-100",
     "chroma_0":  "-", "chroma_1":  "-", "chroma_2":  "-", "chroma_3":  "-",
     "chroma_4":  "-", "chroma_5":  "-", "chroma_6":  "-", "chroma_7":  "-",
@@ -124,6 +126,8 @@ DESCS = {
     "beat_regularity":              "Standard deviation of beat intervals — lower = more regular",
     "booming":                      "Perceived boominess / low-frequency resonance (0-100, from AudioCommons)",
     "bpm":                          "Beats per minute — estimated tempo",
+    "bpm_essentia":                 "BPM estimate from Essentia RhythmExtractor2013",
+    "bpm_madmom":                   "BPM estimate from madmom DBNBeatTracker (CPU, slow)",
     "brightness":                   "Perceived brightness of the sound (0-100, from AudioCommons)",
     "chroma_0":  None, "chroma_1":  None, "chroma_2":  None, "chroma_3":  None,
     "chroma_4":  None, "chroma_5":  None, "chroma_6":  None, "chroma_7":  None,
@@ -211,6 +215,8 @@ METHODS = {
     "beat_regularity":              ["rhythm/bpm.py", "librosa beat_track"],
     "booming":                      ["timbral/audio_commons.py", "timbral_models (AudioCommons)"],
     "bpm":                          ["rhythm/bpm.py", "librosa beat_track"],
+    "bpm_essentia":                 ["rhythm/bpm.py", "Essentia RhythmExtractor2013"],
+    "bpm_madmom":                   ["rhythm/bpm.py", "madmom DBNBeatTracker"],
     "brightness":                   ["timbral/audio_commons.py", "timbral_models (AudioCommons)"],
     "content_enjoyment":            ["timbral/audiobox_aesthetics.py", "AudioBox Aesthetics"],
     "content_usefulness":           ["timbral/audiobox_aesthetics.py", "AudioBox Aesthetics"],
@@ -288,7 +294,7 @@ PERCEPTUAL_FEATURES = {
 # Numeric features to include in DATA (must be plottable scalars)
 # Chroma features are generated programmatically below
 NUMERIC_FEATURES = [
-    "atonality", "beat_count", "beat_regularity", "booming", "bpm", "brightness",
+    "atonality", "beat_count", "beat_regularity", "booming", "bpm", "bpm_essentia", "bpm_madmom", "brightness",
     "content_enjoyment", "content_usefulness", "danceability", "depth",
     "downbeats", "duration", "end_sample", "end_time",
     "female_probability", "hardness",
@@ -350,9 +356,13 @@ def load_track_data(track_dir: Path) -> dict | None:
                 feature_values[k].append(float(v))
             elif k in ("spotify_id", "musicbrainz_id", "track_metadata_artist",
                        "track_metadata_title", "music_flamingo_short_genre",
-                       "music_flamingo_short_mood", "music_flamingo_short_technical") \
+                       "music_flamingo_short_mood", "music_flamingo_short_technical",
+                       "label", "album", "isrc", "tidal_id", "tidal_url") \
                     and k not in metadata and v:
                 metadata[k] = v
+            elif k in ("genres", "artists") and k not in metadata and isinstance(v, list) and v:
+                # Join lists to comma-separated strings for display
+                metadata[k] = ", ".join(str(x) for x in v)
 
     if not feature_values:
         return None
@@ -419,6 +429,23 @@ def main():
     spotify_ids = [tracks_data[t].get("spotify_id", "") or "" for t in sorted_tracks]
     mbids       = [tracks_data[t].get("musicbrainz_id", "") or "" for t in sorted_tracks]
 
+    # Additional string metadata arrays
+    def _str_arr(key):
+        return [tracks_data[t].get(key, "") or "" for t in sorted_tracks]
+
+    labels     = _str_arr("label")
+    albums     = _str_arr("album")
+    genres     = _str_arr("genres")
+    artists    = _str_arr("artists")
+    isrc_arr   = _str_arr("isrc")
+    tidal_ids  = _str_arr("tidal_id")
+    tidal_urls = _str_arr("tidal_url")
+
+    # Flamingo short captions (already extracted into metadata)
+    fg_genre   = _str_arr("music_flamingo_short_genre")
+    fg_mood    = _str_arr("music_flamingo_short_mood")
+    fg_tech    = _str_arr("music_flamingo_short_technical")
+
     # Filter metadata dicts to what we have
     units_out   = {f: UNITS.get(f, "-")   for f in features_in_data}
     descs_out   = {f: DESCS.get(f)        for f in features_in_data}
@@ -438,6 +465,16 @@ def main():
         fh.write(f"const METHODS = {json.dumps(methods_out, separators=(',', ':'))};\n")
         fh.write(f"const SPOTIFY = {json.dumps(spotify_ids, separators=(',', ':'))};\n")
         fh.write(f"const MBIDS = {json.dumps(mbids, separators=(',', ':'))};\n")
+        fh.write(f"const LABELS = {json.dumps(labels, separators=(',', ':'))};\n")
+        fh.write(f"const ALBUMS = {json.dumps(albums, separators=(',', ':'))};\n")
+        fh.write(f"const GENRES = {json.dumps(genres, separators=(',', ':'))};\n")
+        fh.write(f"const ARTISTS = {json.dumps(artists, separators=(',', ':'))};\n")
+        fh.write(f"const ISRC = {json.dumps(isrc_arr, separators=(',', ':'))};\n")
+        fh.write(f"const TIDAL_IDS = {json.dumps(tidal_ids, separators=(',', ':'))};\n")
+        fh.write(f"const TIDAL_URLS = {json.dumps(tidal_urls, separators=(',', ':'))};\n")
+        fh.write(f"const FG_GENRE = {json.dumps(fg_genre, separators=(',', ':'))};\n")
+        fh.write(f"const FG_MOOD = {json.dumps(fg_mood, separators=(',', ':'))};\n")
+        fh.write(f"const FG_TECH = {json.dumps(fg_tech, separators=(',', ':'))};\n")
         fh.write(f"const PERCEPTUAL = new Set({json.dumps(sorted(PERCEPTUAL_FEATURES), separators=(',', ':'))});\n")
 
     size = out.stat().st_size

@@ -20,7 +20,10 @@ Use --no-ui to skip the TUI and fall back to coloured stdout logging.
 """
 
 import logging
+import os
 import re
+import select
+import sys
 import threading
 import time
 from collections import deque
@@ -347,6 +350,7 @@ class PipelineUI:
         # Current operation
         self._current_file: str = ''
         self._current_op: str = ''
+        self._current_feature: str = ''   # sub-step within an operation
         self._progress_done: int = 0
         self._progress_total: int = 0
         self._progress_rate: float = 0.0
@@ -363,6 +367,9 @@ class PipelineUI:
         self._start_time: float = time.time()
         self._tracks_total: int = 0
         self._suspended: bool = False
+
+        # Keyboard / graceful shutdown
+        self._old_termios = None   # saved terminal settings restored on stop()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -406,6 +413,16 @@ class PipelineUI:
         )
         self._live.start()
 
+        # Put stdin in cbreak mode so single keypresses are readable immediately.
+        # Do this AFTER Live.start() so we save whatever mode Rich left it in.
+        try:
+            import termios, tty
+            fd = sys.stdin.fileno()
+            self._old_termios = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            self._old_termios = None   # not a real tty (piped input, etc.)
+
         self._stop_event.clear()
         self._refresh_thread = threading.Thread(
             target=self._refresh_loop, daemon=True, name='PipelineUI-refresh'
@@ -424,6 +441,7 @@ class PipelineUI:
         self._stop_event.set()
         if self._refresh_thread:
             self._refresh_thread.join(timeout=1.5)
+        self._restore_terminal()
         if self._live:
             try:
                 self._live.stop()
@@ -440,12 +458,30 @@ class PipelineUI:
                 self._live.start()
             except Exception:
                 pass
+        # Re-enter cbreak mode after returning to the alternate screen
+        try:
+            import termios, tty
+            fd = sys.stdin.fileno()
+            self._old_termios = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            self._old_termios = None
         self._stop_event.clear()
         self._refresh_thread = threading.Thread(
             target=self._refresh_loop, daemon=True, name='PipelineUI-refresh'
         )
         self._refresh_thread.start()
         self._suspended = False
+
+    def _restore_terminal(self):
+        """Restore terminal to the settings saved before cbreak mode."""
+        if self._old_termios is not None:
+            try:
+                import termios
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_termios)
+            except Exception:
+                pass
+            self._old_termios = None
 
     def stop(self):
         """Stop the TUI.  The caller should print a final summary afterwards."""
@@ -458,6 +494,8 @@ class PipelineUI:
         self._stop_event.set()
         if self._refresh_thread:
             self._refresh_thread.join(timeout=2.0)
+
+        self._restore_terminal()
 
         if self._live:
             try:
@@ -481,13 +519,22 @@ class PipelineUI:
                 self._stages[stage_id] = (status, elapsed)
 
     def set_current(self, file: str = '', operation: str = '',
-                    done: int = 0, total: int = 0, rate: float = 0.0):
-        """Update current file / operation and progress bar data."""
+                    done: int = 0, total: int = 0, rate: float = 0.0,
+                    feature: str = ''):
+        """Update current file / operation and progress bar data.
+
+        Args:
+            feature: Optional sub-step label shown below the operation, e.g.
+                     'Loudness', 'Spectral · Saturation', 'BPM (madmom)'.
+        """
         with self._lock:
             if file:
                 self._current_file = file
             if operation:
                 self._current_op = operation
+                self._current_feature = ''  # reset sub-step when operation changes
+            if feature is not None:         # explicit '' clears it
+                self._current_feature = feature
             self._progress_done = done
             self._progress_total = total
             if rate > 0:
@@ -534,6 +581,20 @@ class PipelineUI:
 
     # ── Refresh loop ──────────────────────────────────────────────────────────
 
+    def _poll_keyboard(self):
+        """Check for a graceful-shutdown keypress ('s') without blocking."""
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                ch = os.read(sys.stdin.fileno(), 1).decode('utf-8', errors='ignore')
+                if ch.lower() == 's':
+                    from core.graceful_shutdown import shutdown_requested
+                    shutdown_requested.set()
+                    logger.info(">>> Graceful shutdown requested ('s' pressed). "
+                                "Finishing current file…")
+        except Exception:
+            pass
+
     def _refresh_loop(self):
         while not self._stop_event.is_set():
             try:
@@ -541,6 +602,7 @@ class PipelineUI:
                     self._live.update(self._render())
             except Exception:
                 pass
+            self._poll_keyboard()
             time.sleep(0.25)
 
     # ── Rendering ─────────────────────────────────────────────────────────────
@@ -555,6 +617,7 @@ class PipelineUI:
             group_rates = dict(self._group_rates)
             current_file = self._current_file
             current_op = self._current_op
+            current_feature = self._current_feature
             prog_done = self._progress_done
             prog_total = self._progress_total
             prog_rate = self._progress_rate
@@ -603,6 +666,10 @@ class PipelineUI:
         if crop_stats is not None:
             feature_coverage = crop_stats.get('feature_coverage', {})
             active_crops = crop_stats.get('active_crops', [])
+            # Prefer crop-pipeline's active_feature over the track-level one
+            crop_active_feat = crop_stats.get('active_feature', '')
+            if crop_active_feat:
+                current_feature = crop_active_feat
 
         # ── Assemble layout ────────────────────────────────────────────────
         layout = Layout()
@@ -634,7 +701,7 @@ class PipelineUI:
                                    prog_done, prog_total, prog_rate, group_rates,
                                    feature_coverage))
         layout['current'].update(
-            self._render_current(current_file, current_op,
+            self._render_current(current_file, current_op, current_feature,
                                   prog_done, prog_total, prog_rate,
                                   active_crops))
         layout['stats'].update(
@@ -808,6 +875,7 @@ class PipelineUI:
                           padding=(0, 1))
 
     def _render_current(self, current_file: str, current_op: str,
+                         current_feature: str,
                          done: int, total: int, rate: float,
                          active_crops: Optional[List[str]] = None) -> 'Panel':
         lines = []
@@ -815,6 +883,11 @@ class PipelineUI:
         if active_crops:
             # Multi-worker mode: show all in-flight crop stems
             lines.append(Text(current_op or 'Processing', style='cyan'))
+            if current_feature:
+                feat_t = Text(no_wrap=True)
+                feat_t.append('  ↳ ', style='dim')
+                feat_t.append(current_feature, style='bold white')
+                lines.append(feat_t)
             for stem in active_crops:
                 fn = stem if len(stem) <= 52 else '…' + stem[-51:]
                 lines.append(Text(fn, style='bold yellow', no_wrap=True))
@@ -824,7 +897,12 @@ class PipelineUI:
                 fn = '…' + fn[-51:]
             lines.append(Text(fn, style='bold yellow', overflow='ellipsis', no_wrap=True))
             if current_op:
-                lines.append(Text(current_op, style='cyan'))
+                op_t = Text(no_wrap=True)
+                op_t.append(current_op, style='cyan')
+                if current_feature:
+                    op_t.append('  ↳  ', style='dim')
+                    op_t.append(current_feature, style='bold white')
+                lines.append(op_t)
 
         lines.append(Text(''))
 

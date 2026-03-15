@@ -17,7 +17,8 @@ Usage:
 Features:
 - --output-dir / -o: Save crops to destination with per-track folders (e.g., /output/TrackName/)
 - --sequential: Simple sequential crops at exact sample length (no beat logic)
-- Beat-aligned mode: End times prefer div4 downbeat count, then any downbeat, then full length
+- Beat-aligned mode: End times snap to closest downbeat before target length, then full length
+- --div4: additionally constrains end to a downbeat count divisible by 4 (4, 8, 12... bars)
 - Crops won't shrink below 75% of target length (avoids short crops from sparse beats)
 - Without --overlap: strictly consecutive (next crop starts where previous ended)
 - When --overlap: next crop starts at (last_start + length/2), snapped to closest downbeat
@@ -649,10 +650,14 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
         # Apply fades
         stem_crop = apply_fades(stem_crop, fade_len)
 
-        # Preserve source stem format (m4a/aac/ogg → mp3 to avoid downstream issues)
+        # Preserve source stem format.
+        # m4a/aac → mp3 (no lossless alternative, keep at high bitrate).
+        # ogg → flac (decoded PCM saved losslessly, avoids double lossy encode).
         source_ext = stem_path.suffix.lower()
-        if source_ext in ('.m4a', '.aac', '.ogg'):
+        if source_ext in ('.m4a', '.aac'):
             source_ext = '.mp3'
+        elif source_ext == '.ogg':
+            source_ext = '.flac'
         crop_stem_name = f"{crop_base_path.stem}_{stem_name}{source_ext}"
         crop_stem_path = crop_base_path.parent / crop_stem_name
 
@@ -888,10 +893,14 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
 
-    # Preserve source format (m4a/aac/ogg → mp3 to avoid downstream issues)
+    # Preserve source format.
+    # m4a/aac → mp3 (no lossless alternative, keep at high bitrate).
+    # ogg → flac (decoded PCM saved losslessly, avoids double lossy encode).
     source_ext = full_mix_path.suffix.lower()
-    if source_ext in ('.m4a', '.aac', '.ogg'):
+    if source_ext in ('.m4a', '.aac'):
         source_ext = '.mp3'
+    elif source_ext == '.ogg':
+        source_ext = '.flac'
 
     # Load source .INFO for ID3 metadata (to write to crop files)
     source_info = {}
@@ -1066,10 +1075,14 @@ def create_crops_for_file(folder_path: Path,
     duration_sec = total_samples / sr
     length_sec = length_samples / sr
 
-    # Preserve source format (m4a/aac/ogg → mp3 to avoid downstream issues)
+    # Preserve source format.
+    # m4a/aac → mp3 (no lossless alternative, keep at high bitrate).
+    # ogg → flac (decoded PCM saved losslessly, avoids double lossy encode).
     source_ext = full_mix_path.suffix.lower()
-    if source_ext in ('.m4a', '.aac', '.ogg'):
+    if source_ext in ('.m4a', '.aac'):
         source_ext = '.mp3'
+    elif source_ext == '.ogg':
+        source_ext = '.flac'
 
     logger.info(f"{folder_path.name}: {total_samples} samples, {duration_sec:.2f}s, sr={sr}")
 
@@ -1285,15 +1298,11 @@ def create_crops_for_file(folder_path: Path,
                     final_end_sec = snapped_end
                 # else: keep target_end_sec (full length, no beat snap)
         else:
-            # Try div4 first (best musical boundary), then any downbeat
-            div4_end = find_end_for_div4_downbeats(align_grid, current_start_sec, target_end_sec)
-            if div4_end is not None and div4_end > min_end_sec:
-                final_end_sec = div4_end
-            else:
-                snapped_end = find_downbeat_before(align_grid, target_end_sec)
-                if snapped_end is not None and snapped_end > min_end_sec:
-                    final_end_sec = snapped_end
-                # else: keep target_end_sec (full length, no beat snap)
+            # Snap to closest downbeat before target end (no div4 constraint)
+            snapped_end = find_downbeat_before(align_grid, target_end_sec)
+            if snapped_end is not None and snapped_end > min_end_sec:
+                final_end_sec = snapped_end
+            # else: keep target_end_sec (full length, no beat snap)
 
         final_end_sample = int(final_end_sec * sr)
 

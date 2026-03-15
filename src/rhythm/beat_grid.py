@@ -26,6 +26,11 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add local madmom repo as a fallback (Python 3.12 compatible fork).
+# Appended (not inserted) so the venv's compiled madmom takes priority.
+_madmom_repo = Path(__file__).parent.parent.parent / 'repos' / 'madmom'
+if _madmom_repo.exists() and str(_madmom_repo) not in sys.path:
+    sys.path.append(str(_madmom_repo))
 
 from core.file_utils import get_stem_files
 from core.common import BEATS_GRID_EXT

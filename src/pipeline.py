@@ -368,7 +368,8 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                         crop_path, audio=crop_audio, sr=crop_sr,
                         features=_timbral_missing))
                     generated.append(f'timbral({_op})')
-                except Exception: pass
+                except Exception as e:
+                    logger.warning(f"Timbral failed for {crop_path.name}: {type(e).__name__}: {e}")
 
         return {'path': crop_path, 'results': results, 'success': True,
                 'generated': generated}
@@ -1018,6 +1019,7 @@ class Pipeline:
                                 self.config.skip_harmonic, self.config.skip_timbral])
 
         if pass1_needed:
+            self.stats['active_feature'] = 'Loudness · Spectral · Chroma · Timbral · RMS'
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
             logger.info(f"  Parallel workers: {self.config.feature_workers}")
 
@@ -1168,10 +1170,10 @@ class Pipeline:
 
                         while pending:
                             # Wait for the next batch to complete, with a per-crop timeout.
-                            # 300s is generous (timbral+all features ~5-30s normally).
-                            # If nothing completes in 300s, the remaining workers are hung
+                            # 90s is generous (timbral+all features ~5-30s normally).
+                            # If nothing completes in 90s, the remaining workers are hung
                             # (e.g. timbral_models.timbral_reverb on pathological audio).
-                            done, pending = cf_wait(pending, timeout=300, return_when=FIRST_COMPLETED)
+                            done, pending = cf_wait(pending, timeout=90, return_when=FIRST_COMPLETED)
 
                             # Expose up to n_workers pending stems to TUI for "Current" panel
                             self.stats['active_crops'] = [
@@ -1287,6 +1289,7 @@ class Pipeline:
             return self.stats["crops_failed"] == 0
 
         if not self.config.skip_audiobox:
+            self.stats['active_feature'] = 'AudioBox Aesthetics'
             logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
             try:
                 from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics_batch, get_predictor
@@ -1393,6 +1396,7 @@ class Pipeline:
             return self.stats["crops_failed"] == 0
 
         if not self.config.skip_classification:
+            self.stats['active_feature'] = 'Essentia Classification'
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
             logger.info(f"  Processing sequentially (TensorFlow is not multiprocess-safe)")
             try:
@@ -1545,6 +1549,7 @@ class Pipeline:
             return self.stats["crops_failed"] == 0
 
         if not self.config.skip_flamingo:
+            self.stats['active_feature'] = 'Music Flamingo'
             logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, GGUF/CLI) - {len(all_crops)} files")
             try:
                 from src.classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
@@ -1696,6 +1701,7 @@ class Pipeline:
                 # Flat directory: crops live directly in working_dir
                 all_revision_crops = find_crop_files(self.config.working_dir)
 
+            self.stats['active_feature'] = 'Granite Revision'
             logger.info(f"\n[PASS 4b] Granite Revision - {len(all_revision_crops)} total files")
             logger.info(f"  Revision keys: {', '.join(rev_prompts.keys())}")
 
@@ -1753,6 +1759,7 @@ class Pipeline:
         # PASS 5: MIDI Transcription
         # =========================================================================
         if not self.config.skip_midi:
+            self.stats['active_feature'] = 'MIDI Transcription'
             logger.info(f"\n[PASS 5/5] MIDI Transcription - {len(all_crops)} files")
              # MIDI script handles its own batching/loading effectively usually, 
              # but here we just call it. For now, skipping detailed implementation 

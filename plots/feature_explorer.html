@@ -874,6 +874,10 @@
       </div>
       <button onclick="lpTogglePanel()" style="background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 0 0 8px;">&#x2715;</button>
     </div>
+    <div id="lp-server-warning" style="display:none;margin-bottom:8px;padding:7px 10px;background:#3a1020;border:1px solid #e94560;border-radius:5px;font-size:11px;color:#f0a0b0;line-height:1.5;">
+      ⚠ Server not running.<br>
+      <code style="font-size:10px;color:#ffb3c6;user-select:all;">python scripts/latent_server.py</code>
+    </div>
     <div style="margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;">
         <span style="font-size:9px;font-weight:bold;color:#e94560;min-width:14px;flex-shrink:0;">A</span>
@@ -982,6 +986,21 @@
       </div>
       <div style="font-size:9px;color:#444;margin-top:4px;">
         A/B color: pulls stems toward full-mix (adds instrument bleed)
+      </div>
+      <!-- Beat Match -->
+      <div style="border-top:1px solid #1a2040;margin-top:8px;padding-top:7px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="lp-interp-btn" id="lp-bm-btn" onclick="lpToggleBeatMatch()"
+            title="Align BPM (tempo stretch) and key (chroma rotation) before re-encoding. Loads source audio, applies pitch shift + time stretch, encodes to latent. Requires raw_audio_dir in latent_player.ini. Tolerance: ±2 semitones, ±10% BPM.">&#x266b; Beat Match</button>
+          <select id="lp-bm-algo"
+            style="font-size:9px;padding:2px 4px;background:#0f1a2e;border:1px solid #333355;color:#888;border-radius:3px;cursor:pointer;"
+            title="Pitch shift / time stretch algorithm">
+            <option value="pedalboard">Pedalboard</option>
+            <option value="bungee">Bungee</option>
+            <option value="rubberband">Rubberband</option>
+          </select>
+        </div>
+        <div id="lp-bm-info" style="display:none;font-size:9px;color:#888;line-height:1.75;padding-top:5px;"></div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
@@ -1307,10 +1326,14 @@
         const u = UNITS[f] && UNITS[f] !== '-' ? ' ' + UNITS[f] : '';
         fh += '<div><span style="color:#00d2ff;">' + f + '</span>: ' + (v !== null ? v.toFixed(3) : 'N/A') + u + '</div>';
       });
+      // Append label / genres metadata if available
+      if (typeof LABELS !== 'undefined' && LABELS[idx]) fh += '<div><span style="color:#aaa;">label</span>: ' + LABELS[idx] + '</div>';
+      if (typeof GENRES !== 'undefined' && GENRES[idx]) fh += '<div><span style="color:#aaa;">genres</span>: ' + GENRES[idx] + '</div>';
       document.getElementById('tp-features').innerHTML = fh;
       let lh = '';
       if (SPOTIFY[idx]) lh += '<a href="https://open.spotify.com/track/' + SPOTIFY[idx] + '" target="_blank" style="color:#1db954;">\uD83C\uDFB5 Spotify</a>';
-      lh += '<a href="https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[idx])) + '" target="_blank" style="color:#00d2ff;">\uD83C\uDF0A Tidal</a>';
+      const _tidalUrl = (typeof TIDAL_URLS !== 'undefined' && TIDAL_URLS[idx]) ? TIDAL_URLS[idx] : ('https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[idx])));
+      lh += '<a href="' + _tidalUrl + '" target="_blank" style="color:#00d2ff;">\uD83C\uDF0A Tidal</a>';
       if (MBIDS[idx]) lh += '<a href="https://musicbrainz.org/recording/' + MBIDS[idx] + '" target="_blank" style="color:#e94560;">\uD83D\uDCC0 MB</a>';
       document.getElementById('tp-links').innerHTML = lh;
       panel.style.display = '';
@@ -1997,7 +2020,7 @@
         const name = TRACKS[idx];
         let href = '', hasLink = true;
         if (svc === 'spotify') { href = SPOTIFY[idx] ? 'https://open.spotify.com/track/' + SPOTIFY[idx] : ''; hasLink = !!SPOTIFY[idx]; }
-        else if (svc === 'tidal') { href = 'https://tidal.com/search?q=' + encodeURIComponent(searchName(name)); }
+        else if (svc === 'tidal') { href = (typeof TIDAL_URLS !== 'undefined' && TIDAL_URLS[idx]) ? TIDAL_URLS[idx] : ('https://tidal.com/search?q=' + encodeURIComponent(searchName(name))); }
         else if (svc === 'musicbrainz') { href = MBIDS[idx] ? 'https://musicbrainz.org/recording/' + MBIDS[idx] : ''; hasLink = !!MBIDS[idx]; }
         else if (svc === 'beatport') { href = 'https://www.beatport.com/search?q=' + encodeURIComponent(searchName(name)); }
         const lk = hasLink && href ? '<a class="tl-link" href="' + href + '" target="_blank">\u2197</a>' : '<span class="tl-link" style="opacity:0.3;">\u2014</span>';
@@ -2301,10 +2324,9 @@
       if (_lpAutoLoadSlot === 'b') {
         if (trackName === _lpBTrack) return;
         _lpDebounceTimer = setTimeout(() => {
-          const pos = parseFloat(document.getElementById('lp-pos').value);
           lpSetB(trackName);
           if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
-          else lpLoad(trackName, pos);
+          // Do NOT call lpLoad — that would overwrite slot A
         }, 350);
       } else {
         if (trackName === _lpCurrentTrack) return;
@@ -2324,11 +2346,16 @@
 
     function lpLoad(trackName, position) {
       if (!trackName) return;
+      if (!_lpServerOk) {
+        document.getElementById('lp-status').textContent = '⚠ Server offline — start latent_server.py';
+        return;
+      }
       const pos = (position !== undefined) ? position : parseFloat(document.getElementById('lp-pos').value);
       _lpCurrentTrack = trackName;
       _lpHighlightIdx = TRACKS.indexOf(trackName);
       _lpReady = false;
       _lpApplyHighlight();
+      if (_lpBeatMatch) _lpUpdateBmInfo();
       const _lpAIn = document.getElementById('lp-a-search'); if (_lpAIn) _lpAIn.value = trackName;
       document.getElementById('lp-status').textContent = 'Loading\u2026';
       const _cropEl = document.getElementById('lp-crop-count');
@@ -2476,6 +2503,7 @@
       const el = document.getElementById('lp-b-search');
       if (el) el.value = name;
       _lpApplyHighlight();
+      if (_lpBeatMatch) _lpUpdateBmInfo();
     }
 
     // ---- Crossfader controls ---------------------------------------------------
@@ -2529,7 +2557,23 @@
 
       _lpReady = false;
       lpStopPlayback();
-      document.getElementById('lp-status').textContent = 'Decoding 4 stems\u2026';
+
+      let bmParams = '';
+      if (_lpBeatMatch) {
+        _lpUpdateBmInfo();
+        const bm = computeBeatMatch(_lpCurrentTrack, _lpBTrack);
+        const algoEl = document.getElementById('lp-bm-algo');
+        const bmAlgo = algoEl ? algoEl.value : 'pedalboard';
+        bmParams = '&beatmatch=1'
+          + '&shift_a='   + bm.shiftA
+          + '&stretch_a=' + bm.stretchA.toFixed(4)
+          + '&shift_b='   + bm.shiftB
+          + '&stretch_b=' + bm.stretchB.toFixed(4)
+          + '&bm_algo='   + bmAlgo;
+        document.getElementById('lp-status').textContent = 'Encoding shifted stems\u2026';
+      } else {
+        document.getElementById('lp-status').textContent = 'Decoding 4 stems\u2026';
+      }
 
       const url = LP_SERVER + '/crossfade'
         + '?track_a='    + encodeURIComponent(_lpCurrentTrack)
@@ -2544,7 +2588,8 @@
         + '&beta_b='     + parseFloat(beta_b).toFixed(3)
         + '&interp='     + _lpCfInterp
         + (_lpSmartLoop ? '&smart_loop=1' : '')
-        + (_lpRaw ? '&raw=1' : '');
+        + (_lpRaw ? '&raw=1' : '')
+        + bmParams;
 
       fetch(url)
         .then(r => {
@@ -2568,6 +2613,123 @@
 
     function lpCfStop() { lpStopPlayback(); }
 
+    // ---- Beat Match ------------------------------------------------------------
+    let _lpBeatMatch = false;
+    const _LP_NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+    function _lpChromaVec(trackName) {
+      const idx = TRACKS.indexOf(trackName);
+      if (idx < 0) return null;
+      const v = [];
+      for (let i = 0; i < 12; i++) {
+        const f = 'chroma_' + i;
+        v.push((DATA[f] && DATA[f][idx] != null && isFinite(DATA[f][idx])) ? DATA[f][idx] : 0);
+      }
+      const sum = v.reduce((a, b) => a + b, 0);
+      return sum > 0 ? v.map(x => x / sum) : v;
+    }
+
+    function _lpBestChromaShift(cA, cB) {
+      // Find k ∈ [-6,6] maximising dot(cA, rotate_left(cB, k)).
+      // Rotating cB left by k = shifting audio B up by k semitones.
+      let bestK = 0, bestDot = -Infinity;
+      for (let k = -6; k <= 6; k++) {
+        let dot = 0;
+        for (let i = 0; i < 12; i++) dot += cA[i] * cB[((i - k) % 12 + 12) % 12];
+        if (dot > bestDot) { bestDot = dot; bestK = k; }
+      }
+      return bestK;   // semitones to shift B upward
+    }
+
+    function computeBeatMatch(trackA, trackB) {
+      const idxA = TRACKS.indexOf(trackA);
+      const idxB = TRACKS.indexOf(trackB);
+      let shiftA = 0, stretchA = 1.0, shiftB = 0, stretchB = 1.0;
+      const info = { shiftA, stretchA, shiftB, stretchB };
+
+      // --- BPM / stretch ---
+      const bpmA = (DATA['bpm'] && idxA >= 0 && DATA['bpm'][idxA] != null) ? DATA['bpm'][idxA] : 0;
+      const bpmB = (DATA['bpm'] && idxB >= 0 && DATA['bpm'][idxB] != null) ? DATA['bpm'][idxB] : 0;
+      if (bpmA > 0 && bpmB > 0) {
+        // Octave-normalise B into [0.75, 1.33] × A so half/double tempo is handled
+        let bB = bpmB;
+        while (bB < bpmA * 0.75) bB *= 2;
+        while (bB > bpmA * 1.33) bB /= 2;
+        const bpmRatio = Math.abs(bB / bpmA - 1.0);
+        if (bpmRatio > 0.005 && bpmRatio <= 0.10) {
+          // Meet in the middle at geometric mean.
+          // effective_bpm = original / stretch_factor  →  stretch = original / target
+          const tgt = Math.sqrt(bpmA * bB);
+          stretchA = bpmA / tgt;
+          stretchB = bB   / tgt;
+          info.targetBpm = tgt;
+        }
+        info.bpmA = bpmA; info.bpmBnorm = bB; info.bpmB = bpmB;
+      }
+
+      // --- Key / pitch shift ---
+      const cA = _lpChromaVec(trackA);
+      const cB = _lpChromaVec(trackB);
+      if (cA && cB) {
+        const bestK = _lpBestChromaShift(cA, cB);
+        if (Math.abs(bestK) > 2) {
+          // Split the shift, meeting in the middle (integer semitones)
+          shiftB = Math.round(bestK / 2);
+          shiftA = -(bestK - shiftB);
+        }
+        info.keyA = _LP_NOTES[cA.indexOf(Math.max(...cA))];
+        info.keyB = _LP_NOTES[cB.indexOf(Math.max(...cB))];
+        info.bestK = bestK;
+      }
+
+      info.shiftA = shiftA; info.stretchA = stretchA;
+      info.shiftB = shiftB; info.stretchB = stretchB;
+      return info;
+    }
+
+    function _lpUpdateBmInfo() {
+      const el = document.getElementById('lp-bm-info');
+      if (!el) return;
+      if (!_lpCurrentTrack || !_lpBTrack) { el.innerHTML = 'Set A and B tracks first'; return; }
+      const bm = computeBeatMatch(_lpCurrentTrack, _lpBTrack);
+      const lines = [];
+      if (bm.bpmA !== undefined) {
+        const ratio = Math.abs(bm.bpmBnorm / bm.bpmA - 1.0);
+        const tooFar = ratio > 0.10;
+        const sa = bm.stretchA !== 1.0 ? ` ×${bm.stretchA.toFixed(3)}` : tooFar ? ' (gap >10%, skipped)' : ' (no change)';
+        const sb = bm.stretchB !== 1.0 ? ` ×${bm.stretchB.toFixed(3)}` : tooFar ? ' (gap >10%, skipped)' : ' (no change)';
+        const tgtStr = bm.targetBpm ? bm.targetBpm.toFixed(1) + ' BPM' : 'matched';
+        lines.push(
+          `<span style="color:#e94560;">A</span> ${bm.bpmA.toFixed(1)} BPM${sa} &nbsp;` +
+          `<span style="color:#5bc4ff;">B</span> ${bm.bpmBnorm.toFixed(1)} BPM${sb}` +
+          (bm.targetBpm ? ` → ${tgtStr}` : '')
+        );
+      }
+      if (bm.keyA !== undefined) {
+        const aSign = bm.shiftA > 0 ? `+${bm.shiftA}` : `${bm.shiftA}`;
+        const bSign = bm.shiftB > 0 ? `+${bm.shiftB}` : `${bm.shiftB}`;
+        const aLabel = bm.shiftA ? `${bm.keyA} ${aSign}st` : bm.keyA;
+        const bLabel = bm.shiftB ? `${bm.keyB} ${bSign}st` : bm.keyB;
+        const inKey  = Math.abs(bm.bestK || 0) <= 2;
+        lines.push(
+          `<span style="color:#e94560;">${aLabel}</span> ↔ ` +
+          `<span style="color:#5bc4ff;">${bLabel}</span>` +
+          (inKey ? ' <span style="color:#4cd137;">(in key)</span>' : '')
+        );
+      }
+      el.innerHTML = lines.join('<br>') || '<span style="color:#555;">No BPM/chroma data available</span>';
+    }
+
+    function lpToggleBeatMatch() {
+      _lpBeatMatch = !_lpBeatMatch;
+      const btn  = document.getElementById('lp-bm-btn');
+      const info = document.getElementById('lp-bm-info');
+      if (btn)  btn.classList.toggle('active', _lpBeatMatch);
+      if (info) info.style.display = _lpBeatMatch ? '' : 'none';
+      if (_lpBeatMatch) _lpUpdateBmInfo();
+      if (_lpCurrentTrack && _lpBTrack) lpCrossfade();
+    }
+
     // Patch updatePlot so the highlight survives every plot refresh
     const _lp_origUpdatePlot = updatePlot;
     updatePlot = function() { _lp_origUpdatePlot(); _lpApplyHighlight(); };
@@ -2580,11 +2742,13 @@
           _lpServerOk = true;
           document.getElementById('lp-server-dot').style.background = '#4cd137';
           document.getElementById('lp-server-label').textContent = 'Server OK';
+          document.getElementById('lp-server-warning').style.display = 'none';
         })
         .catch(() => {
           _lpServerOk = false;
           document.getElementById('lp-server-dot').style.background = '#e94560';
           document.getElementById('lp-server-label').textContent = 'Server offline';
+          document.getElementById('lp-server-warning').style.display = '';
         });
     }
     setInterval(_lpPollStatus, 8000);

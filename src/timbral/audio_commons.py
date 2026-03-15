@@ -376,7 +376,7 @@ def analyze_all_timbral_features(audio_path: str | Path,
                 value = all_features[feature_name](analysis_path)
                 results[feature_name] = value
             except Exception as e:
-                logger.debug(f"Could not analyze {feature_name}: {e}")
+                logger.warning(f"Could not analyze {feature_name} for {audio_path.name}: {type(e).__name__}: {e}")
     finally:
         # Clean up tmpfs file
         if tmpfs_path is not None and tmpfs_path.exists():

@@ -700,10 +700,10 @@ class MasterPipeline:
         if skip_to_crop_analysis:
             logger.info(fmt_dim("\n[STAGE 3] Cropping: SKIPPED (crops exist)"))
             if self.ui: self.ui.set_stage('cropping', 'skipped')
-        elif state.is_stage_completed('cropping') and not self.config.should_overwrite('crops'):
-            logger.info(fmt_dim("\n[STAGE 3] Cropping: COMPLETE (previous run)"))
-            if self.ui: self.ui.set_stage('cropping', 'done')
         elif not self.config.skip_crops:
+            # Always call _run_cropping — it has per-track skip logic that checks
+            # whether each track's crop folder exists. The state file cannot be
+            # trusted here because crop folders may have been deleted manually.
             if self.ui: self.ui.set_stage('cropping', 'running')
             self._run_cropping()
             if self.ui: self.ui.set_stage('cropping', 'done')
@@ -1770,7 +1770,12 @@ class MasterPipeline:
                 existing = read_info(info_path) if info_path.exists() else {}
                 results = {}
 
+                def _ui_feat(name: str):
+                    if self.ui:
+                        self.ui.set_current(feature=name)
+
                 # Loudness - check ALL output keys
+                _ui_feat('Loudness')
                 if should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness'), existing=existing):
                     try:
                         results.update(analyze_file_loudness(full_mix))
@@ -1778,6 +1783,7 @@ class MasterPipeline:
                         logger.debug(f"Loudness failed: {e}")
 
                 # Spectral - check ALL output keys
+                _ui_feat('Spectral')
                 if should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral'), existing=existing):
                     try:
                         results.update(analyze_spectral_features(full_mix))
@@ -1785,6 +1791,7 @@ class MasterPipeline:
                         logger.debug(f"Spectral failed: {e}")
 
                 # Saturation / hard-clipping detection
+                _ui_feat('Saturation')
                 if should_process(info_path, SATURATION_KEYS, self.config.should_overwrite('saturation'), existing=existing):
                     try:
                         results.update(analyze_saturation(full_mix))
@@ -1792,6 +1799,7 @@ class MasterPipeline:
                         logger.debug(f"Saturation failed: {e}")
 
                 # Syncopation
+                _ui_feat('Syncopation')
                 if not self.config.skip_syncopation and should_process(info_path, SYNCOPATION_KEYS, self.config.should_overwrite('syncopation'), existing=existing):
                     try:
                         results.update(analyze_syncopation(folder))
@@ -1801,6 +1809,7 @@ class MasterPipeline:
                         logger.debug(f"Syncopation failed: {e}")
 
                 # Complexity
+                _ui_feat('Rhythmic Complexity')
                 if not self.config.skip_complexity and should_process(info_path, COMPLEXITY_KEYS, self.config.should_overwrite('complexity'), existing=existing):
                     try:
                         results.update(analyze_rhythmic_complexity(folder))
@@ -1810,6 +1819,7 @@ class MasterPipeline:
                         logger.debug(f"Complexity failed: {e}")
 
                 # Per Stem Rhythm
+                _ui_feat('Per-Stem Rhythm')
                 if not self.config.skip_per_stem_rhythm and should_process(info_path, PER_STEM_RHYTHM_KEYS, self.config.should_overwrite('per_stem_rhythm'), existing=existing):
                     try:
                         res = analyze_per_stem_rhythm(folder)
@@ -1818,6 +1828,7 @@ class MasterPipeline:
                         logger.debug(f"Per-stem rhythm failed: {e}")
 
                 # Per Stem Harmonic
+                _ui_feat('Per-Stem Harmonic')
                 if not self.config.skip_per_stem_harmonic and should_process(info_path, PER_STEM_HARMONIC_KEYS, self.config.should_overwrite('per_stem_harmonic'), existing=existing):
                     try:
                         res = analyze_per_stem_harmonics(folder)
@@ -1826,6 +1837,7 @@ class MasterPipeline:
                         logger.debug(f"Per-stem harmonic failed: {e}")
 
                 # BPM — Madmom TempoEstimationProcessor + Essentia RhythmExtractor2013
+                _ui_feat('BPM')
                 if should_process(info_path, BPM_KEYS, self.config.should_overwrite('bpm'), existing=existing):
                     try:
                         from rhythm.bpm import estimate_bpm_madmom, estimate_bpm_essentia
@@ -2109,7 +2121,11 @@ class MasterPipeline:
             for crop_info_path in crop_info_paths:
                 if not crop_info_path.exists():
                     continue
-                crop_data = read_info(crop_info_path)
+                try:
+                    crop_data = read_info(crop_info_path)
+                except Exception as e:
+                    logger.warning(f"  Skipping corrupt crop INFO {crop_info_path.name}: {e}")
+                    continue
                 to_write = {
                     k: v for k, v in to_copy.items()
                     if k not in crop_data or (force_keys and k in force_keys)
@@ -2302,7 +2318,12 @@ class MasterPipeline:
             pipeline = Pipeline(config)
 
             # Give the UI refresh thread a live window into crop progress
-            all_crop_files = list(find_crop_files(crops_dir)) if crops_dir.exists() else []
+            # find_crop_files() is non-recursive — crops live in per-track subdirs,
+            # so we must iterate crop folders to get the correct total.
+            all_crop_files = []
+            if crops_dir.exists():
+                for _cf in find_crop_folders(crops_dir):
+                    all_crop_files.extend(find_crop_files(_cf))
             if self.ui:
                 self.ui.set_current(file='', operation='Crop feature extraction',
                                     done=0, total=len(all_crop_files))

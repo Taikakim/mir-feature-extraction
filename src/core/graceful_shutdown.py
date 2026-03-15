@@ -82,10 +82,22 @@ def start_shutdown_listener(trigger_key: str = 's'):
     """
     Start listening for a keypress to trigger graceful shutdown.
 
+    When the TUI (PipelineUI) is active it owns the terminal and polls for
+    the trigger key itself — in that case this function is a no-op.
+
     Args:
         trigger_key: The key that triggers shutdown (default: 's')
     """
     global _listener_thread
+
+    # Defer to TUI keyboard handler when it's running
+    try:
+        from core.pipeline_ui import is_tui_active
+        if is_tui_active():
+            logger.info(f"Press '{trigger_key}' at any time to stop after the current file finishes.")
+            return
+    except ImportError:
+        pass
 
     if _listener_thread is not None and _listener_thread.is_alive():
         return  # already running

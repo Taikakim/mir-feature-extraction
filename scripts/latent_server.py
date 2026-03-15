@@ -293,6 +293,244 @@ def _smart_loop_points(audio_np: np.ndarray, sample_rate: int,
 
 
 # ---------------------------------------------------------------------------
+# Beat-match helpers: pitch shift + time stretch, then re-encode
+# ---------------------------------------------------------------------------
+
+def _apply_pitch_stretch(audio_np: np.ndarray, sr: int,
+                         semitones: float, stretch: float,
+                         algo: str = 'pedalboard') -> np.ndarray:
+    """Apply pitch shift and/or time stretch to audio [ch, samples].
+
+    Convention (all algorithms):
+      stretch > 1 → audio longer (BPM decreases) — same as pedalboard stretch_factor.
+      semitones > 0 → pitch up.
+
+    algo: 'pedalboard' | 'bungee' | 'rubberband'
+    Falls back to the next available algorithm if the chosen one fails.
+    """
+    if abs(semitones) < 1e-4 and abs(stretch - 1.0) < 1e-4:
+        return audio_np
+
+    def _try_bungee():
+        from bungee_python import bungee as bungee_lib
+        channels = audio_np.shape[0]
+        stretcher = bungee_lib.Bungee(sample_rate=sr, channels=channels)
+        if abs(semitones) > 1e-4:
+            stretcher.set_pitch(2.0 ** (semitones / 12.0))
+        if abs(stretch - 1.0) > 1e-4:
+            # bungee set_speed is a speed multiplier (>1 = faster),
+            # but our stretch is a duration ratio (>1 = slower), so invert.
+            stretcher.set_speed(1.0 / stretch)
+        audio_in = audio_np.T.astype(np.float32)          # [samples, channels]
+        out = np.asarray(stretcher.process(audio_in), dtype=np.float32).copy()
+        if out.ndim == 1:
+            out = np.column_stack([out] * channels)
+        elif out.shape[1] != channels:
+            out = np.tile(out[:, :1], (1, channels))
+        return out.T                                        # [ch, samples]
+
+    def _try_pedalboard():
+        import pedalboard
+        if not hasattr(pedalboard, 'time_stretch'):
+            raise ImportError("pedalboard.time_stretch not available")
+        return pedalboard.time_stretch(
+            audio_np.astype(np.float32),
+            float(sr),
+            stretch_factor=float(stretch),
+            pitch_shift_in_semitones=float(semitones),
+            high_quality=True,
+            preserve_formants=False,
+        ).astype(np.float32)
+
+    def _try_rubberband():
+        import subprocess, tempfile
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as fi, \
+             tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as fo:
+            sf.write(fi.name, audio_np.T.astype(np.float32), sr)
+            cmd = ['rubberband', '-q']
+            if abs(stretch - 1.0) > 1e-4:
+                # --time is duration ratio: >1 = longer/slower — same as our stretch
+                cmd += ['--time', str(stretch)]
+            if abs(semitones) > 1e-4:
+                cmd += ['--pitch', str(semitones)]
+            cmd += [fi.name, fo.name]
+            subprocess.run(cmd, check=True, capture_output=True)
+            out, _ = sf.read(fo.name, dtype='float32', always_2d=True)
+        import os
+        for p in [fi.name, fo.name]:
+            try: os.remove(p)
+            except Exception: pass
+        return out.T    # [ch, samples]
+
+    order = {
+        'bungee':     [_try_bungee,     _try_pedalboard, _try_rubberband],
+        'rubberband': [_try_rubberband, _try_pedalboard, _try_bungee],
+        'pedalboard': [_try_pedalboard, _try_rubberband, _try_bungee],
+    }.get(algo, [_try_pedalboard, _try_rubberband, _try_bungee])
+
+    last_err = None
+    for fn in order:
+        try:
+            result = fn()
+            if fn.__name__ != order[0].__name__:
+                print(f"  bm: fell back to {fn.__name__} (primary failed: {last_err})")
+            return result
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"All pitch-shift algorithms failed. Last error: {last_err}")
+
+
+def _encode_audio(audio_np: np.ndarray) -> torch.Tensor:
+    """Encode [ch, samples] numpy audio to [1, C, T] latent tensor.
+
+    Uses the autoencoder's encode() method; works with both tensor-returning
+    and distribution-returning (DiagonalGaussianDistribution) autoencoders.
+    Uses the deterministic mean for inference.
+    """
+    audio_t = torch.from_numpy(audio_np.astype(np.float32)).unsqueeze(0).to(
+        device=_device, dtype=_dtype)
+    with torch.no_grad():
+        latent = _autoencoder.encode(audio_t)
+        if hasattr(latent, 'mean'):
+            latent = latent.mean
+        elif hasattr(latent, 'sample'):
+            latent = latent.sample()
+    return latent   # [1, C, T]
+
+
+def beatmatch_crossfade_to_wav(
+    track_a: str, track_b: str,
+    pos_a: float, pos_b: float,
+    alphas: dict, beta_a: float, beta_b: float,
+    shift_a: float, stretch_a: float,
+    shift_b: float, stretch_b: float,
+    interp: str = 'slerp',
+    smart_loop: bool = False,
+    algo: str = 'pedalboard',
+) -> tuple:
+    """Load source stem audio, pitch-shift + time-stretch per track, encode to
+    latent, then crossfade in latent space.  Requires raw_audio_dir to be set.
+
+    shift_*/stretch_* follow the same conventions as _apply_pitch_stretch:
+      shift > 0 → pitch up in semitones
+      stretch > 1 → audio longer (effective BPM = original / stretch)
+    """
+    if _raw_audio_dir is None:
+        raise ValueError(
+            "raw_audio_dir not configured — cannot re-encode source audio for "
+            "beat matching.  Set raw_audio_dir in latent_player.ini.")
+
+    stem_root = _stem_dir if _stem_dir is not None else _latent_dir
+    dir_a = stem_root / track_a
+    dir_b = stem_root / track_b
+
+    stems_a: dict = {}
+    stems_b: dict = {}
+    missing: list = []
+
+    def _load_stem_raw(npy_path: Path) -> np.ndarray | None:
+        raw = find_raw_audio(npy_path, stem_root)
+        if raw is None:
+            return None
+        audio, sr = sf.read(str(raw), dtype='float32', always_2d=True)
+        audio = audio.T   # [ch, samples]
+        if audio.shape[0] == 1:
+            audio = np.repeat(audio, 2, axis=0)
+        elif audio.shape[0] > 2:
+            audio = audio[:2]
+        if sr != _sample_rate:
+            import torchaudio
+            t = torchaudio.functional.resample(
+                torch.from_numpy(audio), sr, _sample_rate)
+            audio = t.numpy()
+        return audio
+
+    for stem in STEMS:
+        crops_a = find_stem_crops(dir_a, stem)
+        crops_b = find_stem_crops(dir_b, stem)
+        npy_a, _ = find_best_crop(crops_a, pos_a) if crops_a else (None, None)
+        npy_b, _ = find_best_crop(crops_b, pos_b) if crops_b else (None, None)
+        if npy_a is None or npy_b is None:
+            missing.append(stem)
+            continue
+
+        raw_a = _load_stem_raw(npy_a)
+        raw_b = _load_stem_raw(npy_b)
+        if raw_a is None or raw_b is None:
+            missing.append(stem)
+            continue
+
+        print(f"  bm/{stem} [{algo}]: A {shift_a:+.1f}st ×{stretch_a:.3f}  "
+              f"B {shift_b:+.1f}st ×{stretch_b:.3f}")
+        raw_a = _apply_pitch_stretch(raw_a, _sample_rate, shift_a, stretch_a, algo)
+        raw_b = _apply_pitch_stretch(raw_b, _sample_rate, shift_b, stretch_b, algo)
+
+        stems_a[stem] = _encode_audio(raw_a)   # [1, C, T_a]
+        stems_b[stem] = _encode_audio(raw_b)   # [1, C, T_b]
+
+    if not stems_a:
+        raise ValueError(
+            f"No source stem audio found. Missing: {', '.join(missing)}. "
+            f"Check raw_audio_dir and stem file paths.")
+
+    # Full-mix reality anchors — use pre-encoded latents (no pitch/stretch applied)
+    crops_fm_a = find_crops(_latent_dir / track_a)
+    crops_fm_b = find_crops(_latent_dir / track_b)
+    npy_fm_a, _ = find_best_crop(crops_fm_a, pos_a)
+    npy_fm_b, _ = find_best_crop(crops_fm_b, pos_b)
+    if npy_fm_a is None or npy_fm_b is None:
+        raise ValueError("Full-mix latents not found for one or both tracks")
+
+    fullmix_a = load_latent(npy_fm_a, device=_device, dtype=_dtype)
+    fullmix_b = load_latent(npy_fm_b, device=_device, dtype=_dtype)
+
+    # Align all T dimensions to minimum (stretching causes slight length drift)
+    all_T = ([z.shape[-1] for z in stems_a.values()] +
+             [z.shape[-1] for z in stems_b.values()] +
+             [fullmix_a.shape[-1], fullmix_b.shape[-1]])
+    target_T = min(all_T)
+    for s in list(stems_a):
+        stems_a[s] = stems_a[s][..., :target_T]
+        stems_b[s] = stems_b[s][..., :target_T]
+    fullmix_a = fullmix_a[..., :target_T]
+    fullmix_b = fullmix_b[..., :target_T]
+
+    audio = crossfade_stems(
+        stems_a, stems_b, fullmix_a, fullmix_b,
+        alphas, beta_a, beta_b,
+        _autoencoder.decode,
+        interp=interp,
+        device=_device,
+    )
+
+    audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
+
+    if smart_loop:
+        bpm_a = _read_bpm(npy_fm_a)
+        bpm_b = _read_bpm(npy_fm_b)
+        loop_end = audio_np.shape[1]
+        for bpm in [bpm_a, bpm_b]:
+            if bpm:
+                try:
+                    _, end = _smart_loop_points(audio_np, _sample_rate, bpm)
+                    loop_end = min(loop_end, end)
+                except Exception as e:
+                    print(f"  smart_loop error (beatmatch, bpm={bpm}): {e}")
+        if loop_end < audio_np.shape[1]:
+            audio_np = audio_np[:, :loop_end]
+
+    audio_np  = np.clip(audio_np, -1.0, 1.0)
+    audio_i16 = (audio_np * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_sample_rate)
+        wf.writeframes(audio_i16.T.flatten().tobytes())
+    return buf.getvalue(), list(stems_a.keys())
+
+
+# ---------------------------------------------------------------------------
 # Decode
 # ---------------------------------------------------------------------------
 
@@ -682,6 +920,14 @@ class Handler(BaseHTTPRequestHandler):
         interp     = qs.get("interp", ["slerp"])[0]
         smart_loop = qs.get("smart_loop", ["0"])[0] == "1"
         raw        = qs.get("raw",        ["0"])[0] == "1"
+        beatmatch  = qs.get("beatmatch",  ["0"])[0] == "1"
+        shift_a    = float(qs.get("shift_a",   ["0.0"])[0])
+        stretch_a  = float(qs.get("stretch_a", ["1.0"])[0])
+        shift_b    = float(qs.get("shift_b",   ["0.0"])[0])
+        stretch_b  = float(qs.get("stretch_b", ["1.0"])[0])
+        bm_algo    = qs.get("bm_algo", ["pedalboard"])[0]
+        if bm_algo not in ("pedalboard", "bungee", "rubberband"):
+            bm_algo = "pedalboard"
         if interp not in ("slerp", "lerp"):
             interp = "slerp"
 
@@ -695,10 +941,21 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  crossfade: A={track_a} B={track_b} "
               f"pos_a={pos_a:.3f} pos_b={pos_b:.3f} "
               f"alphas={alphas} beta_a={beta_a:.3f} beta_b={beta_b:.3f} "
-              f"interp={interp} smart_loop={smart_loop} raw={raw}")
+              f"interp={interp} smart_loop={smart_loop} raw={raw} "
+              f"beatmatch={beatmatch}" +
+              (f" shift_a={shift_a:+.1f}st ×{stretch_a:.3f} "
+               f"shift_b={shift_b:+.1f}st ×{stretch_b:.3f}" if beatmatch else ""))
 
         try:
-            if raw:
+            if beatmatch:
+                with _decode_lock:
+                    wav_bytes, stems_found = beatmatch_crossfade_to_wav(
+                        track_a, track_b, pos_a, pos_b,
+                        alphas, beta_a, beta_b,
+                        shift_a, stretch_a, shift_b, stretch_b,
+                        interp=interp, smart_loop=smart_loop, algo=bm_algo,
+                    )
+            elif raw:
                 wav_bytes, stems_found = crossfade_raw_to_wav(
                     track_a, track_b, pos_a, pos_b, alphas, smart_loop=smart_loop,
                 )
@@ -718,7 +975,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",   "audio/wav")
         self.send_header("Content-Length", str(len(wav_bytes)))
         self.send_header("X-Stems-Found",  ",".join(stems_found))
-        self.send_header("X-Audio-Source", "raw" if raw else "vae")
+        self.send_header("X-Audio-Source",
+                         "beatmatch" if beatmatch else ("raw" if raw else "vae"))
         self.end_headers()
         self.wfile.write(wav_bytes)
 

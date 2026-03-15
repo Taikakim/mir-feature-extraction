@@ -18,8 +18,8 @@ paths:
 # =============================================================================
 stages:
   organize: false                 # Stage 1: Organize raw files into project structure
-  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: false                 # Stage 3: Create training crops
+  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: true                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -77,7 +77,7 @@ rhythm:
   # Set onsets: false to skip this sub-stage (e.g. when .BEATS_GRID/.ONSETS already exist).
   # BPM estimation (bpm_madmom, bpm_essentia) is NOT controlled here —
   # it runs in sub-stage 2d and is gated by overwrite.bpm.
-  onsets: false
+  onsets: true
   workers: 11                     # Parallel workers for beat/downbeat detection
 
 # =============================================================================
@@ -94,43 +94,56 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: false                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 1                     # Parallel workers for cropping
+  workers: 8                     # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
 # =============================================================================
 features:
   # Loudness (LUFS/LRA)
-  loudness: false
+  loudness: true
 
   # Spectral features (flatness, flux, skewness, kurtosis)
-  spectral: false
+  spectral: true
 
   # Saturation / overcompression detection (frame-level peak envelope + hold merge)
   # Catches soft limiting (~-0.5 dBFS flat tops) and hard clipping.
   # Outputs: saturation_ratio (0-1 fraction of duration), saturation_count (#events)
-  saturation: false
+  saturation: true
 
   # Multiband RMS (bass, body, mid, air)
-  multiband_rms: false
+  multiband_rms: true
 
   # Harmonic/Chroma (12-bin pitch class)
-  chroma: false
+  chroma: true
 
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
-  timbral: false
+  timbral: true
 
   # Rhythm and syncopation
-  syncopation: false
-  complexity: false
+  syncopation: true
+  complexity: true
 
   # Essentia classification
-  essentia: false
+  essentia: true
   essentia_genre: true         # Genre classification (400 Discogs classes)
   essentia_mood: true          # Mood/theme classification (56 classes)
   essentia_instrument: true    # Instrument detection (40 classes)
   essentia_voice: true         # Voice vs instrumental probability
   essentia_gender: true        # Vocal gender (requires vocals stem with meaningful content)
+
+  # AudioBox aesthetics (content enjoyment, production quality, etc.)
+  audiobox: false
+
+  # Per-stem features (requires stems)
+  per_stem_rhythm: true
+  per_stem_harmonic: true
+  per_stem: true
+
+  # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
+  # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
+  # Set true only for acoustic music where per-segment tempo variation is meaningful.
+  per_crop_bpm: false
 
 # Vocal content detection thresholds (for gender analysis)
 # A vocal track is considered empty/meaningless if ALL conditions are true:
@@ -139,19 +152,6 @@ vocal_content:
   crest_factor_threshold: 30.0   # dB - crest factor above this suggests sparse/impulsive signal
   rms_threshold: -42.0           # dBFS - RMS below this suggests very quiet content
   peak_threshold: -20.0          # dBFS - peak below this suggests no meaningful signal
-
-  # AudioBox aesthetics (content enjoyment, production quality, etc.)
-  audiobox: false
-
-  # Per-stem features (requires stems)
-  per_stem_rhythm: false
-  per_stem_harmonic: false
-  per_stem: false
-
-  # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
-  # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
-  # Set true only for acoustic music where per-segment tempo variation is meaningful.
-  per_crop_bpm: false
 
 # =============================================================================
 # PER-FEATURE OVERWRITE CONTROL
@@ -163,7 +163,7 @@ overwrite:
   demucs: false                  # Overwrite existing stem separations (legacy key)
   source_separation: false       # Overwrite existing stem separations
   beats: false                   # Overwrite existing beat grids
-  bpm: true                     # Overwrite existing BPM data
+  bpm: false                    # Overwrite existing BPM data
   crops: false                   # Overwrite existing training crops
   syncopation: false             # Overwrite existing syncopation data
   complexity: false              # Overwrite existing rhythmic complexity data

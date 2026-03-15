@@ -65,7 +65,10 @@ class FileLock:
                     If None, uses class default LOCK_TIMEOUT
         """
         self.file_path = Path(file_path)
-        self.lock_path = self.file_path.with_suffix('.lock')
+        # Append .lock rather than replace suffix — with_suffix() strips
+        # everything after the last dot, causing collisions for names like
+        # "A.B. Didgeridoo Oblivion - Track X" (all map to "A.B.lock").
+        self.lock_path = Path(str(self.file_path) + '.lock')
         self.acquired = False
         self.lock_file = None
         self.timeout = timeout if timeout is not None else self.LOCK_TIMEOUT
