@@ -22,14 +22,19 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
     Worker function for parallel feature extraction.
 
     Args:
-        args: Tuple of (folder_path, overwrite, per_feature_overwrite)
+        args: Tuple of (folder_path, overwrite, per_feature_overwrite[, skip_flags])
               overwrite: global overwrite flag
               per_feature_overwrite: dict mapping feature names to overwrite bools
+              skip_flags: optional dict of skip_<feature>: bool flags
 
     Returns:
         Tuple of (folder_name, success, message)
     """
-    folder, overwrite, per_feature_overwrite = args
+    if len(args) == 4:
+        folder, overwrite, per_feature_overwrite, skip_flags = args
+    else:
+        folder, overwrite, per_feature_overwrite = args
+        skip_flags = {}
     folder_name = folder.name
 
     def should_overwrite(feature: str) -> bool:
@@ -76,28 +81,28 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
             results = {}
 
             # Loudness - check ALL output keys
-            if should_process(info_path, LOUDNESS_KEYS, should_overwrite('loudness'), existing=existing):
+            if not skip_flags.get('skip_loudness') and should_process(info_path, LOUDNESS_KEYS, should_overwrite('loudness'), existing=existing):
                 try:
                     results.update(analyze_file_loudness(full_mix))
                 except Exception:
                     pass  # Non-critical
 
             # Spectral - check ALL output keys
-            if should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral'), existing=existing):
+            if not skip_flags.get('skip_spectral') and should_process(info_path, SPECTRAL_KEYS, should_overwrite('spectral'), existing=existing):
                 try:
                     results.update(analyze_spectral_features(full_mix))
                 except Exception:
                     pass  # Non-critical
 
             # Saturation / hard-clipping detection
-            if should_process(info_path, SATURATION_KEYS, should_overwrite('saturation'), existing=existing):
+            if not skip_flags.get('skip_saturation') and should_process(info_path, SATURATION_KEYS, should_overwrite('saturation'), existing=existing):
                 try:
                     results.update(analyze_saturation(full_mix))
                 except Exception:
                     pass  # Non-critical
 
             # Syncopation
-            if should_process(info_path, SYNCOPATION_KEYS, should_overwrite('syncopation'), existing=existing):
+            if not skip_flags.get('skip_syncopation') and should_process(info_path, SYNCOPATION_KEYS, should_overwrite('syncopation'), existing=existing):
                 try:
                     results.update(analyze_syncopation(folder))
                 except FileNotFoundError:
@@ -106,7 +111,7 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
                     pass
 
             # Complexity
-            if should_process(info_path, COMPLEXITY_KEYS, should_overwrite('complexity'), existing=existing):
+            if not skip_flags.get('skip_complexity') and should_process(info_path, COMPLEXITY_KEYS, should_overwrite('complexity'), existing=existing):
                 try:
                     results.update(analyze_rhythmic_complexity(folder))
                 except FileNotFoundError:
@@ -115,7 +120,7 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
                     pass
 
             # Per Stem Rhythm
-            if should_process(info_path, PER_STEM_RHYTHM_KEYS, should_overwrite('per_stem_rhythm'), existing=existing):
+            if not skip_flags.get('skip_per_stem_rhythm') and should_process(info_path, PER_STEM_RHYTHM_KEYS, should_overwrite('per_stem_rhythm'), existing=existing):
                 try:
                     res = analyze_per_stem_rhythm(folder)
                     if res: results.update(res)
@@ -123,7 +128,7 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
                     pass
 
             # Per Stem Harmonic
-            if should_process(info_path, PER_STEM_HARMONIC_KEYS, should_overwrite('per_stem_harmonic'), existing=existing):
+            if not skip_flags.get('skip_per_stem_harmonic') and should_process(info_path, PER_STEM_HARMONIC_KEYS, should_overwrite('per_stem_harmonic'), existing=existing):
                 try:
                     res = analyze_per_stem_harmonics(folder)
                     if res: results.update(res)

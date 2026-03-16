@@ -194,10 +194,14 @@ class CropFeatureExtractor:
         self._extract_multiband_rms(crop_path, results, timings, existing, overwrite,
                                      crop_mono=crop_mono, crop_sr=sample_rate)
 
-        # 5. Chroma features
+        # 5. Chroma features (CQT)
         self._extract_chroma(crop_path, stems, results, timings, existing, overwrite,
                              preloaded_stems=preloaded_stems, crop_mono=crop_mono,
                              crop_sr=sample_rate)
+
+        # 5b. HPCP + TIV + tonic
+        self._extract_hpcp_tiv(crop_path, stems, results, timings, existing, overwrite,
+                               preloaded_stems=preloaded_stems)
 
         # 6. Timbral features (Audio Commons)
         if not self.skip_timbral:
@@ -333,7 +337,7 @@ class CropFeatureExtractor:
     def _extract_chroma(self, crop_path: Path, stems: Dict, results: Dict,
                         timings: Dict, existing: Dict, overwrite: bool,
                         preloaded_stems=None, crop_mono=None, crop_sr=None):
-        """Extract chroma features."""
+        """Extract CQT chroma features (bass+other stem mix)."""
         if not self._should_extract('chroma_0', existing, overwrite):
             logger.debug("  Skipping chroma (already exists)")
             return
@@ -343,27 +347,82 @@ class CropFeatureExtractor:
             import numpy as np
             from harmonic.chroma import analyze_chroma
 
-            # Use harmonic stem if available (pre-loaded), else crop mono
+            # Mix bass+other stems for chroma (mirrors mix_harmonic_stems)
             if preloaded_stems and 'other' in preloaded_stems:
                 other_audio, other_sr = preloaded_stems['other']
                 if other_audio.ndim > 1:
                     other_audio = other_audio.mean(axis=1)
-                chroma = analyze_chroma(
-                    stems['other'], use_stems=False,
-                    audio=other_audio.astype(np.float32), sr=other_sr)
+                if 'bass' in preloaded_stems:
+                    bass_audio, _ = preloaded_stems['bass']
+                    if bass_audio.ndim > 1:
+                        bass_audio = bass_audio.mean(axis=1)
+                    max_len = max(len(other_audio), len(bass_audio))
+                    other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
+                    bass_audio  = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
+                    mixed = other_audio + bass_audio
+                    max_val = np.abs(mixed).max()
+                    if max_val > 0:
+                        mixed = mixed / max_val * 0.95
+                    audio_for_chroma = mixed.astype(np.float32)
+                else:
+                    audio_for_chroma = other_audio.astype(np.float32)
+                chroma = analyze_chroma(stems.get('other', crop_path), use_stems=False,
+                                        audio=audio_for_chroma, sr=other_sr)
             elif crop_mono is not None:
-                chroma = analyze_chroma(
-                    crop_path, use_stems=False,
-                    audio=crop_mono.astype(np.float32), sr=crop_sr)
+                chroma = analyze_chroma(crop_path, use_stems=False,
+                                        audio=crop_mono.astype(np.float32), sr=crop_sr)
             else:
-                audio_for_chroma = stems.get('other', crop_path)
-                chroma = analyze_chroma(audio_for_chroma)
+                chroma = analyze_chroma(stems.get('other', crop_path))
             results.update(chroma)
 
             timings['chroma'] = time.time() - start
             logger.info(f"  Chroma: {timings['chroma']:.2f}s")
         except Exception as e:
             logger.warning(f"  Chroma failed: {e}")
+
+    def _extract_hpcp_tiv(self, crop_path: Path, stems: Dict, results: Dict,
+                          timings: Dict, existing: Dict, overwrite: bool,
+                          preloaded_stems=None):
+        """Extract HPCP, TIV, and tonic features (Essentia peak-based pipeline)."""
+        if not self._should_extract('hpcp_0', existing, overwrite):
+            logger.debug("  Skipping HPCP/TIV (already exists)")
+            return
+
+        try:
+            start = time.time()
+            import numpy as np
+            from harmonic.hpcp_tiv import analyze_hpcp_tiv
+
+            if preloaded_stems and 'other' in preloaded_stems:
+                other_audio, other_sr = preloaded_stems['other']
+                if other_audio.ndim > 1:
+                    other_audio = other_audio.mean(axis=1)
+                if 'bass' in preloaded_stems:
+                    bass_audio, _ = preloaded_stems['bass']
+                    if bass_audio.ndim > 1:
+                        bass_audio = bass_audio.mean(axis=1)
+                    max_len = max(len(other_audio), len(bass_audio))
+                    other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
+                    bass_audio  = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
+                    mixed = other_audio + bass_audio
+                    max_val = np.abs(mixed).max()
+                    if max_val > 0:
+                        mixed = mixed / max_val * 0.95
+                    hpcp_result = analyze_hpcp_tiv(crop_path, use_stems=False,
+                                                   audio=mixed.astype(np.float32),
+                                                   sr=other_sr)
+                else:
+                    hpcp_result = analyze_hpcp_tiv(crop_path, use_stems=False,
+                                                   audio=other_audio.astype(np.float32),
+                                                   sr=other_sr)
+            else:
+                hpcp_result = analyze_hpcp_tiv(crop_path, use_stems=True)
+
+            results.update(hpcp_result)
+            timings['hpcp_tiv'] = time.time() - start
+            logger.info(f"  HPCP/TIV: {timings['hpcp_tiv']:.2f}s")
+        except Exception as e:
+            logger.warning(f"  HPCP/TIV failed: {e}")
 
     def _extract_timbral(self, crop_path: Path, results: Dict, timings: Dict,
                          existing: Dict, overwrite: bool,

@@ -134,6 +134,41 @@ FEATURE_RANGES: Dict[str, Dict[str, Any]] = {
     'chroma_10': {'min': 0.0, 'max': 1.0, 'type': 'number'},  # A#
     'chroma_11': {'min': 0.0, 'max': 1.0, 'type': 'number'},  # B
 
+    # HPCP features — Essentia peak-based pitch class profile (bass+other stems)
+    # L∞-normalized so dominant bin = 1.0; final average also L∞-normalized
+    'hpcp_0':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # C
+    'hpcp_1':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # C#
+    'hpcp_2':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # D
+    'hpcp_3':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # D#
+    'hpcp_4':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # E
+    'hpcp_5':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # F
+    'hpcp_6':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # F#
+    'hpcp_7':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # G
+    'hpcp_8':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # G#
+    'hpcp_9':  {'min': 0.0, 'max': 1.0, 'type': 'number'},  # A
+    'hpcp_10': {'min': 0.0, 'max': 1.0, 'type': 'number'},  # A#
+    'hpcp_11': {'min': 0.0, 'max': 1.0, 'type': 'number'},  # B
+
+    # TIV features — Tonal Interval Vector (Harte et al. 2006)
+    # DFT of L1-normalized HPCP with perceptual weights; L2-normalized output
+    # Re/Im of k=1..6: [chromaticity, tritone, maj3, dissonance, diatonic, whole-tone]
+    'tiv_0':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=1) chromaticity
+    'tiv_1':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=1)
+    'tiv_2':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=2) tritone/octatonic
+    'tiv_3':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=2)
+    'tiv_4':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=3) major thirds
+    'tiv_5':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=3)
+    'tiv_6':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=4) dissonance
+    'tiv_7':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=4)
+    'tiv_8':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=5) diatonicity
+    'tiv_9':  {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=5)
+    'tiv_10': {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Re(k=6) whole-toneness
+    'tiv_11': {'min': -1.0, 'max': 1.0, 'type': 'number'},  # Im(k=6)
+
+    # Tonic estimation (Essentia Key, edmm profile)
+    'tonic':          {'min': 0.0, 'max': 11.0, 'type': 'number'},  # pitch class 0-11
+    'tonic_strength': {'min': 0.0, 'max': 1.0,  'type': 'number'},  # confidence
+
     # Harmonic features
     'harmonic_movement_bass': {'min': 0.0, 'max': 1.0, 'type': 'number'},
     'harmonic_movement_other': {'min': 0.0, 'max': 1.0, 'type': 'number'},

@@ -18,8 +18,8 @@ paths:
 # =============================================================================
 stages:
   organize: false                 # Stage 1: Organize raw files into project structure
-  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: true                 # Stage 3: Create training crops
+  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: false                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -77,8 +77,8 @@ rhythm:
   # Set onsets: false to skip this sub-stage (e.g. when .BEATS_GRID/.ONSETS already exist).
   # BPM estimation (bpm_madmom, bpm_essentia) is NOT controlled here —
   # it runs in sub-stage 2d and is gated by overwrite.bpm.
-  onsets: true
-  workers: 11                     # Parallel workers for beat/downbeat detection
+  onsets: false
+  workers: 10                     # Parallel workers for beat/downbeat detection
 
 # =============================================================================
 # CROPPING
@@ -101,31 +101,32 @@ cropping:
 # =============================================================================
 features:
   # Loudness (LUFS/LRA)
-  loudness: true
+  loudness: false
 
   # Spectral features (flatness, flux, skewness, kurtosis)
-  spectral: true
+  spectral: false
 
   # Saturation / overcompression detection (frame-level peak envelope + hold merge)
   # Catches soft limiting (~-0.5 dBFS flat tops) and hard clipping.
   # Outputs: saturation_ratio (0-1 fraction of duration), saturation_count (#events)
-  saturation: true
+  saturation: false
 
   # Multiband RMS (bass, body, mid, air)
-  multiband_rms: true
+  multiband_rms: false
 
   # Harmonic/Chroma (12-bin pitch class)
-  chroma: true
+  chroma: false
+  hpcp_tiv: true                 # HPCP + TIV + tonic (Essentia peak-based, bass+other stems)
 
   # Timbral (Audio Commons: brightness, roughness, hardness, etc.)
-  timbral: true
+  timbral: false
 
   # Rhythm and syncopation
-  syncopation: true
-  complexity: true
+  syncopation: false
+  complexity: false
 
   # Essentia classification
-  essentia: true
+  essentia: false
   essentia_genre: true         # Genre classification (400 Discogs classes)
   essentia_mood: true          # Mood/theme classification (56 classes)
   essentia_instrument: true    # Instrument detection (40 classes)
@@ -136,9 +137,9 @@ features:
   audiobox: false
 
   # Per-stem features (requires stems)
-  per_stem_rhythm: true
-  per_stem_harmonic: true
-  per_stem: true
+  per_stem_rhythm: false
+  per_stem_harmonic: false
+  per_stem: false
 
   # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
   # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
@@ -172,6 +173,7 @@ overwrite:
   saturation: false              # Overwrite existing saturation data
   multiband_rms: false           # Overwrite existing multiband RMS data
   chroma: false                   # Overwrite existing chroma features
+  hpcp_tiv: false                # Overwrite existing HPCP/TIV/tonic features
   timbral: false                 # Overwrite existing timbral features
   essentia: false                # Overwrite existing Essentia classification
   audiobox: false                # Overwrite existing AudioBox aesthetics

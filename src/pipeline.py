@@ -74,6 +74,7 @@ class PipelineConfig:
     skip_saturation: bool = False
     skip_multiband_rms: bool = False
     skip_harmonic: bool = False
+    skip_hpcp_tiv: bool = False  # HPCP + TIV + tonic (independent of skip_harmonic)
     skip_timbral: bool = False
     skip_classification: bool = False
     skip_per_stem: bool = False
@@ -318,13 +319,15 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                         crop_path, audio=crop_mono, sr=crop_sr))
                     generated.append(f'spectral({_op})')
                 except Exception: pass
-            if not config_dict.get('skip_multiband_rms') and _needs_processing(MULTIBAND_KEYS, 'spectral'):
-                _op = 'overwrite' if any(k in existing_keys for k in MULTIBAND_KEYS) else 'new'
-                try:
-                    results.update(analyze_multiband_rms(
-                        crop_path, audio=crop_mono, sr=crop_sr))
-                    generated.append(f'rms({_op})')
-                except Exception: pass
+
+        # Multiband RMS (independent of skip_spectral)
+        if not config_dict.get('skip_multiband_rms') and _needs_processing(MULTIBAND_KEYS, 'multiband_rms'):
+            _op = 'overwrite' if any(k in existing_keys for k in MULTIBAND_KEYS) else 'new'
+            try:
+                results.update(analyze_multiband_rms(
+                    crop_path, audio=crop_mono, sr=crop_sr))
+                generated.append(f'rms({_op})')
+            except Exception: pass
 
         # Saturation / hard-clipping detection
         if not config_dict.get('skip_saturation'):
@@ -336,7 +339,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     generated.append(f'sat({_op})')
                 except Exception: pass
 
-        # Chroma - use 'other' stem if available (pre-loaded), else crop mono
+        # Chroma - mix bass+other stems when both available
         if not config_dict.get('skip_harmonic'):
             if _needs_processing(CHROMA_KEYS, 'harmonic'):
                 _op = 'overwrite' if any(k in existing_keys for k in CHROMA_KEYS) else 'new'
@@ -345,14 +348,62 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                         other_audio, other_sr = preloaded_stems['other']
                         if other_audio.ndim > 1:
                             other_audio = other_audio.mean(axis=1)
+                        if 'bass' in preloaded_stems:
+                            bass_audio, _ = preloaded_stems['bass']
+                            if bass_audio.ndim > 1:
+                                bass_audio = bass_audio.mean(axis=1)
+                            max_len = max(len(other_audio), len(bass_audio))
+                            other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
+                            bass_audio   = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
+                            mixed = other_audio + bass_audio
+                            mv = np.abs(mixed).max()
+                            if mv > 0:
+                                mixed = mixed / mv * 0.95
+                            chroma_audio = mixed.astype(np.float32)
+                        else:
+                            chroma_audio = other_audio.astype(np.float32)
                         results.update(analyze_chroma(
                             stems['other'], use_stems=False,
-                            audio=other_audio.astype(np.float32), sr=other_sr))
+                            audio=chroma_audio, sr=other_sr))
                     else:
                         results.update(analyze_chroma(
                             crop_path, use_stems=False,
                             audio=crop_mono.astype(np.float32), sr=crop_sr))
                     generated.append(f'chroma({_op})')
+                except Exception: pass
+
+        # HPCP + TIV + tonic (independent of skip_harmonic)
+        HPCP_KEYS = [f'hpcp_{i}' for i in range(12)]
+        if not config_dict.get('skip_hpcp_tiv'):
+            if _needs_processing(HPCP_KEYS, 'harmonic'):
+                _op = 'overwrite' if any(k in existing_keys for k in HPCP_KEYS) else 'new'
+                try:
+                    from src.harmonic.hpcp_tiv import analyze_hpcp_tiv
+                    if 'other' in preloaded_stems:
+                        other_audio, other_sr = preloaded_stems['other']
+                        if other_audio.ndim > 1:
+                            other_audio = other_audio.mean(axis=1)
+                        if 'bass' in preloaded_stems:
+                            bass_audio, _ = preloaded_stems['bass']
+                            if bass_audio.ndim > 1:
+                                bass_audio = bass_audio.mean(axis=1)
+                            max_len = max(len(other_audio), len(bass_audio))
+                            other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
+                            bass_audio   = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
+                            mixed = other_audio + bass_audio
+                            mv = np.abs(mixed).max()
+                            if mv > 0:
+                                mixed = mixed / mv * 0.95
+                            hpcp_audio = mixed.astype(np.float32)
+                        else:
+                            hpcp_audio = other_audio.astype(np.float32)
+                        results.update(analyze_hpcp_tiv(crop_path, use_stems=False,
+                                                        audio=hpcp_audio, sr=other_sr))
+                    else:
+                        results.update(analyze_hpcp_tiv(crop_path, use_stems=False,
+                                                        audio=crop_mono.astype(np.float32),
+                                                        sr=crop_sr))
+                    generated.append(f'hpcp_tiv({_op})')
                 except Exception: pass
 
         # Timbral - pass pre-loaded audio (writes to /dev/shm RAM disk internally)
@@ -572,7 +623,7 @@ class Pipeline:
             "Multiband RMS Energy",
             "src/spectral/multiband_rms.py",
             [working_dir] + batch_args + verbose_args,
-            skip_flag=self.config.skip_spectral
+            skip_flag=self.config.skip_multiband_rms
         )
         
         # Step 6: Harmonic features
@@ -587,7 +638,7 @@ class Pipeline:
             "Per-Stem Harmonic",
             "src/harmonic/per_stem_harmonic.py",
             [working_dir] + batch_args + verbose_args,
-            skip_flag=self.config.skip_harmonic
+            skip_flag=self.config.skip_per_stem
         )
         
         # Step 7: Timbral features
@@ -719,9 +770,13 @@ class Pipeline:
                 logger.warning(f"Music Flamingo not available: {e}")
 
         import numpy as np
+        from src.core.graceful_shutdown import shutdown_requested
 
         # Process each crop
         for i, crop_path in enumerate(all_crops, 1):
+            if shutdown_requested.is_set():
+                logger.info("  Shutdown requested — stopping sequential crop processing.")
+                break
             logger.info(f"\n[{i}/{len(all_crops)}] {crop_path.name}")
 
             try:
@@ -795,7 +850,7 @@ class Pipeline:
                             logger.warning(f"  Spectral failed: {e}")
 
                     if not self.config.skip_multiband_rms and (
-                            self.config.should_overwrite('spectral') or 'rms_energy_bass' not in existing):
+                            self.config.should_overwrite('multiband_rms') or self.config.should_overwrite('spectral') or 'rms_energy_bass' not in existing):
                         try:
                             results.update(analyze_multiband_rms(
                                 crop_path, audio=crop_mono, sr=crop_sr))
@@ -1018,7 +1073,8 @@ class Pipeline:
 
         pass1_needed = not all([self.config.skip_loudness, self.config.skip_rhythm,
                                 self.config.skip_spectral, self.config.skip_saturation,
-                                self.config.skip_harmonic, self.config.skip_timbral])
+                                self.config.skip_multiband_rms, self.config.skip_harmonic,
+                                self.config.skip_hpcp_tiv, self.config.skip_timbral])
 
         if pass1_needed:
             self.stats['active_feature'] = 'Loudness · Spectral · Chroma · Timbral · RMS'
@@ -1032,6 +1088,7 @@ class Pipeline:
                 'skip_saturation': self.config.skip_saturation,
                 'skip_multiband_rms': self.config.skip_multiband_rms,
                 'skip_harmonic': self.config.skip_harmonic,
+                'skip_hpcp_tiv': self.config.skip_hpcp_tiv,
                 'skip_timbral': self.config.skip_timbral,
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
@@ -1090,6 +1147,9 @@ class Pipeline:
 
             tasks = []
             for _scan_i, crop_path in enumerate(all_crops):
+                if shutdown_requested.is_set():
+                    logger.info("  Shutdown requested — aborting pre-scan.")
+                    break
                 info_path = get_crop_info_path(crop_path)
                 existing = read_info(info_path) if info_path.exists() else {}
                 existing_keys = set(existing.keys())
@@ -1140,6 +1200,10 @@ class Pipeline:
                             _ow('harmonic') or
                             any(f'chroma_{i}' not in existing_keys for i in range(12))):
                         needs_run = True
+                    if not needs_run and not self.config.skip_hpcp_tiv and (
+                            _ow('harmonic') or
+                            any(f'hpcp_{i}' not in existing_keys for i in range(12))):
+                        needs_run = True
                     if not needs_run and not self.config.skip_timbral and (
                             _ow('timbral') or
                             any(k not in existing_keys
@@ -1160,9 +1224,19 @@ class Pipeline:
             if tasks:
                 logger.info(f"  Processing {len(tasks)} files in background (GPU passes run concurrently)...")
 
+                def _init_cpu_worker():
+                    """Pin OMP/BLAS to 1 thread per worker process.
+                    Parent sets OMP_NUM_THREADS=8 for GPU ops; CPU workers need
+                    process-level parallelism instead of per-process thread pools."""
+                    import os
+                    os.environ['OMP_NUM_THREADS'] = '1'
+                    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+                    os.environ['MKL_NUM_THREADS'] = '1'
+
                 def _pass1_worker():
                     from concurrent.futures import wait as cf_wait, FIRST_COMPLETED
-                    executor = ProcessPoolExecutor(max_workers=self.config.feature_workers)
+                    executor = ProcessPoolExecutor(max_workers=self.config.feature_workers,
+                                                  initializer=_init_cpu_worker)
                     try:
                         futures_map = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
                         pending = set(futures_map)

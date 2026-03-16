@@ -138,6 +138,7 @@ class MasterPipelineConfig:
     skip_saturation: bool = False
     skip_multiband_rms: bool = False
     skip_chroma: bool = False
+    skip_hpcp_tiv: bool = False
     skip_timbral: bool = False
     skip_syncopation: bool = False
     skip_complexity: bool = False
@@ -300,6 +301,7 @@ class MasterPipelineConfig:
             skip_saturation=not features.get('saturation', True),
             skip_multiband_rms=not features.get('multiband_rms', True),
             skip_chroma=not features.get('chroma', True),
+            skip_hpcp_tiv=not features.get('hpcp_tiv', True),
             skip_timbral=not features.get('timbral', True),
             skip_syncopation=not features.get('syncopation', True),
             skip_complexity=not features.get('complexity', True),
@@ -405,19 +407,21 @@ class MasterPipelineConfig:
                 'saturation': not self.skip_saturation,
                 'multiband_rms': not self.skip_multiband_rms,
                 'chroma': not self.skip_chroma,
+                'hpcp_tiv': not self.skip_hpcp_tiv,
                 'timbral': not self.skip_timbral,
                 'syncopation': not self.skip_syncopation,
                 'complexity': not self.skip_complexity,
                 'essentia': not self.skip_essentia,
+                'essentia_genre': self.essentia_genre,
+                'essentia_mood': self.essentia_mood,
+                'essentia_instrument': self.essentia_instrument,
+                'essentia_voice': self.essentia_voice,
+                'essentia_gender': self.essentia_gender,
                 'audiobox': not self.skip_audiobox,
                 'per_stem_rhythm': not self.skip_per_stem_rhythm,
                 'per_stem_harmonic': not self.skip_per_stem_harmonic,
                 'per_stem': not self.skip_per_stem,
-            },
-            'music_flamingo': {
-                'enabled': not self.skip_flamingo,
-                'model': self.flamingo_model,
-                'max_tokens': self.flamingo_token_limits,
+                'per_crop_bpm': self.per_crop_bpm,
             },
             'metadata': {
                 'enabled': not self.skip_metadata,
@@ -439,7 +443,9 @@ class MasterPipelineConfig:
             'music_flamingo': {
                 'enabled': not self.skip_flamingo,
                 'model': self.flamingo_model,
+                'context_size': self.flamingo_context_size,
                 'max_tokens': self.flamingo_token_limits,
+                'sample_probability': self.flamingo_sample_probability,
                 'prompts': self.flamingo_prompts,
                 'revision': self.flamingo_revision,
             },
@@ -1666,8 +1672,18 @@ class MasterPipeline:
 
         logger.info(f"Processing {len(folders)} folders with {num_workers} workers...")
 
-        # Prepare arguments for worker function (pass per-feature overwrite flags)
-        args_list = [(folder, self.config.overwrite, self.config.per_feature_overwrite)
+        # Prepare arguments for worker function (pass skip flags + per-feature overwrite flags)
+        _skip_flags = {
+            'skip_loudness': self.config.skip_loudness,
+            'skip_spectral': self.config.skip_spectral,
+            'skip_saturation': self.config.skip_saturation,
+            'skip_multiband_rms': self.config.skip_multiband_rms,
+            'skip_syncopation': self.config.skip_syncopation,
+            'skip_complexity': self.config.skip_complexity,
+            'skip_per_stem_rhythm': self.config.skip_per_stem_rhythm,
+            'skip_per_stem_harmonic': self.config.skip_per_stem_harmonic,
+        }
+        args_list = [(folder, self.config.overwrite, self.config.per_feature_overwrite, _skip_flags)
                      for folder in folders]
 
         success_count = 0
@@ -1779,7 +1795,7 @@ class MasterPipeline:
 
                 # Loudness - check ALL output keys
                 _ui_feat('Loudness')
-                if should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness'), existing=existing):
+                if not self.config.skip_loudness and should_process(info_path, LOUDNESS_KEYS, self.config.should_overwrite('loudness'), existing=existing):
                     try:
                         results.update(analyze_file_loudness(full_mix))
                     except Exception as e:
@@ -1787,7 +1803,7 @@ class MasterPipeline:
 
                 # Spectral - check ALL output keys
                 _ui_feat('Spectral')
-                if should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral'), existing=existing):
+                if not self.config.skip_spectral and should_process(info_path, SPECTRAL_KEYS, self.config.should_overwrite('spectral'), existing=existing):
                     try:
                         results.update(analyze_spectral_features(full_mix))
                     except Exception as e:
@@ -1795,7 +1811,7 @@ class MasterPipeline:
 
                 # Saturation / hard-clipping detection
                 _ui_feat('Saturation')
-                if should_process(info_path, SATURATION_KEYS, self.config.should_overwrite('saturation'), existing=existing):
+                if not self.config.skip_saturation and should_process(info_path, SATURATION_KEYS, self.config.should_overwrite('saturation'), existing=existing):
                     try:
                         results.update(analyze_saturation(full_mix))
                     except Exception as e:
@@ -2299,7 +2315,9 @@ class MasterPipeline:
                 skip_saturation=self.config.skip_saturation,
                 skip_multiband_rms=self.config.skip_multiband_rms,
                 skip_harmonic=self.config.skip_chroma,
+                skip_hpcp_tiv=self.config.skip_hpcp_tiv,
                 skip_timbral=self.config.skip_timbral,
+                skip_per_stem=self.config.skip_per_stem,
                 skip_flamingo=self.config.skip_flamingo,
                 skip_audiobox=self.config.skip_audiobox,
                 skip_classification=self.config.skip_essentia,
@@ -2721,6 +2739,7 @@ Config file template: config/master_pipeline.yaml
                     'saturation':        not config.skip_saturation,
                     'multiband_rms':     not config.skip_multiband_rms,
                     'chroma':            not config.skip_chroma,
+                    'hpcp_tiv':          not config.skip_hpcp_tiv,
                     'timbral':           not config.skip_timbral,
                     'syncopation':       not config.skip_syncopation,
                     'complexity':        not config.skip_complexity,

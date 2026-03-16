@@ -7,8 +7,8 @@ its own properly-sized analysis window regardless of octave. This avoids the
 spectral leakage between adjacent pitch classes that STFT-based methods
 suffer from at low frequencies (critical for bass-heavy EDM).
 
-Uses harmonic stems (bass+other+vocals) when available to avoid drum noise.
-Falls back to full_mix with a warning if stems are not available.
+Uses harmonic stems (bass+other) when available to avoid drum noise and vocal
+pitch smearing. Falls back to full_mix with a warning if stems are not available.
 
 Dependencies:
 - librosa
@@ -43,7 +43,10 @@ PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'
 
 def mix_harmonic_stems(folder_path: Path) -> Tuple[Optional[np.ndarray], int, bool]:
     """
-    Mix bass + other + vocals stems (excluding drums) for harmonic analysis.
+    Mix bass + other stems (excluding drums and vocals) for harmonic analysis.
+
+    Vocals are excluded because pitch instability (vibrato, portamento) smears
+    chroma bins. Bass provides harmonic root; other provides chord content.
 
     Args:
         folder_path: Path to organized folder containing stems
@@ -55,11 +58,11 @@ def mix_harmonic_stems(folder_path: Path) -> Tuple[Optional[np.ndarray], int, bo
     stems = get_stem_files(folder_path, include_full_mix=True)
 
     # Check if we have the harmonic stems
-    harmonic_stems = ['bass', 'other', 'vocals']
+    harmonic_stems = ['bass', 'other']
     available_stems = [s for s in harmonic_stems if s in stems]
 
     if len(available_stems) >= 2:  # Need at least 2 stems for useful mix
-        logger.info(f"Using harmonic stems: {', '.join(available_stems)} (excluding drums)")
+        logger.info(f"Using harmonic stems: {', '.join(available_stems)} (excluding drums and vocals)")
 
         mixed_audio = None
         sr = None
