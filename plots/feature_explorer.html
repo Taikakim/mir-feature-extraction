@@ -1001,6 +1001,23 @@
           </select>
         </div>
         <div id="lp-bm-info" style="display:none;font-size:9px;color:#888;line-height:1.75;padding-top:5px;"></div>
+        <!-- Master pitch / tempo nudge sliders — shown when BM is active -->
+        <div id="lp-bm-master" style="display:none;margin-top:5px;">
+          <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;">
+            <span style="font-size:9px;color:#888;width:34px;flex-shrink:0;">Pitch</span>
+            <input type="range" id="lp-bm-pitch" min="-5" max="5" step="1" value="0"
+              style="flex:1;accent-color:#e94560;height:3px;cursor:pointer;"
+              oninput="_lpOnMasterPitch(+this.value)">
+            <span id="lp-bm-pitch-val" style="font-size:9px;color:#e94560;width:32px;text-align:right;">0 st</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:5px;">
+            <span style="font-size:9px;color:#888;width:34px;flex-shrink:0;">Tempo</span>
+            <input type="range" id="lp-bm-tempo" min="-20" max="20" step="1" value="0"
+              style="flex:1;accent-color:#5bc4ff;height:3px;cursor:pointer;"
+              oninput="_lpOnMasterTempo(+this.value)">
+            <span id="lp-bm-tempo-val" style="font-size:9px;color:#5bc4ff;width:32px;text-align:right;">0 BPM</span>
+          </div>
+        </div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
@@ -2249,6 +2266,8 @@
     let _lpBHighlightIdx = null;
     let _lpAutoLoad      = true;
     let _lpAutoPlay      = false;
+    let _lpMasterPitch   = 0;    // semitone offset applied on top of BM key shift (both tracks)
+    let _lpMasterTempo   = 0;    // BPM offset applied on top of BM target BPM
     let _lpLoop          = false;
     let _lpSmartLoop     = false;
     let _lpReady         = false;
@@ -2319,9 +2338,6 @@
     function lpHover(trackName) {
       clearTimeout(_lpLeaveTimer);
       if (trackName) _lpHoverTrack = trackName;
-      // When LP is open, hover only tracks the name (for a/b keys).
-      // Actual loading into a slot is done by click (see list panel click handlers below).
-      if (_lpVisible) return;
       if (!_lpAutoLoad || !_lpAutoPlay || !trackName) return;
       clearTimeout(_lpDebounceTimer);
       if (_lpAutoLoadSlot === 'b') {
@@ -2663,26 +2679,27 @@
       const idxA = TRACKS.indexOf(trackA);
       const idxB = TRACKS.indexOf(trackB);
       let shiftA = 0, stretchA = 1.0, shiftB = 0, stretchB = 1.0;
-      const info = { shiftA, stretchA, shiftB, stretchB };
+      const info = {};
 
       // --- BPM / stretch ---
-      const bpmA = (DATA['bpm'] && idxA >= 0 && DATA['bpm'][idxA] != null) ? DATA['bpm'][idxA] : 0;
-      const bpmB = (DATA['bpm'] && idxB >= 0 && DATA['bpm'][idxB] != null) ? DATA['bpm'][idxB] : 0;
-      if (bpmA > 0 && bpmB > 0) {
+      let bpmA = 0, bB = 0;
+      const bpmARaw = (DATA['bpm'] && idxA >= 0 && DATA['bpm'][idxA] != null) ? DATA['bpm'][idxA] : 0;
+      const bpmBRaw = (DATA['bpm'] && idxB >= 0 && DATA['bpm'][idxB] != null) ? DATA['bpm'][idxB] : 0;
+      if (bpmARaw > 0 && bpmBRaw > 0) {
+        bpmA = bpmARaw;
+        bB = bpmBRaw;
         // Octave-normalise B into [0.75, 1.33] × A so half/double tempo is handled
-        let bB = bpmB;
         while (bB < bpmA * 0.75) bB *= 2;
         while (bB > bpmA * 1.33) bB /= 2;
         const bpmRatio = Math.abs(bB / bpmA - 1.0);
         if (bpmRatio > 0.005 && bpmRatio <= 0.10) {
           // Meet in the middle at geometric mean.
-          // effective_bpm = original / stretch_factor  →  stretch = original / target
           const tgt = Math.sqrt(bpmA * bB);
           stretchA = bpmA / tgt;
           stretchB = bB   / tgt;
           info.targetBpm = tgt;
         }
-        info.bpmA = bpmA; info.bpmBnorm = bB; info.bpmB = bpmB;
+        info.bpmA = bpmA; info.bpmBnorm = bB; info.bpmB = bpmBRaw;
       }
 
       // --- Key / pitch shift ---
@@ -2690,14 +2707,26 @@
       const cB = _lpChromaVec(trackB);
       if (cA && cB) {
         const bestK = _lpBestChromaShift(cA, cB);
-        if (Math.abs(bestK) > 2) {
-          // Split the shift, meeting in the middle (integer semitones)
+        if (bestK !== 0) {
           shiftB = Math.round(bestK / 2);
           shiftA = -(bestK - shiftB);
         }
         info.keyA = _LP_NOTES[cA.indexOf(Math.max(...cA))];
         info.keyB = _LP_NOTES[cB.indexOf(Math.max(...cB))];
         info.bestK = bestK;
+      }
+
+      // --- Apply master pitch (shifts both tracks equally — transposes the mix) ---
+      shiftA += _lpMasterPitch;
+      shiftB += _lpMasterPitch;
+
+      // --- Apply master tempo (nudges target BPM, recomputes stretch) ---
+      if (_lpMasterTempo !== 0 && bpmA > 0 && bB > 0) {
+        const baseTgt = info.targetBpm || Math.sqrt(bpmA * bB);
+        const newTgt  = Math.max(baseTgt + _lpMasterTempo, 40);
+        stretchA = bpmA / newTgt;
+        stretchB = bB   / newTgt;
+        info.targetBpm = newTgt;
       }
 
       info.shiftA = shiftA; info.stretchA = stretchA;
@@ -2728,24 +2757,54 @@
         const bSign = bm.shiftB > 0 ? `+${bm.shiftB}` : `${bm.shiftB}`;
         const aLabel = bm.shiftA ? `${bm.keyA} ${aSign}st` : bm.keyA;
         const bLabel = bm.shiftB ? `${bm.keyB} ${bSign}st` : bm.keyB;
-        const inKey  = Math.abs(bm.bestK || 0) <= 2;
+        const inKey  = (bm.bestK || 0) === 0;
         lines.push(
           `<span style="color:#e94560;">${aLabel}</span> ↔ ` +
           `<span style="color:#5bc4ff;">${bLabel}</span>` +
           (inKey ? ' <span style="color:#4cd137;">(in key)</span>' : '')
         );
       }
+      if (_lpMasterPitch !== 0 || _lpMasterTempo !== 0) {
+        const parts = [];
+        if (_lpMasterPitch !== 0) parts.push((_lpMasterPitch > 0 ? '+' : '') + _lpMasterPitch + ' st');
+        if (_lpMasterTempo !== 0) parts.push((_lpMasterTempo > 0 ? '+' : '') + _lpMasterTempo + ' BPM');
+        lines.push('<span style="color:#f5a623;">⊕ master: ' + parts.join(', ') + '</span>');
+      }
       el.innerHTML = lines.join('<br>') || '<span style="color:#555;">No BPM/chroma data available</span>';
     }
 
     function lpToggleBeatMatch() {
       _lpBeatMatch = !_lpBeatMatch;
-      const btn  = document.getElementById('lp-bm-btn');
-      const info = document.getElementById('lp-bm-info');
-      if (btn)  btn.classList.toggle('active', _lpBeatMatch);
-      if (info) info.style.display = _lpBeatMatch ? '' : 'none';
+      const btn    = document.getElementById('lp-bm-btn');
+      const info   = document.getElementById('lp-bm-info');
+      const master = document.getElementById('lp-bm-master');
+      if (btn)    btn.classList.toggle('active', _lpBeatMatch);
+      if (info)   info.style.display   = _lpBeatMatch ? '' : 'none';
+      if (master) master.style.display = _lpBeatMatch ? '' : 'none';
       if (_lpBeatMatch) _lpUpdateBmInfo();
       if (_lpCurrentTrack && _lpBTrack) lpCrossfade();
+    }
+
+    let _lpBmMasterTimer = null;
+    function _lpOnMasterPitch(v) {
+      _lpMasterPitch = v;
+      const el = document.getElementById('lp-bm-pitch-val');
+      if (el) el.textContent = (v > 0 ? '+' : '') + v + ' st';
+      if (_lpBeatMatch) _lpUpdateBmInfo();
+      clearTimeout(_lpBmMasterTimer);
+      _lpBmMasterTimer = setTimeout(() => {
+        if (_lpBeatMatch && _lpCurrentTrack && _lpBTrack) lpCrossfade();
+      }, 600);
+    }
+    function _lpOnMasterTempo(v) {
+      _lpMasterTempo = v;
+      const el = document.getElementById('lp-bm-tempo-val');
+      if (el) el.textContent = (v > 0 ? '+' : '') + v + ' BPM';
+      if (_lpBeatMatch) _lpUpdateBmInfo();
+      clearTimeout(_lpBmMasterTimer);
+      _lpBmMasterTimer = setTimeout(() => {
+        if (_lpBeatMatch && _lpCurrentTrack && _lpBTrack) lpCrossfade();
+      }, 600);
     }
 
     // Patch updatePlot so the highlight survives every plot refresh

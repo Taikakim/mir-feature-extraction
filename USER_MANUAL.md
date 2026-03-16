@@ -174,37 +174,33 @@ Produces beat-aligned audio crops with per-crop `.INFO` (inherited features + lo
 
 ## Latent Encoding (for the Feature Explorer / Latent Player)
 
-Latents are encoded with scripts in the `stable-audio-tools` repo. Two separate datasets are maintained: full-mix latents (SAT training data) and stem latents (for beat-matched crossfading in the latent player).
+Latents are encoded with `encode_dataset.py` in the `stable-audio-tools` repo. Two separate datasets can be produced in one pass: full-mix latents (SAT training data) and stem latents (for beat-matched crossfading in the latent player).
 
-**Full-mix crops → training dataset:**
 ```bash
 cd /path/to/stable-audio-tools
 
+# Full-mix only:
+./encode_dataset.py \
+    --source-dir /path/to/Goa_Separated_crops \
+    --output-dir /path/to/goa-small
+
+# Full-mix + stems in one pass (model loaded once):
 ./encode_dataset.py \
     --source-dir /path/to/Goa_Separated_crops \
     --output-dir /path/to/goa-small \
-    --model-config models/checkpoints/small/base_model_config.json \
-    --ckpt-path    models/checkpoints/small/base_model.ckpt
-```
+    --stem-dir   /path/to/goa-stems
 
-Re-runs are incremental: tracks whose `.npy` already exists are skipped. Companion `.json` files are automatically refreshed (without re-encoding) when the source `.INFO` sidecar is newer — so running the MIR pipeline to add new features and then re-running the encoder propagates them to the latent dataset. Use `--force` to re-encode everything.
-
-**Stem crops → stem latent dataset (required for BM crossfade):**
-```bash
-# Encode all tracks at once (model loaded once — use this):
-./encode_stems.py \
+# Stems only:
+./encode_dataset.py \
     --source-dir /path/to/Goa_Separated_crops \
-    --output-dir /path/to/goa-stems
-
-# Encode a single track folder:
-./encode_stems.py \
-    --track-dir  "/path/to/Goa_Separated_crops/Artist - Track" \
-    --output-dir /path/to/goa-stems
+    --stem-dir   /path/to/goa-stems
 ```
 
-`--track-dir` points at the per-track subfolder inside the crops directory (e.g. `Goa_Separated_crops/0001 Total Eclipse - Free Lemonade (Live Mix)`), not the root crops directory. Use `--source-dir` with the root to process everything in one pass.
+At least one of `--output-dir` / `--stem-dir` is required. Re-runs are incremental: tracks whose `.npy` already exists are skipped. Companion `.json` files are automatically refreshed (without re-encoding) when the source `.INFO` sidecar is newer — so running the MIR pipeline to add new features and then re-running the encoder propagates them to both latent datasets. Use `--force` to re-encode everything.
 
-Output structure: `stem_dir/<track_folder>/<crop_name>_<stem>.npy + .json`. Re-runs are incremental (existing `.npy` skipped); `.json` refreshed when source `.INFO` is newer.
+Output structure:
+- Full-mix: `output_dir/<track_folder>/<crop_name>.npy + .json`
+- Stems: `stem_dir/<track_folder>/<crop_name>_<stem>.npy + .json`
 
 The latent server (`scripts/latent_server.py`) reads directory paths from `latent_player.ini`:
 ```ini

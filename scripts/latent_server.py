@@ -49,6 +49,7 @@ import argparse
 import configparser
 import io
 import json
+import math
 import sys
 import threading
 import wave
@@ -195,6 +196,25 @@ def find_raw_audio(npy_path: Path, latent_root: Path) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _load_crop_downbeats(npy_path: Path, latent_root: Path) -> list | None:
+    """Return downbeat timestamps (seconds) for the crop corresponding to a latent .npy.
+
+    Looks for a .DOWNBEATS sidecar next to the source audio in raw_audio_dir.
+    Returns None if unavailable or fewer than 2 downbeats.
+    """
+    if _raw_audio_dir is None:
+        return None
+    try:
+        rel  = npy_path.relative_to(latent_root).with_suffix('.DOWNBEATS')
+        path = _raw_audio_dir / rel
+        if not path.exists():
+            return None
+        times = [float(line.strip()) for line in path.read_text().splitlines() if line.strip()]
+        return times if len(times) >= 2 else None
+    except Exception:
+        return None
 
 
 def load_raw_wav(audio_path: Path, smart_loop: bool = False) -> bytes:
@@ -391,10 +411,11 @@ def _encode_audio(audio_np: np.ndarray) -> torch.Tensor:
         device=_device, dtype=_dtype)
     with torch.no_grad():
         latent = _autoencoder.encode(audio_t)
-        if hasattr(latent, 'mean'):
-            latent = latent.mean
-        elif hasattr(latent, 'sample'):
-            latent = latent.sample()
+        if not isinstance(latent, torch.Tensor):
+            if hasattr(latent, 'mean'):
+                latent = latent.mean
+            elif hasattr(latent, 'sample'):
+                latent = latent.sample()
     return latent   # [1, C, T]
 
 
@@ -445,6 +466,33 @@ def beatmatch_crossfade_to_wav(
             audio = t.numpy()
         return audio
 
+    # Full-mix latent crops (needed both for downbeat refinement and reality anchors)
+    crops_fm_a = find_crops(_latent_dir / track_a)
+    crops_fm_b = find_crops(_latent_dir / track_b)
+    npy_fm_a, _ = find_best_crop(crops_fm_a, pos_a)
+    npy_fm_b, _ = find_best_crop(crops_fm_b, pos_b)
+    if npy_fm_a is None or npy_fm_b is None:
+        raise ValueError("Full-mix latents not found for one or both tracks")
+
+    # Refine stretch values using actual crop downbeats instead of global BPM estimate.
+    # Computes bar intervals from the DOWNBEATS sidecar and meets in the middle.
+    db_a = _load_crop_downbeats(npy_fm_a, _latent_dir)
+    db_b = _load_crop_downbeats(npy_fm_b, _latent_dir)
+    if db_a and db_b:
+        iv_a = (db_a[-1] - db_a[0]) / (len(db_a) - 1)   # seconds per bar, crop A
+        iv_b = (db_b[-1] - db_b[0]) / (len(db_b) - 1)   # seconds per bar, crop B
+        tgt_iv = math.sqrt(iv_a * iv_b)                   # geometric mean
+        ref_a  = tgt_iv / iv_a                            # duration multiplier for A
+        ref_b  = tgt_iv / iv_b                            # duration multiplier for B
+        # Only override if the refined values are within 5% of the client-provided ones
+        # (guards against corrupt DOWNBEATS or mismatched crops)
+        if abs(ref_a / max(stretch_a, 1e-6) - 1.0) < 0.05 and \
+           abs(ref_b / max(stretch_b, 1e-6) - 1.0) < 0.05:
+            print(f"  downbeat refinement: A ×{stretch_a:.4f}→×{ref_a:.4f}  "
+                  f"B ×{stretch_b:.4f}→×{ref_b:.4f}  "
+                  f"({len(db_a)} / {len(db_b)} downbeats)")
+            stretch_a, stretch_b = ref_a, ref_b
+
     missing_latents: list = []
     missing_audio:   list = []
 
@@ -480,14 +528,6 @@ def beatmatch_crossfade_to_wav(
         raise ValueError(
             f"Raw stem audio not found for: {', '.join(missing_audio)}. "
             f"Check raw_audio_dir ({_raw_audio_dir}) and stem file paths.")
-
-    # Full-mix reality anchors — use pre-encoded latents (no pitch/stretch applied)
-    crops_fm_a = find_crops(_latent_dir / track_a)
-    crops_fm_b = find_crops(_latent_dir / track_b)
-    npy_fm_a, _ = find_best_crop(crops_fm_a, pos_a)
-    npy_fm_b, _ = find_best_crop(crops_fm_b, pos_b)
-    if npy_fm_a is None or npy_fm_b is None:
-        raise ValueError("Full-mix latents not found for one or both tracks")
 
     fullmix_a = load_latent(npy_fm_a, device=_device, dtype=_dtype)
     fullmix_b = load_latent(npy_fm_b, device=_device, dtype=_dtype)
