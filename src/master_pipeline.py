@@ -136,6 +136,7 @@ class MasterPipelineConfig:
     skip_loudness: bool = False
     skip_spectral: bool = False
     skip_saturation: bool = False
+    skip_multiband_rms: bool = False
     skip_chroma: bool = False
     skip_timbral: bool = False
     skip_syncopation: bool = False
@@ -297,6 +298,7 @@ class MasterPipelineConfig:
             skip_loudness=not features.get('loudness', True),
             skip_spectral=not features.get('spectral', True),
             skip_saturation=not features.get('saturation', True),
+            skip_multiband_rms=not features.get('multiband_rms', True),
             skip_chroma=not features.get('chroma', True),
             skip_timbral=not features.get('timbral', True),
             skip_syncopation=not features.get('syncopation', True),
@@ -401,6 +403,7 @@ class MasterPipelineConfig:
                 'loudness': not self.skip_loudness,
                 'spectral': not self.skip_spectral,
                 'saturation': not self.skip_saturation,
+                'multiband_rms': not self.skip_multiband_rms,
                 'chroma': not self.skip_chroma,
                 'timbral': not self.skip_timbral,
                 'syncopation': not self.skip_syncopation,
@@ -2294,6 +2297,7 @@ class MasterPipeline:
                 skip_loudness=self.config.skip_loudness,
                 skip_spectral=self.config.skip_spectral,
                 skip_saturation=self.config.skip_saturation,
+                skip_multiband_rms=self.config.skip_multiband_rms,
                 skip_harmonic=self.config.skip_chroma,
                 skip_timbral=self.config.skip_timbral,
                 skip_flamingo=self.config.skip_flamingo,
@@ -2715,7 +2719,7 @@ Config file template: config/master_pipeline.yaml
                     'loudness':          not config.skip_loudness,
                     'spectral':          not config.skip_spectral,
                     'saturation':        not config.skip_saturation,
-                    'multiband_rms':     True,
+                    'multiband_rms':     not config.skip_multiband_rms,
                     'chroma':            not config.skip_chroma,
                     'timbral':           not config.skip_timbral,
                     'syncopation':       not config.skip_syncopation,

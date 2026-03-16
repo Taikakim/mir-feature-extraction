@@ -72,6 +72,7 @@ class PipelineConfig:
     skip_loudness: bool = False
     skip_spectral: bool = False
     skip_saturation: bool = False
+    skip_multiband_rms: bool = False
     skip_harmonic: bool = False
     skip_timbral: bool = False
     skip_classification: bool = False
@@ -317,7 +318,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                         crop_path, audio=crop_mono, sr=crop_sr))
                     generated.append(f'spectral({_op})')
                 except Exception: pass
-            if _needs_processing(MULTIBAND_KEYS, 'spectral'):
+            if not config_dict.get('skip_multiband_rms') and _needs_processing(MULTIBAND_KEYS, 'spectral'):
                 _op = 'overwrite' if any(k in existing_keys for k in MULTIBAND_KEYS) else 'new'
                 try:
                     results.update(analyze_multiband_rms(
@@ -793,7 +794,8 @@ class Pipeline:
                         except Exception as e:
                             logger.warning(f"  Spectral failed: {e}")
 
-                    if self.config.should_overwrite('spectral') or 'rms_energy_bass' not in existing:
+                    if not self.config.skip_multiband_rms and (
+                            self.config.should_overwrite('spectral') or 'rms_energy_bass' not in existing):
                         try:
                             results.update(analyze_multiband_rms(
                                 crop_path, audio=crop_mono, sr=crop_sr))
@@ -1028,6 +1030,7 @@ class Pipeline:
                 'skip_rhythm': self.config.skip_rhythm,
                 'skip_spectral': self.config.skip_spectral,
                 'skip_saturation': self.config.skip_saturation,
+                'skip_multiband_rms': self.config.skip_multiband_rms,
                 'skip_harmonic': self.config.skip_harmonic,
                 'skip_timbral': self.config.skip_timbral,
                 'overwrite': self.config.overwrite,
