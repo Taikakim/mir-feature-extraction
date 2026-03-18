@@ -2338,21 +2338,56 @@
     function lpHover(trackName) {
       clearTimeout(_lpLeaveTimer);
       if (trackName) _lpHoverTrack = trackName;
-      if (!_lpAutoLoad || !_lpAutoPlay || !trackName) return;
+      if (!_lpAutoPlay || !trackName) return;
       clearTimeout(_lpDebounceTimer);
-      if (_lpAutoLoadSlot === 'b') {
-        if (trackName === _lpBTrack) return;
-        _lpDebounceTimer = setTimeout(() => {
-          lpSetB(trackName);
-          if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
-        }, 350);
+      if (_lpAutoLoad) {
+        if (_lpAutoLoadSlot === 'b') {
+          if (trackName === _lpBTrack) return;
+          _lpDebounceTimer = setTimeout(() => {
+            lpSetB(trackName);
+            if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
+          }, 350);
+        } else {
+          if (trackName === _lpCurrentTrack) return;
+          _lpDebounceTimer = setTimeout(() => {
+            const pos = parseFloat(document.getElementById('lp-pos').value);
+            lpLoad(trackName, pos);
+          }, 350);
+        }
       } else {
-        if (trackName === _lpCurrentTrack) return;
-        _lpDebounceTimer = setTimeout(() => {
-          const pos = parseFloat(document.getElementById('lp-pos').value);
-          lpLoad(trackName, pos);
-        }, 350);
+        // Auto-load off: preview without committing to any slot
+        _lpDebounceTimer = setTimeout(() => lpPreview(trackName), 350);
       }
+    }
+
+    function lpPreview(trackName) {
+      if (!trackName || !_lpServerOk) return;
+      const pos = parseFloat(document.getElementById('lp-pos').value);
+      const url = LP_SERVER + '/decode?track=' + encodeURIComponent(trackName) +
+                  '&position=' + pos.toFixed(3) +
+                  (_lpRaw ? '&raw=1' : '');
+      // Stop whatever is playing now but don't touch _lpCurrentTrack or _lpAudioBuffer
+      if (_lpSourceNode) { try { _lpSourceNode.stop(); } catch(e){} _lpSourceNode = null; }
+      fetch(url)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+        .then(blob => blob.arrayBuffer())
+        .then(ab => _lpGetCtx().decodeAudioData(ab))
+        .then(buf => {
+          // Bail out if the user already left this track
+          if (_lpHoverTrack !== trackName) return;
+          const ctx = _lpGetCtx();
+          if (_lpSourceNode) { try { _lpSourceNode.stop(); } catch(e){} _lpSourceNode = null; }
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.loop = _lpLoop;
+          src.connect(ctx.destination);
+          src.start(0);
+          _lpSourceNode = src;
+          _lpPlayStart = ctx.currentTime;
+          _lpBtn('\u23f8');
+          src.onended = () => { if (_lpSourceNode === src) { _lpSourceNode = null; _lpBtn('\u25b6'); } };
+        })
+        .catch(() => {});
     }
 
     // Load a track into the current slot (used by click handlers when LP is open)
