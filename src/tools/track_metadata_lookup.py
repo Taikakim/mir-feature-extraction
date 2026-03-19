@@ -575,6 +575,21 @@ def lookup_track(track_name: str, artist_hint: str = None, sp=None,
         # Rate limiting for MusicBrainz (max 1 req/sec per their guidelines)
         time.sleep(1.0)
 
+        # Fetch ISRC from MusicBrainz when result has no ISRC yet (Spotify absent/failed).
+        # Requires a second recording lookup since search_recordings doesn't include ISRCs.
+        if result and not result.get('isrc') and result.get('musicbrainz_id'):
+            try:
+                time.sleep(1.0)  # Second MB call — observe rate limit
+                rec = musicbrainzngs.get_recording_by_id(
+                    result['musicbrainz_id'], includes=['isrcs']
+                )
+                isrc_list = rec.get('recording', {}).get('isrc-list', [])
+                if isrc_list:
+                    result['isrc'] = isrc_list[0]
+                    logger.debug(f"MusicBrainz ISRC: {isrc_list[0]}")
+            except Exception as e:
+                logger.debug(f"MusicBrainz ISRC fetch failed: {e}")
+
     # Strategy 3: Tidal API using perfectly matched ISRC
     if result and result.get('isrc'):
         tidal_session = get_tidal_session()
