@@ -110,16 +110,14 @@ TRANSFERRABLE_FEATURES = [
     'track_metadata_year',
     'track_metadata_genre',
 
-    # Core Metadata (from track_metadata_lookup.py / Spotify / MusicBrainz / Tidal)
+    # Core Metadata (from track_metadata_lookup.py / MusicBrainz / Tidal)
     'release_year',
     'release_date',
     'album',
     'artists',
     'label',
     'genres',
-    'popularity',
     'isrc',
-    'spotify_id',
     'musicbrainz_id',
     'tidal_id',
     'tidal_url',
@@ -130,19 +128,6 @@ TRANSFERRABLE_FEATURES = [
     'music_flamingo_instrumentation',
     'music_flamingo_technical',
     'music_flamingo_structure',
-
-    # Optional Spotify audio features
-    'spotify_acousticness',
-    'spotify_energy',
-    'spotify_instrumentalness',
-    'spotify_time_signature',
-    'spotify_valence',
-    'spotify_danceability',
-    'spotify_speechiness',
-    'spotify_liveness',
-    'spotify_key',
-    'spotify_mode',
-    'spotify_tempo',
 
     # Track-level rhythm features (computed once per track, valid for all its crops)
     'syncopation',

@@ -2,25 +2,21 @@
 """
 Track Metadata Lookup Tool
 
-Batch tool to correct artist names for compilation tracks and retrieve 
-original release year using Spotify and MusicBrainz APIs.
+Batch tool to correct artist names for compilation tracks and retrieve
+original release year using MusicBrainz and Tidal.
 
 Usage:
     # Preview changes (dry run)
     python src/tools/track_metadata_lookup.py /path/to/data --dry-run
-    
+
     # Apply changes
     python src/tools/track_metadata_lookup.py /path/to/data
-    
+
     # Only update .INFO, don't rename folders
     python src/tools/track_metadata_lookup.py /path/to/data --skip-rename
 
 Setup:
-    pip install spotipy musicbrainzngs
-    
-    # Spotify credentials (create app at https://developer.spotify.com/dashboard)
-    export SPOTIFY_CLIENT_ID="your_id"
-    export SPOTIFY_CLIENT_SECRET="your_secret"
+    pip install musicbrainzngs
 """
 
 import argparse
@@ -44,20 +40,8 @@ from src.tools.tidal_auth import get_tidal_session
 
 logger = logging.getLogger(__name__)
 
-# Suppress verbose HTTP-level logging from spotipy and its dependencies.
-# Without this, DEBUG mode prints the full raw response body for every API
-# call — including the enormous available_markets list on every track.
-for _noisy in ('spotipy', 'spotipy.client', 'urllib3', 'requests', 'urllib3.connectionpool'):
-    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
-
-# Try importing APIs
-try:
-    import spotipy
-    from spotipy.oauth2 import SpotifyClientCredentials
-    SPOTIFY_AVAILABLE = True
-except ImportError:
-    SPOTIFY_AVAILABLE = False
-    logger.warning("spotipy not installed. Run: pip install spotipy")
+for _noisy in ('urllib3', 'requests', 'urllib3.connectionpool'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 try:
     import musicbrainzngs
@@ -83,28 +67,6 @@ except ImportError:
     ACOUSTID_AVAILABLE = False
     logger.debug("pyacoustid not installed.")
 
-
-
-def init_spotify() -> Optional[object]:
-    """Initialize Spotify client."""
-    if not SPOTIFY_AVAILABLE:
-        return None
-    
-    client_id = os.environ.get("SPOTIFY_CLIENT_ID", "").strip('"\'')
-    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip('"\'')
-    
-    if not client_id or not client_secret:
-        logger.warning("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET not set")
-        return None
-    
-    try:
-        return spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-            client_id=client_id,
-            client_secret=client_secret
-        ), requests_timeout=10, retries=0)
-    except Exception as e:
-        logger.error(f"Failed to initialize Spotify: {e}")
-        return None
 
 
 def get_id3_tags(audio_path: Path) -> Optional[Dict]:
@@ -241,175 +203,6 @@ def score_candidate(candidate: Dict, local_duration: float = None,
     return score
 
 
-def search_spotify(sp, track_name: str, current_artist: str = None,
-                   fetch_genres: bool = True,
-                   local_duration: float = None,
-                   known_year: int = None) -> Optional[Dict]:
-    """
-    Search Spotify for a track.
-    
-    Returns:
-        Dict with enhanced metadata:
-        - artist: Primary artist name (string)
-        - artists: All artist names (array)
-        - track: Track name
-        - album: Album name
-        - release_date: Full release date (YYYY-MM-DD or YYYY)
-        - release_year: Year only (int)
-        - label: Record label
-        - genres: Artist genres (array, requires extra API call if fetch_genres=True)
-        - popularity: Track popularity (0-100)
-        - spotify_id: Spotify track ID
-        - isrc: International Standard Recording Code
-    """
-    if not sp:
-        return None
-    
-    try:
-        # Clean track name for search
-        clean_name = re.sub(r'\s*\(.*?\)\s*', ' ', track_name)  # Remove parenthetical info
-        clean_name = re.sub(r'\s*\[.*?\]\s*', ' ', clean_name)  # Remove bracketed info
-        clean_name = clean_name.strip()
-        
-        # Search by track name
-        if current_artist and current_artist.lower() not in ['various artists', 'various', 'va', 'unknown', '']:
-            query = f'track:"{clean_name}" artist:"{current_artist}"'
-            results = sp.search(q=query, type='track', limit=5)
-            
-            # If specific search fails, fall back to just track name
-            if not results['tracks']['items']:
-                logger.debug(f"Specific search failed, trying track only: {clean_name}")
-                query = f'track:"{clean_name}"'
-                results = sp.search(q=query, type='track', limit=5)
-        else:
-            query = f'track:"{clean_name}"'
-            results = sp.search(q=query, type='track', limit=5)
-        
-        if not results['tracks']['items']:
-            # Try simpler search
-            results = sp.search(q=clean_name, type='track', limit=5)
-        
-        if not results['tracks']['items']:
-            return None
-
-        # Score all candidates and pick best match
-        best_result = None
-        best_score = -1.0
-
-        for track in results['tracks']['items']:
-            album = track['album']
-            artists = [a['name'] for a in track['artists']]
-
-            release_date = album.get('release_date', '')
-            release_year = None
-            if release_date:
-                try:
-                    release_year = int(release_date.split('-')[0])
-                except (ValueError, IndexError):
-                    pass
-
-            duration_s = track['duration_ms'] / 1000.0 if track.get('duration_ms') else None
-
-            candidate = {
-                'artist': artists[0] if artists else 'Unknown',
-                'artists': artists,
-                'track': track['name'],
-                'album': album['name'],
-                'release_date': release_date,
-                'release_year': release_year,
-                'duration_s': duration_s,
-                'popularity': track.get('popularity'),
-                'spotify_id': track['id'],
-                'isrc': track.get('external_ids', {}).get('isrc'),
-                'artist_id': track['artists'][0]['id'] if track['artists'] else None,
-                '_album_id': album['id'],
-            }
-
-            s = score_candidate(candidate, local_duration=local_duration,
-                                known_year=known_year, artist_hint=current_artist)
-            if s > best_score:
-                best_score = s
-                best_result = candidate
-
-        if not best_result:
-            return None
-
-        dur_str = f" ({best_result['duration_s']:.0f}s)" if best_result.get('duration_s') else ""
-        logger.debug(f"Spotify best match score: {best_score:.2f} - "
-                     f"{best_result['artist']} - {best_result['track']}{dur_str}")
-
-        # Fetch label and genres only for the winner (saves API calls)
-        try:
-            album_details = sp.album(best_result.pop('_album_id'))
-            best_result['label'] = album_details.get('label')
-        except Exception:
-            best_result.pop('_album_id', None)
-            best_result['label'] = None
-
-        genres = []
-        if fetch_genres and best_result.get('artist_id'):
-            try:
-                artist_details = sp.artist(best_result['artist_id'])
-                genres = artist_details.get('genres', [])
-            except Exception:
-                pass
-        best_result['genres'] = genres
-
-        return best_result
-        
-    except Exception as e:
-        http_status = getattr(e, 'http_status', None)
-        if http_status in (429, 403):
-            raise  # Propagate so caller can disable Spotify for this run
-        logger.debug(f"Spotify search failed for '{track_name}': {e}")
-        return None
-
-
-def fetch_audio_features(sp, track_id: str) -> Optional[Dict]:
-    """
-    Fetch Spotify audio features for a track.
-    
-    Returns:
-        Dict with:
-        - acousticness (0-1)
-        - energy (0-1)
-        - instrumentalness (0-1)
-        - time_signature (3, 4, 5, etc.)
-        - valence (0-1)
-        - danceability (0-1)
-        - speechiness (0-1)
-        - liveness (0-1)
-        - key (0-11, C=0)
-        - mode (0=minor, 1=major)
-        - tempo (BPM)
-    """
-    if not sp or not track_id:
-        return None
-    
-    try:
-        features = sp.audio_features([track_id])
-        if not features or not features[0]:
-            return None
-        
-        f = features[0]
-        return {
-            'spotify_acousticness': f.get('acousticness'),
-            'spotify_energy': f.get('energy'),
-            'spotify_instrumentalness': f.get('instrumentalness'),
-            'spotify_time_signature': f.get('time_signature'),
-            'spotify_valence': f.get('valence'),
-            'spotify_danceability': f.get('danceability'),
-            'spotify_speechiness': f.get('speechiness'),
-            'spotify_liveness': f.get('liveness'),
-            'spotify_key': f.get('key'),
-            'spotify_mode': f.get('mode'),
-            'spotify_tempo': f.get('tempo'),
-        }
-    except Exception as e:
-        logger.debug(f"Failed to fetch audio features for {track_id}: {e}")
-        return None
-
-
 def search_musicbrainz(track_name: str, artist_hint: str = None,
                        local_duration: float = None,
                        known_year: int = None) -> Optional[Dict]:
@@ -522,55 +315,30 @@ def extract_track_name(folder_name: str) -> Tuple[str, str, str]:
         return '', '', name
 
 
-def lookup_track(track_name: str, artist_hint: str = None, sp=None,
-                 fetch_audio_features_flag: bool = False,
+def lookup_track(track_name: str, artist_hint: str = None,
                  local_duration: float = None,
                  known_year: int = None,
                  use_musicbrainz: bool = True) -> Optional[Dict]:
     """
-    Look up track metadata using available APIs.
-
-    Tries Spotify first, then MusicBrainz. Scores candidates by duration,
-    year, and artist similarity.
+    Look up track metadata using MusicBrainz and Tidal.
 
     Args:
         track_name: Name of the track
         artist_hint: Optional artist name hint
-        sp: Spotify client instance
-        fetch_audio_features_flag: If True, fetch Spotify audio features (extra API call)
         local_duration: Local file duration in seconds (for scoring)
         known_year: Known release year from ID3/INFO (for scoring)
         use_musicbrainz: Whether to query MusicBrainz
     """
     result = None
 
-    # Try Spotify first (faster, usually better for electronic music)
-    if sp:
-        result = search_spotify(sp, track_name, artist_hint,
-                                local_duration=local_duration, known_year=known_year)
-        if result:
-            logger.debug(f"Found via Spotify: {result['artist']} - {result['track']}")
-
-            if fetch_audio_features_flag and result.get('spotify_id'):
-                audio_features = fetch_audio_features(sp, result['spotify_id'])
-                if audio_features:
-                    result.update(audio_features)
-
-    # Try MusicBrainz for original release year or as fallback
+    # MusicBrainz lookup
     if use_musicbrainz:
         mb_result = search_musicbrainz(track_name, artist_hint,
                                        local_duration=local_duration, known_year=known_year)
 
         if mb_result:
-            if result:
-                # If Spotify found it but MB has earlier year, use that
-                if mb_result.get('release_year') and result.get('release_year'):
-                    if mb_result['release_year'] < result['release_year']:
-                        result['original_release_year'] = mb_result['release_year']
-                        logger.debug(f"MusicBrainz found earlier year: {mb_result['release_year']}")
-            else:
-                result = mb_result
-                logger.debug(f"Found via MusicBrainz: {result['artist']} - {result['track']}")
+            result = mb_result
+            logger.debug(f"Found via MusicBrainz: {result['artist']} - {result['track']}")
 
         # Rate limiting for MusicBrainz (max 1 req/sec per their guidelines)
         time.sleep(1.0)
@@ -609,9 +377,8 @@ def lookup_track(track_name: str, artist_hint: str = None, sp=None,
     return result
 
 
-def process_folder(folder: Path, sp=None, dry_run: bool = True, 
+def process_folder(folder: Path, dry_run: bool = True,
                    skip_rename: bool = False,
-                   fetch_audio_features: bool = False,
                    force_metadata: bool = False) -> Optional[Dict]:
     """
     Process a single folder.
@@ -643,8 +410,8 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
         except Exception:
             pass
     
-    # Skip if nothing to do (unless forced or fetching extra features)
-    if not needs_rename and not needs_year and not force_metadata and not fetch_audio_features:
+    # Skip if nothing to do (unless forced)
+    if not needs_rename and not needs_year and not force_metadata:
         logger.debug(f"Skipping {folder_name} - artist set and has release_year")
         return None
     
@@ -678,10 +445,9 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
     
     logger.info(f"Looking up: {search_artist + ' - ' if search_artist else ''}{search_track}")
     
-    # Strategy 2: Text Search (Spotify/MusicBrainz)
-    result = lookup_track(search_track, artist_hint=search_artist, sp=sp,
-                          fetch_audio_features_flag=fetch_audio_features)
-    
+    # Strategy 2: MusicBrainz / Tidal lookup
+    result = lookup_track(search_track, artist_hint=search_artist)
+
     # Strategy 3: AcoustID Fingerprinting (Fallback)
     if not result and ACOUSTID_AVAILABLE:
         logger.info("  Text search failed, trying AcoustID fingerprinting...")
@@ -691,10 +457,7 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
                 fp_result = fingerprint_track(stems['full_mix'])
                 if fp_result:
                     logger.info(f"  AcoustID found: {fp_result['artist']} - {fp_result['track']}")
-                    # Use the fingerprint result to do a clean lookup (to get Spotify ID etc.)
-                    # checking if we trust it enough to overwrite
-                    result = lookup_track(fp_result['track'], artist_hint=fp_result['artist'], sp=sp,
-                                          fetch_audio_features_flag=fetch_audio_features)
+                    result = lookup_track(fp_result['track'], artist_hint=fp_result['artist'])
                     if not result:
                          # If lookup fails even with correct names, just use what we have
                          result = fp_result
@@ -793,27 +556,17 @@ def process_folder(folder: Path, sp=None, dry_run: bool = True,
                 info_data['label'] = result['label']
             if result.get('genres'):
                 info_data['genres'] = result['genres']
-            if result.get('popularity') is not None:
-                info_data['popularity'] = result['popularity']
-            
+
             # IDs
-            if result.get('spotify_id'):
-                info_data['spotify_id'] = result['spotify_id']
+            if result.get('isrc'):
+                info_data['isrc'] = result['isrc']
             if result.get('musicbrainz_id'):
                 info_data['musicbrainz_id'] = result['musicbrainz_id']
             if result.get('tidal_id'):
                 info_data['tidal_id'] = result['tidal_id']
             if result.get('tidal_url'):
                 info_data['tidal_url'] = result['tidal_url']
-            
-            # Audio features (if available)
-            for key in ['spotify_acousticness', 'spotify_energy', 'spotify_instrumentalness',
-                        'spotify_time_signature', 'spotify_valence', 'spotify_danceability',
-                        'spotify_speechiness', 'spotify_liveness', 'spotify_key', 
-                        'spotify_mode', 'spotify_tempo']:
-                if result.get(key) is not None:
-                    info_data[key] = result[key]
-            
+
             if info_data:
                 safe_update(info_path, info_data)
                 fields_written = list(info_data.keys())
@@ -922,8 +675,6 @@ def batch_process_metadata(root_directory: Path, overwrite: bool = False) -> Dic
     root_directory = Path(root_directory)
     folders = find_organized_folders(root_directory)
     
-    sp = init_spotify()
-    
     stats = {
         'total': len(folders),
         'success': 0,
@@ -943,10 +694,8 @@ def batch_process_metadata(root_directory: Path, overwrite: bool = False) -> Dic
             # Note: process_folder returns None if skipped, Dict if changed
             res = process_folder(
                 folder,
-                sp=sp,
                 dry_run=False,
                 force_metadata=overwrite,
-                fetch_audio_features=False  # Spotify removed this endpoint (403 since Nov 2024)
             )
             
             if res is None:
@@ -1028,67 +777,51 @@ def main():
 Examples:
   # Preview changes
   python src/tools/track_metadata_lookup.py /path/to/data --dry-run
-  
+
   # Apply changes
   python src/tools/track_metadata_lookup.py /path/to/data
-  
+
   # Only update .INFO files, don't rename
   python src/tools/track_metadata_lookup.py /path/to/data --skip-rename
 
 Setup:
-  pip install spotipy musicbrainzngs
-  
-  export SPOTIFY_CLIENT_ID="your_id"
-  export SPOTIFY_CLIENT_SECRET="your_secret"
+  pip install musicbrainzngs
         """
     )
-    
+
     parser.add_argument("path", help="Root directory containing organized folders")
     parser.add_argument("--dry-run", "-n", action="store_true",
                         help="Preview changes without applying them")
     parser.add_argument("--skip-rename", action="store_true",
                         help="Only update .INFO files, don't rename folders")
-    parser.add_argument("--audio-features", action="store_true",
-                        help="Fetch Spotify audio features (acousticness, energy, valence, etc.)")
     parser.add_argument("--force-metadata", "-f", action="store_true",
                         help="Force metadata lookup even if fields already exist")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    
+
     args = parser.parse_args()
-    
+
     setup_logging(level=logging.DEBUG if args.verbose else logging.INFO)
-    
+
     root_path = Path(args.path)
-    
+
     if not root_path.exists():
         logger.error(f"Path does not exist: {root_path}")
         sys.exit(1)
-    
-    # Initialize Spotify
-    sp = init_spotify()
-    if sp:
-        logger.info("Spotify API initialized")
-    else:
-        if args.audio_features:
-            logger.error("Spotify credentials required for --audio-features!")
-            logger.error("Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET")
-            sys.exit(1)
-        logger.warning("Spotify not available, using MusicBrainz only")
-    
-    if not MUSICBRAINZ_AVAILABLE and not sp:
-        logger.error("No APIs available. Install spotipy and/or musicbrainzngs")
+
+    if not MUSICBRAINZ_AVAILABLE:
+        logger.error("musicbrainzngs not available. Run: pip install musicbrainzngs")
         sys.exit(1)
-    
+
     # Find folders
     folders = find_organized_folders(root_path)
     logger.info(f"Found {len(folders)} organized folders")
-    
+
     # Process
     mode = "DRY RUN" if args.dry_run else "APPLYING CHANGES"
     print(f"\n{'='*60}")
     print(f"TRACK METADATA LOOKUP ({mode})")
     print(f"{'='*60}\n")
-    
+
     results = {
         'processed': 0,
         'found': 0,
@@ -1096,15 +829,13 @@ Setup:
         'skipped': 0,
         'changes': []
     }
-    
+
     for folder in folders:
         try:
             change = process_folder(
-                folder, 
-                sp=sp, 
+                folder,
                 dry_run=args.dry_run,
                 skip_rename=args.skip_rename,
-                fetch_audio_features=args.audio_features,
                 force_metadata=args.force_metadata
             )
             

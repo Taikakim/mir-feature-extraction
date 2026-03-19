@@ -74,8 +74,8 @@ FEATURE_MODULES = {
     'metadata': {
         'module': 'tools.track_metadata_lookup', 
         'function': 'batch_process_metadata',
-        'features': ['release_year', 'spotify_id', 'artists', 'genres'],
-        'description': 'Metadata lookup (Spotify/MusicBrainz)'
+        'features': ['release_year', 'musicbrainz_id', 'isrc', 'artists', 'genres'],
+        'description': 'Metadata lookup (MusicBrainz/Tidal)'
     },
 
     # Loudness Analysis

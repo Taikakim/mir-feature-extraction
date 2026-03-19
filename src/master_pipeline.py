@@ -167,7 +167,6 @@ class MasterPipelineConfig:
 
     # Metadata
     skip_metadata: bool = False
-    use_spotify: bool = True
     use_musicbrainz: bool = True
     use_fingerprinting: bool = True
     various_artists_aliases: Set[str] = field(default_factory=lambda: VARIOUS_ARTISTS_ALIASES.copy())
@@ -330,7 +329,6 @@ class MasterPipelineConfig:
 
             # Metadata
             skip_metadata=not metadata.get('enabled', True),
-            use_spotify=metadata.get('use_spotify', True),
             use_musicbrainz=metadata.get('use_musicbrainz', True),
             use_fingerprinting=metadata.get('use_fingerprinting', True),
             fix_various_artists=metadata.get('fix_various_artists', True),
@@ -425,7 +423,6 @@ class MasterPipelineConfig:
             },
             'metadata': {
                 'enabled': not self.skip_metadata,
-                'use_spotify': self.use_spotify,
                 'use_musicbrainz': self.use_musicbrainz,
                 'use_fingerprinting': self.use_fingerprinting,
                 'fix_various_artists': self.fix_various_artists,
@@ -1457,18 +1454,12 @@ class MasterPipeline:
                 if not self.config.should_overwrite('metadata'):
                     continue
 
-            # Skip only when every currently-enabled source is satisfied.
-            # Per-source checks prevent permanently skipping tracks that were only
-            # partially resolved (e.g. Spotify rate-limited but MB succeeded).
-            spotify_done = (not self.config.use_spotify
-                            or 'spotify_id' in existing_info)
+            # Skip when MusicBrainz and Tidal are satisfied.
             mb_done = (not self.config.use_musicbrainz
                        or 'musicbrainz_id' in existing_info)
-            # Tidal lookup requires an ISRC (obtained from Spotify). It's only
-            # possible if Spotify is enabled and returned an ISRC.
-            tidal_possible = self.config.use_spotify and 'isrc' in existing_info
-            tidal_done = (not tidal_possible or 'tidal_id' in existing_info)
-            if spotify_done and mb_done and tidal_done:
+            tidal_done = ('tidal_id' in existing_info
+                          or 'isrc' not in existing_info)
+            if mb_done and tidal_done:
                 if not self.config.should_overwrite('metadata'):
                     continue  # All enabled sources satisfied
 
@@ -1490,10 +1481,9 @@ class MasterPipeline:
 
         # Try to use track_metadata_lookup
         try:
-            from tools.track_metadata_lookup import init_spotify, lookup_track
+            from tools.track_metadata_lookup import lookup_track
             import soundfile as sf_mod
 
-            sp = init_spotify() if self.config.use_spotify else None
             n_total = len(tracks_needing_lookup)
             _meta_start = time.time()
 
@@ -1544,8 +1534,6 @@ class MasterPipeline:
                             known_year = None
 
                 lookup_kwargs = dict(
-                    sp=sp,
-                    fetch_audio_features_flag=False,  # Endpoint removed by Spotify Nov 2024
                     local_duration=local_duration,
                     known_year=known_year,
                     use_musicbrainz=self.config.use_musicbrainz,
@@ -1574,23 +1562,7 @@ class MasterPipeline:
                                 if result:
                                     logger.debug(f"  {folder.name}: Found via fingerprinting")
                 except Exception as _e:
-                    _http_status = getattr(_e, 'http_status', None)
-                    if _http_status == 429:
-                        logger.warning(
-                            "Spotify rate limit (429) — disabling Spotify for this session. "
-                            "Affected tracks will be retried next run."
-                        )
-                        sp = None
-                        lookup_kwargs['sp'] = None
-                    elif _http_status == 403:
-                        logger.warning(
-                            "Spotify search requires premium subscription (403) — "
-                            "disabling Spotify for this session. MusicBrainz will handle remaining tracks."
-                        )
-                        sp = None
-                        lookup_kwargs['sp'] = None
-                    else:
-                        logger.warning(f"  {folder.name}: lookup_track error: {_e}")
+                    logger.warning(f"  {folder.name}: lookup_track error: {_e}")
 
                 # Always mark that we attempted lookup (prevents re-querying on restart)
                 stems = get_stem_files(folder, include_full_mix=True)
@@ -1618,14 +1590,10 @@ class MasterPipeline:
                             info_data['label'] = result['label']
                         if result.get('genres'):
                             info_data['genres'] = result['genres']
-                        if result.get('popularity') is not None:
-                            info_data['popularity'] = result['popularity']
                         if result.get('album'):
                             info_data['album'] = result['album']
 
                         # IDs and cross-service links
-                        if result.get('spotify_id'):
-                            info_data['spotify_id'] = result['spotify_id']
                         if result.get('musicbrainz_id'):
                             info_data['musicbrainz_id'] = result['musicbrainz_id']
                         if result.get('isrc'):
@@ -1634,17 +1602,6 @@ class MasterPipeline:
                             info_data['tidal_id'] = result['tidal_id']
                         if result.get('tidal_url'):
                             info_data['tidal_url'] = result['tidal_url']
-
-                        # Spotify audio features (if available)
-                        spotify_features = [
-                            'spotify_acousticness', 'spotify_energy', 'spotify_instrumentalness',
-                            'spotify_time_signature', 'spotify_valence', 'spotify_danceability',
-                            'spotify_speechiness', 'spotify_liveness', 'spotify_key',
-                            'spotify_mode', 'spotify_tempo'
-                        ]
-                        for key in spotify_features:
-                            if result.get(key) is not None:
-                                info_data[key] = result[key]
 
                         if info_data:
                             safe_update(info_path, info_data)
@@ -2794,8 +2751,7 @@ Config file template: config/master_pipeline.yaml
     pipeline = MasterPipeline(config)
 
     # Pre-flight Tidal auth — must happen before the TUI occupies the terminal.
-    # Tidal lookup requires Spotify (for ISRC), so only warm up when both are live.
-    if not config.skip_metadata and config.use_spotify:
+    if not config.skip_metadata:
         try:
             from tools.tidal_auth import get_tidal_session
             get_tidal_session()

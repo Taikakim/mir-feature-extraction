@@ -53,27 +53,6 @@ VARIOUS_ARTISTS_ALIASES = {
     'compilation', 'unknown artist', 'unknown'
 }
 
-# Module-level Spotify client (initialized once)
-_spotify_client = None
-
-
-def _init_metadata_lookup():
-    """Initialize Spotify client for metadata lookup (called once)."""
-    global _spotify_client
-    if _spotify_client is not None:
-        return _spotify_client
-
-    try:
-        from tools.track_metadata_lookup import init_spotify
-        _spotify_client = init_spotify()
-        if _spotify_client:
-            logger.info("Spotify API initialized for metadata lookup")
-        return _spotify_client
-    except ImportError:
-        logger.warning("track_metadata_lookup not available")
-        return None
-
-
 def _is_various_artists(filename: str) -> bool:
     """Check if filename contains a 'Various Artists' pattern."""
     # Remove leading track numbers
@@ -94,10 +73,6 @@ def _lookup_correct_name(filename: str, audio_path: Path = None) -> Optional[str
 
     Returns the corrected folder name, or None if lookup fails.
     """
-    sp = _init_metadata_lookup()
-    if not sp:
-        return None
-
     try:
         from tools.track_metadata_lookup import extract_track_name, lookup_track
 
@@ -111,7 +86,7 @@ def _lookup_correct_name(filename: str, audio_path: Path = None) -> Optional[str
         logger.info(f"Looking up: {track_name}")
 
         # Look up metadata
-        result = lookup_track(track_name, artist_hint=None, sp=sp)
+        result = lookup_track(track_name, artist_hint=None)
 
         if not result:
             logger.warning(f"No match found for: {track_name}")
@@ -444,10 +419,8 @@ Examples:
     else:
         logger.info("COPY MODE - Original files will be preserved")
 
-    # Initialize metadata lookup if fixing Various Artists
     if args.fix_various:
-        logger.info("FIX VARIOUS ARTISTS - Will look up correct names via Spotify/MusicBrainz")
-        _init_metadata_lookup()
+        logger.info("FIX VARIOUS ARTISTS - Will look up correct names via MusicBrainz")
 
     stats = organize_directory(
         directory,
