@@ -732,6 +732,199 @@ def crossfade_raw_to_wav(
     return buf.getvalue(), stems_found
 
 
+def crossfade_fullmix_to_wav(
+    track_a: str, track_b: str,
+    pos_a: float, pos_b: float,
+    mix: float,
+    interp: str = 'slerp',
+    smart_loop: bool = False,
+) -> bytes:
+    """Interpolate two full-mix latents in latent space and decode to WAV.
+
+    Simpler than the stem crossfader: no stem loading, single decoder call.
+    mix=0 → track A, mix=1 → track B.
+    """
+    crops_a = find_crops(_latent_dir / track_a)
+    crops_b = find_crops(_latent_dir / track_b)
+    npy_a, _ = find_best_crop(crops_a, pos_a)
+    npy_b, _ = find_best_crop(crops_b, pos_b)
+    if npy_a is None or npy_b is None:
+        raise ValueError("Full-mix crops not found for one or both tracks")
+
+    z_a = load_latent(npy_a, device=_device, dtype=_dtype)
+    z_b = load_latent(npy_b, device=_device, dtype=_dtype)
+
+    T = min(z_a.shape[-1], z_b.shape[-1])
+    z_a = z_a[..., :T]
+    z_b = z_b[..., :T]
+
+    interp_fn = slerp if interp == 'slerp' else lerp
+    z_mixed = interp_fn(z_a, z_b, mix)
+
+    with torch.no_grad():
+        audio = _autoencoder.decode(z_mixed)   # [1, 2, samples]
+
+    audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
+
+    # Trim to content length using crop A's padding_mask
+    companion = {}
+    json_path = npy_a.with_suffix('.json')
+    if json_path.exists():
+        try:
+            companion = json.loads(json_path.read_text())
+        except Exception:
+            pass
+    mask = companion.get('padding_mask', [])
+    if mask:
+        n_content = sum(mask)
+        actual_samples = n_content * _downsampling_ratio
+        if 0 < actual_samples < audio_np.shape[1]:
+            audio_np = audio_np[:, :actual_samples]
+
+    if smart_loop:
+        bpm_a = _read_bpm(npy_a)
+        bpm_b = _read_bpm(npy_b)
+        loop_end = audio_np.shape[1]
+        for bpm in [bpm_a, bpm_b]:
+            if bpm:
+                try:
+                    _, end = _smart_loop_points(audio_np, _sample_rate, bpm)
+                    loop_end = min(loop_end, end)
+                except Exception as e:
+                    print(f"  smart_loop error (ab crossfade, bpm={bpm}): {e}")
+        if loop_end < audio_np.shape[1]:
+            audio_np = audio_np[:, :loop_end]
+
+    audio_np  = np.clip(audio_np, -1.0, 1.0)
+    audio_i16 = (audio_np * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_sample_rate)
+        wf.writeframes(audio_i16.T.flatten().tobytes())
+    return buf.getvalue()
+
+
+def latent_mix_to_wav(
+    track_a: str, track_b: str,
+    pos_a: float, pos_b: float,
+    alphas: dict, beta_a: float, beta_b: float,
+    interp: str = 'slerp',
+    smart_loop: bool = False,
+) -> tuple:
+    """Mix stem latents in latent space, then decode a single composite latent.
+
+    Unlike crossfade_to_wav (which decodes each stem separately and sums audio),
+    this function sums the interpolated stem latents first and decodes once.
+    The composite latent is normalized to match the energy of the full-mix reference
+    so the decoder sees a latent in its expected distribution.
+
+    Returns (wav_bytes, stems_found).
+    """
+    stem_root = _stem_dir if _stem_dir is not None else _latent_dir
+    dir_a = stem_root / track_a
+    dir_b = stem_root / track_b
+
+    stems_a = {}
+    stems_b = {}
+    missing = []
+
+    for stem in STEMS:
+        crops_a = find_stem_crops(dir_a, stem)
+        crops_b = find_stem_crops(dir_b, stem)
+        npy_a, _ = find_best_crop(crops_a, pos_a) if crops_a else (None, None)
+        npy_b, _ = find_best_crop(crops_b, pos_b) if crops_b else (None, None)
+        if npy_a is None or npy_b is None:
+            missing.append(stem)
+            continue
+        stems_a[stem] = load_latent(npy_a, device=_device, dtype=_dtype)
+        stems_b[stem] = load_latent(npy_b, device=_device, dtype=_dtype)
+
+    if missing:
+        raise ValueError(f"Stems not found for: {', '.join(missing)}")
+
+    crops_fm_a = find_crops(_latent_dir / track_a)
+    crops_fm_b = find_crops(_latent_dir / track_b)
+    npy_fm_a, _ = find_best_crop(crops_fm_a, pos_a)
+    npy_fm_b, _ = find_best_crop(crops_fm_b, pos_b)
+    if npy_fm_a is None or npy_fm_b is None:
+        raise ValueError("Full-mix crops not found for one or both tracks")
+
+    fullmix_a = load_latent(npy_fm_a, device=_device, dtype=_dtype)
+    fullmix_b = load_latent(npy_fm_b, device=_device, dtype=_dtype)
+
+    # Align T across all latents
+    all_T = ([z.shape[-1] for z in stems_a.values()] +
+             [z.shape[-1] for z in stems_b.values()] +
+             [fullmix_a.shape[-1], fullmix_b.shape[-1]])
+    target_T = min(all_T)
+    for s in list(stems_a):
+        stems_a[s] = stems_a[s][..., :target_T]
+        stems_b[s] = stems_b[s][..., :target_T]
+    fullmix_a = fullmix_a[..., :target_T]
+    fullmix_b = fullmix_b[..., :target_T]
+
+    interp_fn = slerp if interp == 'slerp' else lerp
+
+    # Interpolate each stem with reality anchors, then sum into a composite latent
+    z_composite = None
+    stems_found  = []
+    for stem in STEMS:
+        z_a = stems_a.get(stem)
+        z_b = stems_b.get(stem)
+        if z_a is None or z_b is None:
+            continue
+        alpha = alphas.get(stem, 0.5)
+        z_target = reality_anchor(z_a, z_b, fullmix_a, fullmix_b,
+                                  alpha, beta_a, beta_b, interp_fn=interp_fn)
+        z_composite = z_target if z_composite is None else z_composite + z_target
+        stems_found.append(stem)
+
+    if z_composite is None:
+        raise ValueError("No stem latents found")
+
+    # Normalize composite to full-mix energy so the decoder sees a familiar distribution.
+    # The composite is the sum of N stem latents; we rescale it to match the norm of the
+    # slerp(fullmix_a, fullmix_b, avg_alpha) reference latent.
+    avg_alpha = sum(alphas.get(s, 0.5) for s in stems_found) / len(stems_found)
+    z_ref  = interp_fn(fullmix_a, fullmix_b, avg_alpha)
+    B      = z_composite.shape[0]
+    c_norm = z_composite.reshape(B, -1).norm(dim=1, keepdim=True).clamp(min=1e-8)
+    r_norm = z_ref.reshape(B, -1).norm(dim=1, keepdim=True).clamp(min=1e-8)
+    scale  = (r_norm / c_norm).view(B, *([1] * (z_composite.dim() - 1)))
+    z_composite = z_composite * scale
+
+    with torch.no_grad():
+        audio = _autoencoder.decode(z_composite)   # [1, 2, samples]
+
+    audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
+
+    if smart_loop:
+        bpm_a = _read_bpm(npy_fm_a)
+        bpm_b = _read_bpm(npy_fm_b)
+        loop_end = audio_np.shape[1]
+        for bpm in [bpm_a, bpm_b]:
+            if bpm:
+                try:
+                    _, end = _smart_loop_points(audio_np, _sample_rate, bpm)
+                    loop_end = min(loop_end, end)
+                except Exception as e:
+                    print(f"  smart_loop error (latent mix, bpm={bpm}): {e}")
+        if loop_end < audio_np.shape[1]:
+            audio_np = audio_np[:, :loop_end]
+
+    audio_np  = np.clip(audio_np, -1.0, 1.0)
+    audio_i16 = (audio_np * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_sample_rate)
+        wf.writeframes(audio_i16.T.flatten().tobytes())
+    return buf.getvalue(), stems_found
+
+
 def _read_bpm(npy_path: Path) -> float | None:
     """Return BPM from the companion JSON of a latent crop, or None."""
     json_path = npy_path.with_suffix(".json")
@@ -961,6 +1154,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, f"Stem track not found: {track_b}")
             return
 
+        mode       = qs.get("mode", ["stems"])[0]   # 'stems' | 'ab' | 'latent'
         pos_a      = float(qs.get("pos_a",  ["0.5"])[0])
         pos_b      = float(qs.get("pos_b",  ["0.5"])[0])
         beta_a     = float(qs.get("beta_a", ["0.0"])[0])
@@ -974,10 +1168,13 @@ class Handler(BaseHTTPRequestHandler):
         shift_b    = float(qs.get("shift_b",   ["0.0"])[0])
         stretch_b  = float(qs.get("stretch_b", ["1.0"])[0])
         bm_algo    = qs.get("bm_algo", ["pedalboard"])[0]
+        mix        = float(qs.get("mix", ["0.5"])[0])   # for mode=ab
         if bm_algo not in ("pedalboard", "bungee", "rubberband"):
             bm_algo = "pedalboard"
         if interp not in ("slerp", "lerp"):
             interp = "slerp"
+        if mode not in ("stems", "ab", "latent"):
+            mode = "stems"
 
         alphas = {
             "drums":  float(qs.get("drums",  ["0.0"])[0]),
@@ -986,16 +1183,68 @@ class Handler(BaseHTTPRequestHandler):
             "vocals": float(qs.get("vocals", ["0.0"])[0]),
         }
 
-        print(f"  crossfade: A={track_a} B={track_b} "
+        print(f"  crossfade[{mode}]: A={track_a} B={track_b} "
               f"pos_a={pos_a:.3f} pos_b={pos_b:.3f} "
-              f"alphas={alphas} beta_a={beta_a:.3f} beta_b={beta_b:.3f} "
-              f"interp={interp} smart_loop={smart_loop} raw={raw} "
-              f"beatmatch={beatmatch}" +
-              (f" shift_a={shift_a:+.1f}st ×{stretch_a:.3f} "
-               f"shift_b={shift_b:+.1f}st ×{stretch_b:.3f}" if beatmatch else ""))
+              + (f"mix={mix:.3f}" if mode == "ab" else
+                 f"alphas={alphas} beta_a={beta_a:.3f} beta_b={beta_b:.3f}")
+              + f" interp={interp} smart_loop={smart_loop} raw={raw}"
+              + (f" beatmatch shift_a={shift_a:+.1f}st ×{stretch_a:.3f} "
+                 f"shift_b={shift_b:+.1f}st ×{stretch_b:.3f}" if beatmatch else ""))
 
         try:
-            if beatmatch:
+            if mode == "ab":
+                # Plain full-mix A↔B interpolation — single decode
+                if raw:
+                    # Blend raw full-mix audio files in audio space
+                    npy_a, _ = find_best_crop(find_crops(_latent_dir / track_a), pos_a)
+                    npy_b, _ = find_best_crop(find_crops(_latent_dir / track_b), pos_b)
+                    if npy_a is None or npy_b is None:
+                        self._error(404, "Full-mix crops not found")
+                        return
+                    raw_a = find_raw_audio(npy_a, _latent_dir)
+                    raw_b = find_raw_audio(npy_b, _latent_dir)
+                    if raw_a is None or raw_b is None:
+                        self._error(404, "Raw audio files not found — check raw_audio_dir")
+                        return
+                    def _load_raw(p):
+                        a, sr = sf.read(str(p), dtype="float32", always_2d=True)
+                        a = a.T
+                        if a.shape[0] == 1: a = np.repeat(a, 2, axis=0)
+                        if sr != _sample_rate:
+                            import torchaudio
+                            a = torchaudio.functional.resample(
+                                torch.from_numpy(a), sr, _sample_rate).numpy()
+                        return a
+                    a_np = _load_raw(raw_a)
+                    b_np = _load_raw(raw_b)
+                    T = min(a_np.shape[1], b_np.shape[1])
+                    audio_np = (1.0 - mix) * a_np[:, :T] + mix * b_np[:, :T]
+                    audio_np  = np.clip(audio_np, -1.0, 1.0)
+                    audio_i16 = (audio_np * 32767).astype(np.int16)
+                    buf = io.BytesIO()
+                    with wave.open(buf, 'wb') as wf:
+                        wf.setnchannels(2); wf.setsampwidth(2)
+                        wf.setframerate(_sample_rate)
+                        wf.writeframes(audio_i16.T.flatten().tobytes())
+                    wav_bytes = buf.getvalue()
+                else:
+                    with _decode_lock:
+                        wav_bytes = crossfade_fullmix_to_wav(
+                            track_a, track_b, pos_a, pos_b,
+                            mix, interp=interp, smart_loop=smart_loop,
+                        )
+                stems_found = []
+                source_label = "raw" if raw else "vae"
+            elif mode == "latent":
+                # Stem latents mixed in latent space → single decode
+                with _decode_lock:
+                    wav_bytes, stems_found = latent_mix_to_wav(
+                        track_a, track_b, pos_a, pos_b,
+                        alphas, beta_a, beta_b, interp=interp,
+                        smart_loop=smart_loop,
+                    )
+                source_label = "vae-latent"
+            elif beatmatch:
                 with _decode_lock:
                     wav_bytes, stems_found = beatmatch_crossfade_to_wav(
                         track_a, track_b, pos_a, pos_b,
@@ -1003,10 +1252,12 @@ class Handler(BaseHTTPRequestHandler):
                         shift_a, stretch_a, shift_b, stretch_b,
                         interp=interp, smart_loop=smart_loop, algo=bm_algo,
                     )
+                source_label = "beatmatch"
             elif raw:
                 wav_bytes, stems_found = crossfade_raw_to_wav(
                     track_a, track_b, pos_a, pos_b, alphas, smart_loop=smart_loop,
                 )
+                source_label = "raw"
             else:
                 with _decode_lock:
                     wav_bytes, stems_found = crossfade_to_wav(
@@ -1014,6 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
                         alphas, beta_a, beta_b, interp=interp,
                         smart_loop=smart_loop,
                     )
+                source_label = "vae"
         except (ValueError, Exception) as e:
             self._error(500, str(e))
             return
@@ -1023,8 +1275,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",   "audio/wav")
         self.send_header("Content-Length", str(len(wav_bytes)))
         self.send_header("X-Stems-Found",  ",".join(stems_found))
-        self.send_header("X-Audio-Source",
-                         "beatmatch" if beatmatch else ("raw" if raw else "vae"))
+        self.send_header("X-Audio-Source", source_label)
         self.end_headers()
         self.wfile.write(wav_bytes)
 

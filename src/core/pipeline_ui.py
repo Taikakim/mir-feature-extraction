@@ -80,7 +80,7 @@ FEATURE_GROUPS: List[Tuple[str, str, List[str], Set[str]]] = [
                                   {'first_features'}),
     ('per_stem',    'Per-Stem',   ['per_stem_rhythm', 'per_stem_harmonic', 'per_stem'],
                                   {'first_features', 'crop_analysis'}),
-    ('chroma',      'Chroma',     ['chroma'],
+    ('chroma',      'Chroma',     ['chroma', 'hpcp_tiv'],
                                   {'crop_analysis'}),
     ('timbral',     'Timbral',    ['timbral'],
                                   {'crop_analysis'}),

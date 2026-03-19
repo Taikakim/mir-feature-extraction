@@ -432,7 +432,8 @@ def deduplicate_folders(folders: List[Path], warn: bool = True) -> List[Path]:
     return unique_folders
 
 
-def find_organized_folders(root_directory: str | Path, deduplicate: bool = True) -> List[Path]:
+def find_organized_folders(root_directory: str | Path, deduplicate: bool = True,
+                           progress_callback=None) -> List[Path]:
     """
     Find all organized audio folders in a directory tree.
 
@@ -442,6 +443,7 @@ def find_organized_folders(root_directory: str | Path, deduplicate: bool = True)
     Args:
         root_directory: Root directory to search
         deduplicate: If True, skip folders with identical full_mix audio files
+        progress_callback: Optional callable(n: int) called after each new folder is found
 
     Returns:
         List of Path objects for organized folders (deduplicated by default)
@@ -466,6 +468,8 @@ def find_organized_folders(root_directory: str | Path, deduplicate: bool = True)
             folder = full_mix_file.parent
             if folder not in organized_folders and not should_skip(folder):
                 organized_folders.append(folder)
+                if progress_callback:
+                    progress_callback(len(organized_folders))
 
     organized_folders = sorted(organized_folders)
 

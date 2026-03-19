@@ -896,13 +896,19 @@
         </div>
       </div>
     </div>
-    <div style="display:flex;gap:4px;margin-bottom:8px;">
+    <div style="display:flex;gap:4px;margin-bottom:3px;">
       <button class="lp-mode-btn active" id="lp-mode-fullmix"
         onclick="lpSetMode('fullmix')">Full Mix</button>
+      <button class="lp-mode-btn" id="lp-mode-ab"
+        onclick="lpSetMode('ab')" title="Crossfade between full-mix latents of A and B — single decode">A↔B</button>
       <button class="lp-mode-btn" id="lp-mode-cf"
-        onclick="lpSetMode('crossfader')">Stem ×fader</button>
+        onclick="lpSetMode('crossfader')" title="Decode each stem separately, sum audio">Stem ×fader</button>
+      <button class="lp-mode-btn" id="lp-mode-latent"
+        onclick="lpSetMode('latent')" title="Mix stem latents in latent space, single decode">Latent Mix</button>
+    </div>
+    <div style="display:flex;gap:4px;margin-bottom:8px;">
       <button class="lp-mode-btn" id="lp-raw-btn"
-        onclick="lpToggleRaw()"
+        onclick="lpToggleRaw()" style="flex:0 0 auto;padding:3px 10px;"
         title="Play original source audio instead of VAE-decoded latent">Raw</button>
     </div>
     <div id="lp-pos-row" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
@@ -992,7 +998,7 @@
         <div style="display:flex;align-items:center;gap:6px;">
           <button class="lp-interp-btn" id="lp-bm-btn" onclick="lpToggleBeatMatch()"
             title="Align BPM (tempo stretch) and key (chroma rotation) before re-encoding. Loads source audio, applies pitch shift + time stretch, encodes to latent. Requires raw_audio_dir in latent_player.ini. Tolerance: ±2 semitones, ±10% BPM.">&#x266b; Beat Match</button>
-          <select id="lp-bm-algo"
+          <select id="lp-bm-algo" onchange="lpOnAlgoChange()"
             style="font-size:9px;padding:2px 4px;background:#0f1a2e;border:1px solid #333355;color:#888;border-radius:3px;cursor:pointer;"
             title="Pitch shift / time stretch algorithm">
             <option value="pedalboard">Pedalboard</option>
@@ -1020,6 +1026,34 @@
         </div>
       </div>
     </div>
+
+    <!-- A↔B full-mix crossfade section -->
+    <div id="lp-ab-section" style="display:none;">
+      <div class="lp-cf-row">
+        <span class="lp-cf-label" style="color:#5bc4ff;">B pos</span>
+        <input type="range" id="lp-ab-bpos" min="0" max="1" step="0.01" value="0.5"
+          oninput="lpCfLabelUpdate('lp-ab-bpos-val',this.value)"
+          onchange="lpAbOnSliderChange()">
+        <span id="lp-ab-bpos-val" class="lp-cf-val">0.50</span>
+      </div>
+      <div class="lp-cf-row">
+        <span class="lp-cf-label" style="color:#ccc;">A ↔ B</span>
+        <input type="range" id="lp-ab-mix" min="0" max="1" step="0.01" value="0.5"
+          oninput="lpCfLabelUpdate('lp-ab-mix-val',this.value)"
+          onchange="lpAbOnSliderChange()">
+        <span id="lp-ab-mix-val" class="lp-cf-val">0.50</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+        <button class="lp-interp-btn active" id="lp-ab-interp-slerp"
+          onclick="lpSetInterp('slerp')">Slerp</button>
+        <button class="lp-interp-btn" id="lp-ab-interp-lerp"
+          onclick="lpSetInterp('lerp')">Lerp</button>
+        <span style="flex:1;font-size:9px;color:#555;">α interpolation</span>
+        <button onclick="lpCfStop()"
+          style="font-size:10px;padding:3px 8px;background:#1e2a3a;border:1px solid #334;color:#aaa;border-radius:3px;cursor:pointer;">&#x23f9; Stop</button>
+      </div>
+    </div>
+
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
       <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer;">
         <input type="checkbox" id="lp-loop" onchange="lpOnLoopChange(this.checked)"
@@ -2275,9 +2309,185 @@
     let _lpLeaveTimer    = null;
 
     // Crossfader state
-    let _lpMode     = 'fullmix';   // 'fullmix' | 'crossfader'
+    let _lpMode     = 'fullmix';   // 'fullmix' | 'ab' | 'crossfader' | 'latent'
     let _lpCfInterp = 'slerp';
     let _lpCfTimer  = null;
+
+    // Pre-fetch cache  (urlKey → AudioBuffer)
+    const _lpCache    = new Map();
+    let _lpPfQueue    = [];          // pending background URLs
+    let _lpPfRunning  = false;
+    let _lpPfAbort    = null;        // AbortController for current bg fetch
+
+    // ---- URL builder (centralises all crossfade params) --------------------------
+    function _lpBuildUrl(overrides) {
+      const ov      = overrides || {};
+      const mode    = ov.mode   !== undefined ? ov.mode   : _lpMode;
+      const interp  = ov.interp !== undefined ? ov.interp : _lpCfInterp;
+      const algo    = ov.algo   !== undefined ? ov.algo
+                      : (document.getElementById('lp-bm-algo') || {value:'pedalboard'}).value;
+      const raw     = _lpRaw       ? '&raw=1'        : '';
+      const sl      = _lpSmartLoop ? '&smart_loop=1' : '';
+      const pos_a   = parseFloat(document.getElementById('lp-pos').value).toFixed(3);
+
+      if (mode === 'ab') {
+        const pos_b = parseFloat(document.getElementById('lp-ab-bpos').value).toFixed(3);
+        const mix   = parseFloat(document.getElementById('lp-ab-mix').value).toFixed(3);
+        return '/crossfade?track_a=' + encodeURIComponent(_lpCurrentTrack)
+          + '&track_b=' + encodeURIComponent(_lpBTrack)
+          + '&pos_a=' + pos_a + '&pos_b=' + pos_b
+          + '&mix=' + mix + '&interp=' + interp
+          + '&mode=ab' + sl + raw;
+      }
+
+      const pos_b  = parseFloat(document.getElementById('lp-cf-bpos').value).toFixed(3);
+      const drums  = parseFloat(document.getElementById('lp-cf-drums').value).toFixed(3);
+      const bass   = parseFloat(document.getElementById('lp-cf-bass').value).toFixed(3);
+      const other  = parseFloat(document.getElementById('lp-cf-other').value).toFixed(3);
+      const vocals = parseFloat(document.getElementById('lp-cf-vocals').value).toFixed(3);
+      const beta_a = parseFloat(document.getElementById('lp-cf-betaa').value).toFixed(3);
+      const beta_b = parseFloat(document.getElementById('lp-cf-betab').value).toFixed(3);
+      const srvMode = mode === 'latent' ? 'latent' : 'stems';
+
+      let bmParams = '';
+      if (_lpBeatMatch) {
+        const bm = computeBeatMatch(_lpCurrentTrack, _lpBTrack);
+        bmParams = '&beatmatch=1'
+          + '&shift_a='   + bm.shiftA
+          + '&stretch_a=' + bm.stretchA.toFixed(4)
+          + '&shift_b='   + bm.shiftB
+          + '&stretch_b=' + bm.stretchB.toFixed(4)
+          + '&bm_algo='   + algo;
+      }
+
+      return '/crossfade?track_a=' + encodeURIComponent(_lpCurrentTrack)
+        + '&track_b=' + encodeURIComponent(_lpBTrack)
+        + '&pos_a=' + pos_a + '&pos_b=' + pos_b
+        + '&drums=' + drums + '&bass=' + bass
+        + '&other=' + other + '&vocals=' + vocals
+        + '&beta_a=' + beta_a + '&beta_b=' + beta_b
+        + '&interp=' + interp + '&mode=' + srvMode
+        + sl + raw + bmParams;
+    }
+
+    // ---- Fetch + WebAudio decode --------------------------------------------------
+    function _lpFetchBuffer(urlKey, signal) {
+      return fetch(LP_SERVER + urlKey, signal ? {signal} : {})
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t || 'HTTP ' + r.status); });
+          return r.blob();
+        })
+        .then(blob => blob.arrayBuffer())
+        .then(ab   => _lpGetCtx().decodeAudioData(ab));
+    }
+
+    // ---- Seamless buffer swap (crossfades ~80 ms if playing) ---------------------
+    function _lpSwapBuffer(buf, label) {
+      const ctx       = _lpGetCtx();
+      const isPlaying = !!_lpSourceNode;
+      let offset = 0;
+
+      if (isPlaying) {
+        const elapsed = ctx.currentTime - _lpPlayStart;
+        offset = elapsed % (_lpAudioBuffer ? _lpAudioBuffer.duration : 1);
+        const fade = 0.08;
+        const oldGain = ctx.createGain();
+        _lpSourceNode.disconnect();
+        _lpSourceNode.connect(oldGain);
+        oldGain.connect(ctx.destination);
+        oldGain.gain.setValueAtTime(1, ctx.currentTime);
+        oldGain.gain.linearRampToValueAtTime(0, ctx.currentTime + fade);
+        try { _lpSourceNode.stop(ctx.currentTime + fade); } catch(e) {}
+        _lpSourceNode = null;
+      }
+
+      _lpAudioBuffer = buf;
+      _lpReady = true;
+
+      if (isPlaying) {
+        const fade    = 0.08;
+        const newGain = ctx.createGain();
+        const src     = ctx.createBufferSource();
+        src.buffer = buf;
+        src.loop   = _lpLoop;
+        src.connect(newGain);
+        newGain.connect(ctx.destination);
+        newGain.gain.setValueAtTime(0, ctx.currentTime);
+        newGain.gain.linearRampToValueAtTime(1, ctx.currentTime + fade);
+        const off = Math.max(0, offset % buf.duration);
+        src.start(0, off);
+        _lpSourceNode = src;
+        _lpPlayStart  = ctx.currentTime - off;
+        _lpPauseOffset = 0;
+        _lpBtn('\u23f8');
+        src.onended = () => {
+          if (_lpSourceNode === src) { _lpSourceNode = null; _lpPauseOffset = 0; _lpBtn('\u25b6'); }
+        };
+      }
+
+      const lbl = label || 'Ready';
+      document.getElementById('lp-status').textContent = lbl + ' \u2014 ' + buf.duration.toFixed(1) + 's';
+    }
+
+    // ---- Background pre-fetch ----------------------------------------------------
+    function _lpCancelPrefetch() {
+      if (_lpPfAbort) { _lpPfAbort.abort(); _lpPfAbort = null; }
+      _lpPfQueue   = [];
+      _lpPfRunning = false;
+    }
+
+    function _lpPrefetchNext() {
+      if (!_lpPfQueue.length) { _lpPfRunning = false; return; }
+      _lpPfRunning = true;
+      const url = _lpPfQueue.shift();
+      if (_lpCache.has(url)) { _lpPrefetchNext(); return; }
+      _lpPfAbort = new AbortController();
+      _lpFetchBuffer(url, _lpPfAbort.signal)
+        .then(buf => {
+          _lpCache.set(url, buf);
+          _lpPfAbort = null;
+          _lpPrefetchNext();
+        })
+        .catch(e => {
+          _lpPfAbort   = null;
+          _lpPfRunning = false;
+          if (e.name !== 'AbortError') console.debug('[LP prefetch]', url.slice(0,80), e.message);
+        });
+    }
+
+    function _lpSchedulePrefetch() {
+      if (!_lpCurrentTrack || !_lpBTrack) return;
+      const todo = [];
+
+      // 1) All 3 pitch-shift algos (only meaningful when beatmatch is on)
+      if (_lpBeatMatch && _lpMode !== 'ab') {
+        for (const algo of ['pedalboard', 'bungee', 'rubberband']) {
+          const u = _lpBuildUrl({algo});
+          if (!_lpCache.has(u)) todo.push(u);
+        }
+      }
+
+      // 2) The other decode mode (crossfader ↔ latent)
+      if (_lpMode === 'crossfader' || _lpMode === 'latent') {
+        const other = _lpMode === 'crossfader' ? 'latent' : 'crossfader';
+        const u = _lpBuildUrl({mode: other});
+        if (!_lpCache.has(u)) todo.push(u);
+      }
+
+      // 3) The other interpolation
+      const otherInterp = _lpCfInterp === 'slerp' ? 'lerp' : 'slerp';
+      const ui = _lpBuildUrl({interp: otherInterp});
+      if (!_lpCache.has(ui)) todo.push(ui);
+
+      // Dedup and enqueue (skip already queued)
+      todo.forEach(u => { if (!_lpPfQueue.includes(u)) _lpPfQueue.push(u); });
+      if (!_lpPfRunning) _lpPrefetchNext();
+    }
+
+    // algo select change handler
+    function lpOnAlgoChange() {
+      if (_lpBeatMatch && _lpCurrentTrack && _lpBTrack) lpCrossfade();
+    }
 
     // Web Audio state (gapless looping — <audio loop> always has a seek gap)
     let _lpAudioCtx    = null;
@@ -2345,7 +2555,13 @@
           if (trackName === _lpBTrack) return;
           _lpDebounceTimer = setTimeout(() => {
             lpSetB(trackName);
-            if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
+            if (_lpMode === 'crossfader' || _lpMode === 'latent') {
+              if (_lpCurrentTrack) lpCrossfade(); else lpPreview(trackName);
+            } else if (_lpMode === 'ab') {
+              if (_lpCurrentTrack) lpAbCrossfade(); else lpPreview(trackName);
+            } else {
+              lpPreview(trackName);
+            }
           }, 350);
         } else {
           if (trackName === _lpCurrentTrack) return;
@@ -2395,7 +2611,8 @@
       if (!trackName || !_lpVisible) return;
       if (_lpAutoLoadSlot === 'b') {
         lpSetB(trackName);
-        if (_lpMode === 'crossfader' && _lpCurrentTrack) lpCrossfade();
+        if ((_lpMode === 'crossfader' || _lpMode === 'latent') && _lpCurrentTrack) lpCrossfade();
+        else if (_lpMode === 'ab' && _lpCurrentTrack) lpAbCrossfade();
       } else {
         lpLoad(trackName, parseFloat(document.getElementById('lp-pos').value));
       }
@@ -2426,9 +2643,14 @@
       _cropEl.textContent = ''; _cropEl.title = '';
       lpStopPlayback();
 
-      if (_lpMode === 'crossfader') {
+      if (_lpMode === 'crossfader' || _lpMode === 'latent') {
         if (_lpBTrack) lpCrossfade();
         else document.getElementById('lp-status').textContent = 'Set B track to crossfade';
+        return;
+      }
+      if (_lpMode === 'ab') {
+        if (_lpBTrack) lpAbCrossfade();
+        else document.getElementById('lp-status').textContent = 'Set B track for A\u2194B mix';
         return;
       }
 
@@ -2578,26 +2800,55 @@
     // ---- Crossfader controls ---------------------------------------------------
     function lpSetMode(mode) {
       _lpMode = mode;
-      const isCf = mode === 'crossfader';
+      const isCf  = mode === 'crossfader' || mode === 'latent';
+      const isAb  = mode === 'ab';
       document.getElementById('lp-cf-section').style.display = isCf ? '' : 'none';
-      document.getElementById('lp-mode-fullmix').classList.toggle('active', !isCf);
-      document.getElementById('lp-mode-cf').classList.toggle('active', isCf);
-      document.getElementById('lp-pos-label-text').textContent = isCf ? 'A pos' : 'Pos';
-      lpStopPlayback();
+      document.getElementById('lp-ab-section').style.display = isAb ? '' : 'none';
+      ['fullmix', 'ab', 'cf', 'latent'].forEach(m => {
+        const el = document.getElementById('lp-mode-' + m);
+        if (el) el.classList.toggle('active', m === (mode === 'crossfader' ? 'cf' : mode));
+      });
+      document.getElementById('lp-pos-label-text').textContent =
+        (isCf || isAb) ? 'A pos' : 'Pos';
+
+      if (_lpCurrentTrack && _lpBTrack && (isCf || isAb)) {
+        const urlKey = _lpBuildUrl();
+        if (_lpCache.has(urlKey)) {
+          _lpCancelPrefetch();
+          const label = mode === 'latent' ? 'Latent mix' : mode === 'ab' ? 'A\u2194B' : 'Crossfade';
+          _lpSwapBuffer(_lpCache.get(urlKey), label);
+          _lpSchedulePrefetch();
+        } else {
+          if (isAb) lpAbCrossfade(); else lpCrossfade();
+        }
+      } else {
+        lpStopPlayback();
+      }
     }
 
     function lpToggleRaw() {
       _lpRaw = !_lpRaw;
       document.getElementById('lp-raw-btn').classList.toggle('active', _lpRaw);
       // Refetch immediately so the toggle is audible on the running loop
-      if (_lpMode === 'crossfader' && _lpCurrentTrack && _lpBTrack) lpCrossfade();
-      else if (_lpCurrentTrack) lpLoad(_lpCurrentTrack);
+      if ((_lpMode === 'crossfader' || _lpMode === 'latent') && _lpCurrentTrack && _lpBTrack)
+        lpCrossfade();
+      else if (_lpMode === 'ab' && _lpCurrentTrack && _lpBTrack)
+        lpAbCrossfade();
+      else if (_lpCurrentTrack)
+        lpLoad(_lpCurrentTrack);
     }
 
     function lpSetInterp(interp) {
       _lpCfInterp = interp;
-      document.getElementById('lp-interp-slerp').classList.toggle('active', interp === 'slerp');
-      document.getElementById('lp-interp-lerp').classList.toggle('active',  interp === 'lerp');
+      ['lp-interp-slerp', 'lp-interp-lerp',
+       'lp-ab-interp-slerp', 'lp-ab-interp-lerp'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', id.endsWith(interp));
+      });
+      if (_lpCurrentTrack && _lpBTrack) {
+        if (_lpMode === 'ab') lpAbCrossfade();
+        else if (_lpMode === 'crossfader' || _lpMode === 'latent') lpCrossfade();
+      }
     }
 
     function lpCfLabelUpdate(id, val) {
@@ -2615,65 +2866,36 @@
           _lpCurrentTrack ? 'Set B track first' : 'Set A and B tracks first';
         return;
       }
-      const pos_a  = document.getElementById('lp-pos').value;
-      const pos_b  = document.getElementById('lp-cf-bpos').value;
-      const drums  = document.getElementById('lp-cf-drums').value;
-      const bass   = document.getElementById('lp-cf-bass').value;
-      const other  = document.getElementById('lp-cf-other').value;
-      const vocals = document.getElementById('lp-cf-vocals').value;
-      const beta_a = document.getElementById('lp-cf-betaa').value;
-      const beta_b = document.getElementById('lp-cf-betab').value;
+      _lpCancelPrefetch();
+
+      if (_lpBeatMatch) _lpUpdateBmInfo();
+      const urlKey = _lpBuildUrl();
+
+      // Cache hit → seamless swap
+      if (_lpCache.has(urlKey)) {
+        const label = _lpMode === 'latent' ? 'Latent mix' : 'Crossfade';
+        _lpSwapBuffer(_lpCache.get(urlKey), label);
+        _lpSchedulePrefetch();
+        return;
+      }
 
       _lpReady = false;
       lpStopPlayback();
+      document.getElementById('lp-status').textContent = _lpBeatMatch
+        ? 'Encoding shifted stems\u2026'
+        : _lpMode === 'latent' ? 'Mixing stem latents\u2026' : 'Decoding 4 stems\u2026';
 
-      let bmParams = '';
-      if (_lpBeatMatch) {
-        _lpUpdateBmInfo();
-        const bm = computeBeatMatch(_lpCurrentTrack, _lpBTrack);
-        const algoEl = document.getElementById('lp-bm-algo');
-        const bmAlgo = algoEl ? algoEl.value : 'pedalboard';
-        bmParams = '&beatmatch=1'
-          + '&shift_a='   + bm.shiftA
-          + '&stretch_a=' + bm.stretchA.toFixed(4)
-          + '&shift_b='   + bm.shiftB
-          + '&stretch_b=' + bm.stretchB.toFixed(4)
-          + '&bm_algo='   + bmAlgo;
-        document.getElementById('lp-status').textContent = 'Encoding shifted stems\u2026';
-      } else {
-        document.getElementById('lp-status').textContent = 'Decoding 4 stems\u2026';
-      }
-
-      const url = LP_SERVER + '/crossfade'
-        + '?track_a='    + encodeURIComponent(_lpCurrentTrack)
-        + '&track_b='    + encodeURIComponent(_lpBTrack)
-        + '&pos_a='      + parseFloat(pos_a).toFixed(3)
-        + '&pos_b='      + parseFloat(pos_b).toFixed(3)
-        + '&drums='      + parseFloat(drums).toFixed(3)
-        + '&bass='       + parseFloat(bass).toFixed(3)
-        + '&other='      + parseFloat(other).toFixed(3)
-        + '&vocals='     + parseFloat(vocals).toFixed(3)
-        + '&beta_a='     + parseFloat(beta_a).toFixed(3)
-        + '&beta_b='     + parseFloat(beta_b).toFixed(3)
-        + '&interp='     + _lpCfInterp
-        + (_lpSmartLoop ? '&smart_loop=1' : '')
-        + (_lpRaw ? '&raw=1' : '')
-        + bmParams;
-
-      fetch(url)
-        .then(r => {
-          if (!r.ok) return r.text().then(t => { throw new Error(t || 'HTTP ' + r.status); });
-          return r.blob();
-        })
-        .then(blob => blob.arrayBuffer())
-        .then(ab   => _lpGetCtx().decodeAudioData(ab))
-        .then(buf  => {
+      _lpFetchBuffer(urlKey)
+        .then(buf => {
+          _lpCache.set(urlKey, buf);
+          const label = _lpMode === 'latent' ? 'Latent mix' : 'Crossfade';
           _lpAudioBuffer = buf;
           _lpPauseOffset = 0;
           _lpReady = true;
           document.getElementById('lp-status').textContent =
-            'Crossfade ready \u2014 ' + buf.duration.toFixed(1) + 's';
+            label + ' ready \u2014 ' + buf.duration.toFixed(1) + 's';
           _lpStartSource(0);
+          _lpSchedulePrefetch();
         })
         .catch(e => {
           document.getElementById('lp-status').textContent = 'Error: ' + e.message;
@@ -2681,6 +2903,48 @@
     }
 
     function lpCfStop() { lpStopPlayback(); }
+
+    // ---- A↔B full-mix crossfade ------------------------------------------------
+    function lpAbOnSliderChange() {
+      clearTimeout(_lpCfTimer);
+      _lpCfTimer = setTimeout(lpAbCrossfade, 150);
+    }
+
+    function lpAbCrossfade() {
+      if (!_lpCurrentTrack || !_lpBTrack) {
+        document.getElementById('lp-status').textContent =
+          _lpCurrentTrack ? 'Set B track first' : 'Set A and B tracks first';
+        return;
+      }
+      _lpCancelPrefetch();
+      const urlKey = _lpBuildUrl();
+
+      // Cache hit → seamless swap
+      if (_lpCache.has(urlKey)) {
+        _lpSwapBuffer(_lpCache.get(urlKey), 'A\u2194B');
+        _lpSchedulePrefetch();
+        return;
+      }
+
+      _lpReady = false;
+      lpStopPlayback();
+      document.getElementById('lp-status').textContent = 'Decoding A\u2194B mix\u2026';
+
+      _lpFetchBuffer(urlKey)
+        .then(buf => {
+          _lpCache.set(urlKey, buf);
+          _lpAudioBuffer = buf;
+          _lpPauseOffset = 0;
+          _lpReady = true;
+          document.getElementById('lp-status').textContent =
+            'A\u2194B ready \u2014 ' + buf.duration.toFixed(1) + 's';
+          _lpStartSource(0);
+          _lpSchedulePrefetch();
+        })
+        .catch(e => {
+          document.getElementById('lp-status').textContent = 'Error: ' + e.message;
+        });
+    }
 
     // ---- Beat Match ------------------------------------------------------------
     let _lpBeatMatch = false;
@@ -2943,25 +3207,42 @@
       }
       if ((e.key === 'b' || e.key === 'B') && _lpVisible) {
         const t = _lpHoverTrack || globalActiveTrack;
-        if (t) lpSetB(t);
+        if (t) {
+          lpSetB(t);
+          if ((_lpMode === 'crossfader' || _lpMode === 'latent') && _lpCurrentTrack) lpCrossfade();
+          else if (_lpMode === 'ab' && _lpCurrentTrack) lpAbCrossfade();
+        }
         _lpSetAutoLoadSlot('b');
       }
     });
 
-    // Ctrl+wheel: move all stem α crossfaders together (LP must be open in crossfader mode)
+    // Ctrl+wheel: move crossfaders together (LP must be open)
+    // - crossfader / latent modes: moves all 4 stem α sliders
+    // - ab mode: moves the single A↔B mix slider
     const _CF_STEM_IDS = ['lp-cf-drums', 'lp-cf-bass', 'lp-cf-other', 'lp-cf-vocals'];
     document.addEventListener('wheel', function(e) {
-      if (!_lpVisible || _lpMode !== 'crossfader' || !e.ctrlKey) return;
-      e.preventDefault();
-      const step = e.deltaY > 0 ? -0.05 : 0.05;
-      _CF_STEM_IDS.forEach(id => {
-        const el = document.getElementById(id);
+      if (!_lpVisible || !e.ctrlKey) return;
+      if (_lpMode === 'crossfader' || _lpMode === 'latent') {
+        e.preventDefault();
+        const step = e.deltaY > 0 ? -0.05 : 0.05;
+        _CF_STEM_IDS.forEach(id => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          const v = Math.max(0, Math.min(1, parseFloat(el.value) + step));
+          el.value = v.toFixed(2);
+          lpCfLabelUpdate(id + '-val', v.toFixed(2));
+        });
+        lpCfOnSliderChange();
+      } else if (_lpMode === 'ab') {
+        e.preventDefault();
+        const el = document.getElementById('lp-ab-mix');
         if (!el) return;
+        const step = e.deltaY > 0 ? -0.05 : 0.05;
         const v = Math.max(0, Math.min(1, parseFloat(el.value) + step));
         el.value = v.toFixed(2);
-        lpCfLabelUpdate(id + '-val', v.toFixed(2));
-      });
-      lpCfOnSliderChange();
+        lpCfLabelUpdate('lp-ab-mix-val', v.toFixed(2));
+        lpAbOnSliderChange();
+      }
     }, { passive: false });
 
     // Mouseover/mouseleave/click delegation on list panels for latent player
@@ -3014,7 +3295,11 @@
       const bRes = document.getElementById('lp-b-results');
 
       const onA = name => lpLoad(name, parseFloat(document.getElementById('lp-pos').value));
-      const onB = name => lpSetB(name);
+      const onB = name => {
+        lpSetB(name);
+        if ((_lpMode === 'crossfader' || _lpMode === 'latent') && _lpCurrentTrack) lpCrossfade();
+        else if (_lpMode === 'ab' && _lpCurrentTrack) lpAbCrossfade();
+      };
 
       aIn.addEventListener('focus', () => _lpRenderSearch(aIn, aRes, aIn.value, onA));
       aIn.addEventListener('input', () => _lpRenderSearch(aIn, aRes, aIn.value, onA));

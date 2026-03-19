@@ -148,6 +148,7 @@ class MasterPipelineConfig:
     essentia_instrument: bool = True
     essentia_voice: bool = True
     essentia_gender: bool = True
+    vggish_use_migraphx: bool = True  # Use MIGraphX EP for VGGish ONNX models (may crash on long runs)
     vocal_content_thresholds: Dict[str, float] = field(default_factory=lambda: {
         'crest_factor_threshold': 30.0,
         'rms_threshold': -42.0,
@@ -310,6 +311,7 @@ class MasterPipelineConfig:
             essentia_instrument=features.get('essentia_instrument', True),
             essentia_voice=features.get('essentia_voice', True),
             essentia_gender=features.get('essentia_gender', True),
+            vggish_use_migraphx=features.get('vggish_use_migraphx', True),
             vocal_content_thresholds={
                 'crest_factor_threshold': float(vocal_content.get('crest_factor_threshold', 30.0)),
                 'rms_threshold': float(vocal_content.get('rms_threshold', -42.0)),
@@ -2740,6 +2742,9 @@ Config file template: config/master_pipeline.yaml
         config.verbose = True
     if args.feature_workers is not None:
         config.feature_workers = args.feature_workers
+
+    # Propagate VGGish MIGraphX flag to env var (vggish_onnx reads it at import time)
+    os.environ.setdefault('VGGISH_USE_MIGRAPHX', '1' if config.vggish_use_migraphx else '0')
 
     log_level = logging.DEBUG if config.verbose else logging.INFO
 
