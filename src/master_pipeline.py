@@ -2788,6 +2788,15 @@ Config file template: config/master_pipeline.yaml
     # Create pipeline
     pipeline = MasterPipeline(config)
 
+    # Pre-flight Tidal auth — must happen before the TUI occupies the terminal.
+    # Tidal lookup requires Spotify (for ISRC), so only warm up when both are live.
+    if not config.skip_metadata and config.use_spotify:
+        try:
+            from tools.tidal_auth import get_tidal_session
+            get_tidal_session()
+        except Exception:
+            pass
+
     if not getattr(args, 'no_ui', False):
         # TUI mode: redirect logging to file, show dashboard
         try:
