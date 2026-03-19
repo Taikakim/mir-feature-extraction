@@ -47,8 +47,8 @@ logger = logging.getLogger(__name__)
 # Suppress verbose HTTP-level logging from spotipy and its dependencies.
 # Without this, DEBUG mode prints the full raw response body for every API
 # call — including the enormous available_markets list on every track.
-for _noisy in ('spotipy', 'urllib3', 'requests', 'urllib3.connectionpool'):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
+for _noisy in ('spotipy', 'spotipy.client', 'urllib3', 'requests', 'urllib3.connectionpool'):
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
 # Try importing APIs
 try:
@@ -358,8 +358,9 @@ def search_spotify(sp, track_name: str, current_artist: str = None,
         return best_result
         
     except Exception as e:
-        if getattr(e, 'http_status', None) == 429:
-            raise  # Propagate rate-limit so caller can disable Spotify for this run
+        http_status = getattr(e, 'http_status', None)
+        if http_status in (429, 403):
+            raise  # Propagate so caller can disable Spotify for this run
         logger.debug(f"Spotify search failed for '{track_name}': {e}")
         return None
 
