@@ -17,11 +17,18 @@ All four models share the same preprocessing pipeline and architecture:
 
 Output is numerically equivalent to TensorflowPredictVGGish (max diff < 1e-4).
 
-JIT compile: ~28s on first run per model. Subsequent calls: ~2ms per batch.
+JIT compile: ~28s on first run per model (MIGraphX). Subsequent calls: ~2ms per batch.
 Batch size is fixed at _BATCH_SIZE=32; shorter batches are zero-padded.
+
+NOTE: MIGraphX EP is disabled by default for VGGish.
+On RDNA4 / ROCm 7.2 the MIGraphX backend crashes during JIT compilation with:
+  Assertion `host or is_device_ptr(result.get())' failed  (hip.cpp:155)
+This is a MIGraphX bug. EffNet and GMI are unaffected. Set
+VGGISH_USE_MIGRAPHX=1 in the environment to re-enable if the bug is fixed.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -29,6 +36,11 @@ from typing import Dict, Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# MIGraphX EP crashes during VGGish JIT compilation on RDNA4/ROCm 7.2
+# (migraphx::gpu::write_to_gpu assertion failure). Default to CPU until fixed.
+# Override with VGGISH_USE_MIGRAPHX=1 to re-enable.
+_USE_MIGRAPHX = os.environ.get("VGGISH_USE_MIGRAPHX", "0").strip() == "1"
 
 # Preprocessing constants — must match TensorflowPredictVGGish internals
 _FRAME_SIZE = 400   # 25ms at 16kHz (TensorflowInputVGGish only accepts 400)
@@ -64,14 +76,17 @@ class VGGishMIGraphX:
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         available = ort.get_available_providers()
-        if "MIGraphXExecutionProvider" in available:
+        if _USE_MIGRAPHX and "MIGraphXExecutionProvider" in available:
             # migraphx_save/load_compiled_model were removed in ROCm 6.4+.
             # MIGraphX JIT-compiles on first call each session (~28s per model).
             provider_options = {"device_id": "0"}
             providers = [("MIGraphXExecutionProvider", provider_options), "CPUExecutionProvider"]
             logger.info(f"VGGish[{model_key}]: MIGraphX EP will JIT compile on first inference (~28s)")
         else:
-            logger.warning(f"VGGish[{model_key}]: MIGraphX EP not available — falling back to CPU")
+            if not _USE_MIGRAPHX:
+                logger.info(f"VGGish[{model_key}]: using CPU EP (MIGraphX disabled — set VGGISH_USE_MIGRAPHX=1 to enable)")
+            else:
+                logger.warning(f"VGGish[{model_key}]: MIGraphX EP not available — falling back to CPU")
             providers = ["CPUExecutionProvider"]
 
         self.session   = ort.InferenceSession(str(model_path), sess_options=so, providers=providers)
