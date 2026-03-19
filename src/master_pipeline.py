@@ -493,8 +493,11 @@ class MasterPipeline:
         import soundfile as sf
         cached = cached or {}
         durations = {}
+        total = len(folders)
 
-        for folder in folders:
+        for i, folder in enumerate(folders):
+            if self.ui:
+                self.ui.set_current(operation='Reading audio durations…', done=i, total=total)
             # Use cached duration if available
             if folder.name in cached and cached[folder.name] > 0:
                 durations[folder.name] = cached[folder.name]
@@ -517,6 +520,8 @@ class MasterPipeline:
                     logger.debug(f"Could not get duration for {folder.name}: {e}")
                     durations[folder.name] = 0.0
 
+        if self.ui:
+            self.ui.set_current(operation='', done=0, total=0)
         return durations
 
     def run(self) -> PipelineStats:
@@ -569,7 +574,12 @@ class MasterPipeline:
             if state.get_tracks():
                 logger.info("Config changed since last run — rescanning (keeping cached durations)...")
                 state.invalidate()
-            source_folders = list(find_organized_folders(self.working_dir))
+            def _scan_cb(n: int):
+                if self.ui:
+                    self.ui.set_current(operation=f'Scanning dataset…', done=n, total=0)
+            source_folders = list(find_organized_folders(self.working_dir, progress_callback=_scan_cb))
+            if self.ui:
+                self.ui.set_current(operation='', done=0, total=0)
             if source_folders:
                 cached_durations = state.get_cached_durations()
                 durations = self._calculate_durations_dict(source_folders, cached=cached_durations)
@@ -619,6 +629,16 @@ class MasterPipeline:
             if self.ui: self.ui.set_stage('organize', 'running')
             self._run_organization()
             if self.ui: self.ui.set_stage('organize', 'done')
+            # Rescan working dir — newly organised folders aren't in the pre-organise state
+            new_folders = list(find_organized_folders(self.working_dir))
+            if new_folders:
+                cached_durations = state.get_cached_durations()
+                durations = self._calculate_durations_dict(new_folders, cached=cached_durations)
+                state.set_tracks(new_folders, durations)
+                self.stats.total_audio_duration = sum(durations.values())
+                if self.ui:
+                    self.ui.set_tracks_total(len(new_folders))
+                logger.info(f"Post-organise rescan: {len(new_folders)} tracks indexed")
             state.mark_stage_completed('organize')
             state.save()
         else:
@@ -1006,6 +1026,7 @@ class MasterPipeline:
 
     def _run_bs_roformer_batch(self, folders: List[Path]):
         """Run BS-RoFormer separation on all tracks."""
+        from core.graceful_shutdown import shutdown_requested
         from preprocessing.bs_roformer_sep import separate_organized_folder, load_bs_roformer
 
         model_name = self.config.bs_roformer_model
@@ -1196,8 +1217,11 @@ class MasterPipeline:
             self.stats.errors.append(f"Demucs: {e}")
 
     def _run_stem_quality_check(self, folders: List[Path]):
-        """Check stem quality and optionally mix flagged stems back to 'other'."""
-        from tools.stem_quality_analysis import analyse_folder, mixback_flagged_stems
+        """Check stem quality and mix flagged stems back to 'other' in one parallel pass."""
+        import soundfile as sf
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from tools.stem_quality_analysis import analyse_folder, _load_audio
+        from core.file_utils import get_stem_files
 
         crest = self.config.stem_quality_crest
         rms = self.config.stem_quality_rms
@@ -1207,26 +1231,62 @@ class MasterPipeline:
 
         flagged_count = 0
         mixed_count = 0
+        total = len(folders)
 
-        for folder in folders:
+        def _process_folder(folder: Path) -> tuple[int, int]:
+            """Analyse stems and immediately mixback flagged ones. Returns (flagged, mixed)."""
+            import numpy as np
             results = analyse_folder(folder, crest, rms, peak)
+            stems = get_stem_files(folder)
+            f_count = m_count = 0
             for stem_name, features in results.items():
-                if features.get('flagged'):
-                    flagged_count += 1
-                    logger.info(
-                        f"  Flagged {stem_name} in {folder.name}: "
-                        f"crest={features['crest_factor_db']:+.1f}dB "
-                        f"rms={features['rms_db']:+.1f}dBFS "
-                        f"peak={features['peak_db']:+.1f}dBFS"
-                    )
+                if not features.get('flagged'):
+                    continue
+                f_count += 1
+                logger.info(
+                    f"  Flagged {stem_name} in {folder.name}: "
+                    f"crest={features['crest_factor_db']:+.1f}dB "
+                    f"rms={features['rms_db']:+.1f}dBFS "
+                    f"peak={features['peak_db']:+.1f}dBFS"
+                )
+                if stem_name not in stems or 'other' not in stems:
+                    continue
+                try:
+                    stem_audio, sr = _load_audio(stems[stem_name])
+                    other_audio, _ = _load_audio(stems['other'])
+                    min_len = min(len(stem_audio), len(other_audio))
+                    combined = other_audio[:min_len] + stem_audio[:min_len]
+                    sf.write(str(stems['other']), combined, sr)
+                    sf.write(str(stems[stem_name]), np.zeros_like(stem_audio), sr)
+                    m_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to mixback {stem_name} in {folder.name}: {e}")
+            return f_count, m_count
+
+        workers = min(self.config.feature_workers, total) if total else 1
+        done = 0
+        if self.ui:
+            self.ui.set_current(operation='Stem quality check…', done=0, total=total)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process_folder, f): f for f in folders}
+            for fut in as_completed(futures):
+                done += 1
+                if self.ui:
+                    self.ui.set_current(operation='Stem quality check…', done=done, total=total)
+                try:
+                    f, m = fut.result()
+                    flagged_count += f
+                    mixed_count += m
+                except Exception as e:
+                    folder = futures[fut]
+                    logger.error(f"Stem quality check failed for {folder.name}: {e}")
+
+        if self.ui:
+            self.ui.set_current(operation='', done=0, total=0)
 
         if flagged_count > 0:
-            logger.info(f"Flagged {flagged_count} stems total")
-            logger.info("Mixing flagged stems back to 'other'...")
-            mixed_count = mixback_flagged_stems(
-                self.working_dir, crest, rms, peak
-            )
-            logger.info(fmt_success(f"Mixed back {mixed_count} stems"))
+            logger.info(fmt_success(f"Flagged {flagged_count} stems, mixed back {mixed_count}"))
         else:
             logger.info(fmt_success("No stems flagged — all stems look clean"))
 
@@ -2707,6 +2767,10 @@ Config file template: config/master_pipeline.yaml
 
     # Suppress pydub's verbose ffmpeg subprocess logging
     logging.getLogger("pydub.converter").setLevel(logging.WARNING)
+    # Suppress PyTorch Dynamo bytecode tracing noise (emitted even with TORCH_COMPILE=0)
+    logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
+    logging.getLogger("torch._inductor").setLevel(logging.WARNING)
+    logging.getLogger("torch.distributed").setLevel(logging.WARNING)
 
     # Create pipeline
     pipeline = MasterPipeline(config)

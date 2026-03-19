@@ -187,6 +187,10 @@ class PipelineState:
         # Collect all fields that determine what work needs to happen
         hash_fields = {}
 
+        # Input/output paths — changing input means different source files to organise
+        if hasattr(config, 'input_dir'):
+            hash_fields['input_dir'] = str(config.input_dir)
+
         # Skip flags
         for attr in dir(config):
             if attr.startswith('skip_'):
