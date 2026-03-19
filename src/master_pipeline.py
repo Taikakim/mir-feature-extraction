@@ -1574,12 +1574,9 @@ class MasterPipeline:
                                 if result:
                                     logger.debug(f"  {folder.name}: Found via fingerprinting")
                 except Exception as _e:
-                    _http_status = getattr(_e, 'http_status', None)
-                    if _http_status in (429, 403):
-                        _reason = ("rate limit (429)" if _http_status == 429
-                                   else "premium subscription required (403)")
+                    if getattr(_e, 'http_status', None) == 429:
                         logger.warning(
-                            f"Spotify {_reason} — disabling Spotify for this session. "
+                            "Spotify rate limit hit — disabling Spotify for this session. "
                             "Affected tracks will be retried next run."
                         )
                         sp = None
