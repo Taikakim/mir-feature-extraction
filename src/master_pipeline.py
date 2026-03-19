@@ -1447,6 +1447,16 @@ class MasterPipeline:
                 best_track = track_name or id3_title
                 source = 'unknown'
 
+            # Skip if we already have a rich enough metadata set — no point
+            # querying any external service when the important fields are present.
+            _has_year   = existing_info.get('release_year') or existing_info.get('track_metadata_year')
+            _has_artist = existing_info.get('artists')      or existing_info.get('track_metadata_artist')
+            _has_label  = existing_info.get('label')
+            _has_genre  = existing_info.get('genres')       or existing_info.get('track_metadata_genre')
+            if _has_year and _has_artist and _has_label and _has_genre:
+                if not self.config.should_overwrite('metadata'):
+                    continue
+
             # Skip only when every currently-enabled source is satisfied.
             # Per-source checks prevent permanently skipping tracks that were only
             # partially resolved (e.g. Spotify rate-limited but MB succeeded).
@@ -1564,9 +1574,12 @@ class MasterPipeline:
                                 if result:
                                     logger.debug(f"  {folder.name}: Found via fingerprinting")
                 except Exception as _e:
-                    if getattr(_e, 'http_status', None) == 429:
+                    _http_status = getattr(_e, 'http_status', None)
+                    if _http_status in (429, 403):
+                        _reason = ("rate limit (429)" if _http_status == 429
+                                   else "premium subscription required (403)")
                         logger.warning(
-                            "Spotify rate limit hit — disabling Spotify for this session. "
+                            f"Spotify {_reason} — disabling Spotify for this session. "
                             "Affected tracks will be retried next run."
                         )
                         sp = None
