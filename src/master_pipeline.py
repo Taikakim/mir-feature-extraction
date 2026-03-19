@@ -1336,8 +1336,17 @@ class MasterPipeline:
         num_workers = self.config.rhythm_workers
         args_list = [(folder, overwrite) for folder in folders]
 
+        # Choose label: if every folder already has both files, make it clear
+        # we're just verifying existing data rather than actively analysing.
+        needs_work = sum(
+            1 for f in folders
+            if not (f / f"{f.name}.BEATS_GRID").exists()
+            or not (f / f"{f.name}.ONSETS").exists()
+        ) if not overwrite else len(folders)
+        desc = "Rhythm" if needs_work else "Rhythm (existing)"
+
         success = skipped = failed = 0
-        progress = ProgressBar(len(folders), desc="Rhythm")
+        progress = ProgressBar(len(folders), desc=desc)
         _rhythm_start = time.time()
 
         if num_workers <= 1:
