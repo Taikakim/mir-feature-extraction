@@ -23,6 +23,8 @@ def compute_pearson_spearman(X: np.ndarray, y: np.ndarray):
             pass
     r_p = np.nan_to_num(r_p)
     r_s = np.nan_to_num(r_s)
+    p_p = np.nan_to_num(p_p, nan=1.0)
+    p_s = np.nan_to_num(p_s, nan=1.0)
     return r_p, p_p, r_s, p_s
 
 
@@ -32,7 +34,7 @@ def apply_bh_fdr(pvals: np.ndarray) -> np.ndarray:
     pvals shape: [n_dims, n_features]. Returns adjusted p-values, same shape.
     """
     flat = pvals.ravel()
-    adj_flat = false_discovery_control(np.clip(flat, 0, 1), method='bh')
+    adj_flat = false_discovery_control(np.clip(np.nan_to_num(flat, nan=1.0), 0, 1), method='bh')
     return adj_flat.reshape(pvals.shape)
 
 
