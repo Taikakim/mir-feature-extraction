@@ -66,6 +66,9 @@ def run(force: bool = False):
         try:
             lat = np.load(str(npy_path)).astype(np.float32)
             assert lat.shape == (LATENT_DIM, LATENT_FRAMES)
+            if not np.all(np.isfinite(lat)):
+                skipped += 1
+                continue
 
             audio, sr = sf.read(str(audio_path), always_2d=True)
             audio = audio.mean(axis=1).astype(np.float32)  # mono

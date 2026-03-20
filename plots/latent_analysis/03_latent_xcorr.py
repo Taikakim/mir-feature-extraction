@@ -45,6 +45,9 @@ def run(force: bool = False, n_crops: int = N_TEMPORAL_CROPS):
         try:
             lat = np.load(str(p)).astype(np.float32)  # [64, 256]
             assert lat.shape == (LATENT_DIM, LATENT_FRAMES)
+            if not np.all(np.isfinite(lat)):
+                skipped += 1
+                continue
             # Demean each dim
             lat = lat - lat.mean(axis=1, keepdims=True)
             # 64×64 Pearson correlation across 256 time steps
