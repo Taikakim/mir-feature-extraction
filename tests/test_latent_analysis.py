@@ -77,3 +77,39 @@ def test_drop_low_variance():
     assert "zeros" not in names_out
     assert "flat" not in names_out
     assert set(dropped) == {"zeros", "flat"}
+
+
+from plots.latent_analysis.findings import overwrite_findings_section
+
+
+def test_findings_section_overwrite_replaces_content():
+    content = (
+        "# Header\n\n"
+        "<!-- script-01-start -->\n"
+        "## Old section\nOld content\n"
+        "<!-- script-01-end -->\n\n"
+        "## Footer stays\n"
+    )
+    result = overwrite_findings_section(content, "01", "## New section\nNew content\n")
+    assert "Old content" not in result
+    assert "New content" in result
+    assert "## Footer stays" in result
+    assert "<!-- script-01-start -->" in result
+    assert "<!-- script-01-end -->" in result
+
+
+def test_findings_section_overwrite_idempotent():
+    """Running overwrite twice gives same result."""
+    content = (
+        "<!-- script-02-start -->\nOriginal\n<!-- script-02-end -->\n"
+    )
+    once  = overwrite_findings_section(content, "02", "Updated\n")
+    twice = overwrite_findings_section(once,    "02", "Updated\n")
+    assert once == twice
+
+
+def test_findings_section_overwrite_missing_markers():
+    """If markers are absent, raises ValueError rather than silently corrupting."""
+    content = "# No markers here\n"
+    with pytest.raises(ValueError, match="markers not found"):
+        overwrite_findings_section(content, "01", "New content\n")
