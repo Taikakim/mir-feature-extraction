@@ -22,23 +22,9 @@ from plots.latent_analysis.config import (
 )
 from plots.latent_analysis._corr_utils import fisher_z_average
 from plots.latent_analysis.findings import update_findings_section, update_progress
+from plots.latent_analysis._03_collect import collect_latent_paths
 
 OUT_NPZ = DATA_DIR / "03_xcorr.npz"
-STEM_SUFFIXES = {"_bass", "_drums", "_other", "_vocals"}
-
-
-def _collect_latent_paths(n_crops: int, seed: int):
-    """Collect up to n_crops full-mix latent paths, randomly sampled."""
-    rng  = np.random.default_rng(seed)
-    all_paths = []
-    for track_dir in LATENT_DIR.iterdir():
-        if not track_dir.is_dir():
-            continue
-        for p in track_dir.glob("*.npy"):
-            if not any(p.stem.endswith(s) for s in STEM_SUFFIXES):
-                all_paths.append(p)
-    rng.shuffle(all_paths)
-    return all_paths[:n_crops]
 
 
 def run(force: bool = False, n_crops: int = N_TEMPORAL_CROPS):
@@ -50,7 +36,7 @@ def run(force: bool = False, n_crops: int = N_TEMPORAL_CROPS):
         raise RuntimeError(f"Latent dir not mounted: {LATENT_DIR}")
 
     print(f"Script 03: collecting {n_crops} latent paths...")
-    paths = _collect_latent_paths(n_crops, RANDOM_SEED)
+    paths = collect_latent_paths(n_crops, RANDOM_SEED)
     print(f"  found {len(paths)} crops")
 
     xcorr_stack = []

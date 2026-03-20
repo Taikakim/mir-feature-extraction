@@ -169,3 +169,19 @@ def test_fisher_z_handles_diagonal_ones():
     matrices = np.eye(4)[np.newaxis].repeat(5, axis=0)
     result = fisher_z_average(matrices)
     assert np.all(np.isfinite(result))
+
+
+from plots.latent_analysis._temporal_features import compute_frame_features
+
+
+def test_stft_produces_exactly_256_frames():
+    """n_fft=4096, hop=2048, center=True → 257 frames sliced to 256."""
+    audio = np.random.randn(256 * 2048).astype(np.float32)
+    feats = compute_frame_features(audio, sr=44100)
+    assert feats.shape[1] == 256, f"Expected 256 frames, got {feats.shape[1]}"
+
+
+def test_frame_features_no_nan():
+    audio = np.random.randn(256 * 2048).astype(np.float32)
+    feats = compute_frame_features(audio, sr=44100)
+    assert np.all(np.isfinite(feats)), "NaN/Inf in temporal features"
