@@ -136,3 +136,36 @@ def test_bh_fdr_output_shape():
     assert adj.shape == pvals.shape
     # Adjusted p-values must be >= originals (BH never makes them smaller)
     assert np.all(adj >= pvals - 1e-10)
+
+
+from plots.latent_analysis._corr_utils import fisher_z_average
+
+
+def test_fisher_z_average_preserves_sign():
+    matrices = np.array([
+        [[0.8, -0.3], [-0.3, 0.8]],
+        [[0.7, -0.2], [-0.2, 0.7]],
+    ])
+    result = fisher_z_average(matrices)
+    assert result[0, 0] > 0
+    assert result[0, 1] < 0
+
+
+def test_fisher_z_average_symmetric():
+    """Output should be symmetric if all input matrices are symmetric."""
+    # Create symmetric correlation matrices
+    matrices = []
+    for _ in range(10):
+        A = np.random.uniform(-0.5, 0.5, (8, 8))
+        sym = (A + A.T) / 2  # Force symmetry
+        matrices.append(sym)
+    matrices = np.array(matrices)
+    result = fisher_z_average(matrices)
+    np.testing.assert_allclose(result, result.T, atol=1e-6)
+
+
+def test_fisher_z_handles_diagonal_ones():
+    """Diagonal r=1 should not produce inf after ε clamping."""
+    matrices = np.eye(4)[np.newaxis].repeat(5, axis=0)
+    result = fisher_z_average(matrices)
+    assert np.all(np.isfinite(result))

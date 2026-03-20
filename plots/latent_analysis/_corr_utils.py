@@ -34,3 +34,15 @@ def apply_bh_fdr(pvals: np.ndarray) -> np.ndarray:
     flat = pvals.ravel()
     adj_flat = false_discovery_control(np.clip(flat, 0, 1), method='bh')
     return adj_flat.reshape(pvals.shape)
+
+
+def fisher_z_average(matrices: np.ndarray) -> np.ndarray:
+    """
+    Average a stack of Pearson correlation matrices using Fisher Z-transform.
+    matrices: shape [N, D, D].
+    Returns averaged matrix: shape [D, D].
+    """
+    eps = 1e-7
+    clipped = np.clip(matrices, -1 + eps, 1 - eps)
+    z_stack = np.arctanh(clipped)
+    return np.tanh(z_stack.mean(axis=0))
