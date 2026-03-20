@@ -102,3 +102,9 @@ Thumbs.db
 .Spotlight-V100
 .Trashes
 .env
+
+plots/latent_analysis/data/*
+!plots/latent_analysis/data/.gitkeep
+!plots/latent_analysis/data/posters/
+plots/latent_analysis/data/posters/*
+!plots/latent_analysis/data/posters/.gitkeep
