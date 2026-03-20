@@ -113,3 +113,26 @@ def test_findings_section_overwrite_missing_markers():
     content = "# No markers here\n"
     with pytest.raises(ValueError, match="markers not found"):
         overwrite_findings_section(content, "01", "New content\n")
+
+
+from plots.latent_analysis._corr_utils import (
+    compute_pearson_spearman,
+    apply_bh_fdr,
+)
+
+
+def test_pearson_spearman_shapes():
+    """Returns r and p arrays of length N_dims."""
+    X = np.random.randn(200, 64)   # 200 crops, 64 dims
+    y = np.random.randn(200)
+    r_p, p_p, r_s, p_s = compute_pearson_spearman(X, y)
+    assert r_p.shape == (64,)
+    assert r_s.shape == (64,)
+
+
+def test_bh_fdr_output_shape():
+    pvals = np.random.uniform(0, 1, (64, 20))  # 64 dims × 20 features
+    adj = apply_bh_fdr(pvals)
+    assert adj.shape == pvals.shape
+    # Adjusted p-values must be >= originals (BH never makes them smaller)
+    assert np.all(adj >= pvals - 1e-10)
