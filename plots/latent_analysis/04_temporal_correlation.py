@@ -75,9 +75,13 @@ def run(force: bool = False):
             if sr != SAMPLE_RATE:
                 import librosa
                 audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
-            if len(audio) < EXPECTED_AUDIO_LEN:
+            if len(audio) < int(0.8 * EXPECTED_AUDIO_LEN):
                 skipped += 1
                 continue
+            if len(audio) < EXPECTED_AUDIO_LEN:
+                # Pad short crops with zeros (crop boundary rounding)
+                pad = np.zeros(EXPECTED_AUDIO_LEN - len(audio), dtype=np.float32)
+                audio = np.concatenate([audio, pad])
             audio = audio[:EXPECTED_AUDIO_LEN]
 
             feats = compute_frame_features(audio, sr=SAMPLE_RATE)  # [N_tfeats, 256]
