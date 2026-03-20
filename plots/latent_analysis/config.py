@@ -22,6 +22,11 @@ N_FFT         = 4096          # 50% overlap with Hann window (2× hop)
 N_TEMPORAL_CROPS = 2000
 RANDOM_SEED      = 42
 
+# --- Quality filter ---
+# Drop crops where valid (non-padded) frames < 75% of LATENT_FRAMES.
+# Checked via padding_mask in the companion .json file.
+MIN_VALID_FRACTION = 0.75
+
 # --- Statistics ---
 EFFECT_WEAK     = 0.10
 EFFECT_MODERATE = 0.20

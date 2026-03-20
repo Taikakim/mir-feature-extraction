@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from plots.latent_analysis.config import (
     DATA_DIR, LATENT_DIR, INFO_DIR, LATENT_DIM, LATENT_FRAMES,
     SAMPLE_RATE, HOP_LENGTH, N_TEMPORAL_CROPS, RANDOM_SEED,
-    TEMPORAL_FEATURE_NAMES,
+    TEMPORAL_FEATURE_NAMES, MIN_VALID_FRACTION,
 )
 from plots.latent_analysis._temporal_features import compute_frame_features
 from plots.latent_analysis._corr_utils import compute_pearson_spearman
@@ -30,11 +30,11 @@ EXPECTED_AUDIO_LEN = LATENT_FRAMES * HOP_LENGTH  # 524288 samples
 
 
 def _find_audio(npy_path: Path) -> Path:
-    """Find the raw audio crop (.flac/.wav) matching a latent NPY path."""
+    """Find the raw audio crop matching a latent NPY path."""
     track_name = npy_path.parent.name
     stem       = npy_path.stem
     audio_dir  = INFO_DIR / track_name
-    for ext in [".flac", ".wav", ".mp3"]:
+    for ext in [".flac", ".wav", ".mp3", ".ogg", ".m4a", ".aiff"]:
         candidate = audio_dir / (stem + ext)
         if candidate.exists():
             return candidate
@@ -75,7 +75,7 @@ def run(force: bool = False):
             if sr != SAMPLE_RATE:
                 import librosa
                 audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
-            if len(audio) < int(0.8 * EXPECTED_AUDIO_LEN):
+            if len(audio) < int(MIN_VALID_FRACTION * EXPECTED_AUDIO_LEN):
                 skipped += 1
                 continue
             if len(audio) < EXPECTED_AUDIO_LEN:
