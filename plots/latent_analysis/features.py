@@ -156,6 +156,8 @@ def iter_paired_crops(feature_names: list):
                 latent = np.load(str(npy_path))
                 assert latent.shape == (LATENT_DIM, LATENT_FRAMES), \
                     f"Unexpected shape {latent.shape}"
+                if not np.all(np.isfinite(latent)):
+                    continue
                 latent_mean = latent.mean(axis=1)   # [64]
 
                 info = encode_info_features(load_info(info_path))
