@@ -493,8 +493,48 @@ def beatmatch_crossfade_to_wav(
                   f"({len(db_a)} / {len(db_b)} downbeats)")
             stretch_a, stretch_b = ref_a, ref_b
 
+    phase_offset_s = 0.0
+    shared_loop = None
+    if db_a and db_b:
+        t_a = db_a[0] * stretch_a
+        t_b = db_b[0] * stretch_b
+        
+        iv_a = (db_a[-1] - db_a[0]) / (len(db_a) - 1)
+        iv_b = (db_b[-1] - db_b[0]) / (len(db_b) - 1)
+        tgt_iv = math.sqrt(iv_a * iv_b)
+        
+        offset = (t_a - t_b) % tgt_iv
+        if offset > tgt_iv / 2:
+            offset -= tgt_iv
+            
+        phase_offset_s = offset
+        print(f"  phase alignment: shifting B by {phase_offset_s*1000:.1f}ms")
+
+        # Determine maximum valid loop length locked onto the exact downbeat grid
+        grid_start_a = t_a
+        grid_start_b = t_b + phase_offset_s
+        start_s = max(grid_start_a, grid_start_b)
+        
+        last_a = db_a[-1] * stretch_a
+        last_b = db_b[-1] * stretch_b + phase_offset_s
+        
+        k_a = math.floor((last_a - grid_start_a) / tgt_iv)
+        last_grid_a = grid_start_a + k_a * tgt_iv
+        
+        k_b = math.floor((last_b - grid_start_b) / tgt_iv)
+        last_grid_b = grid_start_b + k_b * tgt_iv
+        
+        end_s = min(last_grid_a, last_grid_b)
+        n_bars = math.floor((end_s - start_s) / tgt_iv)
+        
+        if n_bars > 0:
+            shared_loop = {"start_s": start_s, "tgt_iv": tgt_iv, "n_bars": n_bars}
+
     missing_latents: list = []
     missing_audio:   list = []
+
+    stems_a_raw = {}
+    stems_b_raw = {}
 
     for stem in STEMS:
         crops_a = find_stem_crops(dir_a, stem)
@@ -515,6 +555,19 @@ def beatmatch_crossfade_to_wav(
               f"B {shift_b:+.1f}st ×{stretch_b:.3f}")
         raw_a = _apply_pitch_stretch(raw_a, _sample_rate, shift_a, stretch_a, algo)
         raw_b = _apply_pitch_stretch(raw_b, _sample_rate, shift_b, stretch_b, algo)
+
+        if abs(phase_offset_s) > 1e-4:
+            shift_samples = int(round(phase_offset_s * _sample_rate))
+            if shift_samples > 0:
+                padding = np.zeros((raw_b.shape[0], shift_samples), dtype=raw_b.dtype)
+                raw_b = np.concatenate([padding, raw_b], axis=1)[:, :-shift_samples]
+            elif shift_samples < 0:
+                shift_abs = abs(shift_samples)
+                padding = np.zeros((raw_b.shape[0], shift_abs), dtype=raw_b.dtype)
+                raw_b = np.concatenate([raw_b[:, shift_abs:], padding], axis=1)
+
+        stems_a_raw[stem] = raw_a
+        stems_b_raw[stem] = raw_b
 
         stems_a[stem] = _encode_audio(raw_a)   # [1, C, T_a]
         stems_b[stem] = _encode_audio(raw_b)   # [1, C, T_b]
@@ -554,18 +607,93 @@ def beatmatch_crossfade_to_wav(
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
     if smart_loop:
-        bpm_a = _read_bpm(npy_fm_a)
-        bpm_b = _read_bpm(npy_fm_b)
-        loop_end = audio_np.shape[1]
-        for bpm in [bpm_a, bpm_b]:
-            if bpm:
-                try:
-                    _, end = _smart_loop_points(audio_np, _sample_rate, bpm)
-                    loop_end = min(loop_end, end)
-                except Exception as e:
-                    print(f"  smart_loop error (beatmatch, bpm={bpm}): {e}")
-        if loop_end < audio_np.shape[1]:
-            audio_np = audio_np[:, :loop_end]
+        if shared_loop is not None:
+            start_s = shared_loop["start_s"]
+            tgt_iv = shared_loop["tgt_iv"]
+            
+            # Recalculate max available bars relative to rendered audio length
+            max_audio_s = audio_np.shape[1] / _sample_rate
+            max_bars = math.floor((max_audio_s - start_s) / tgt_iv)
+            n_bars = min(shared_loop["n_bars"], max_bars)
+            
+            # Snap to musical phrasing lengths
+            if n_bars >= 4:
+                n_bars = (n_bars // 4) * 4
+            elif n_bars >= 2:
+                n_bars = (n_bars // 2) * 2
+                
+            if n_bars > 0:
+                end_s = start_s + n_bars * tgt_iv
+                print(f"  smart loop (beatmatch): {n_bars} shared downbeats (bars) [{start_s:.2f}s - {end_s:.2f}s] at {60/tgt_iv:.1f} BPM")
+                
+                start_sample = int(round(start_s * _sample_rate))
+                end_sample = int(round(end_s * _sample_rate))
+                
+                # Zero-crossing optimization
+                mono = (audio_np[0] + audio_np[1]) / 2.0
+                window = int(_sample_rate * 0.05)
+                start_sample = _nearest_zero_crossing(mono, start_sample, window)
+                end_sample = _nearest_zero_crossing(mono, min(end_sample, audio_np.shape[1] - 1), window)
+                
+                if end_sample > start_sample:
+                    audio_np = audio_np[:, start_sample:end_sample]
+        else:
+            bpm_a = _read_bpm(npy_fm_a)
+            bpm_b = _read_bpm(npy_fm_b)
+            loop_end = audio_np.shape[1]
+            for bpm in [bpm_a, bpm_b]:
+                if bpm:
+                    try:
+                        _, end = _smart_loop_points(audio_np, _sample_rate, bpm)
+                        loop_end = min(loop_end, end)
+                    except Exception as e:
+                        print(f"  smart_loop error (beatmatch, bpm={bpm}): {e}")
+            if loop_end < audio_np.shape[1]:
+                audio_np = audio_np[:, :loop_end]
+
+    meta = None
+    if stems_a_raw and stems_b_raw:
+        sum_a = sum(stems_a_raw.values())
+        sum_b = sum(stems_b_raw.values())
+        
+        if smart_loop and 'start_sample' in locals() and 'end_sample' in locals():
+            if end_sample > start_sample:
+                sum_a = sum_a[:, start_sample:end_sample]
+                sum_b = sum_b[:, start_sample:end_sample]
+        else:
+            if 'loop_end' in locals() and loop_end < audio_np.shape[1]:
+                sum_a = sum_a[:, :loop_end]
+                sum_b = sum_b[:, :loop_end]
+            else:
+                T = min(sum_a.shape[1], sum_b.shape[1], audio_np.shape[1])
+                sum_a = sum_a[:, :T]
+                sum_b = sum_b[:, :T]
+                
+        CHUNK = 1024
+        def build_env(arr):
+            if arr.size == 0: return []
+            mono = (arr[0] + arr[1]) / 2.0
+            r = len(mono) % CHUNK
+            if r: mono = np.pad(mono, (0, CHUNK-r))
+            return np.round(np.abs(mono.reshape(-1, CHUNK)).max(axis=1), 3).tolist()
+            
+        env_a = build_env(sum_a)
+        env_b = build_env(sum_b)
+        
+        db_list = []
+        if smart_loop and shared_loop is not None:
+            n_bars = shared_loop["n_bars"]
+            tgt_iv = shared_loop["tgt_iv"]
+            for i in range(n_bars + 1):
+                db_list.append(round(i * tgt_iv, 3))
+                
+        meta = {
+            "env_a": env_a,
+            "env_b": env_b,
+            "downbeats": db_list,
+            "env_chunk": CHUNK,
+            "sr": _sample_rate
+        }
 
     audio_np  = np.clip(audio_np, -1.0, 1.0)
     audio_i16 = (audio_np * 32767).astype(np.int16)
@@ -575,7 +703,7 @@ def beatmatch_crossfade_to_wav(
         wf.setsampwidth(2)
         wf.setframerate(_sample_rate)
         wf.writeframes(audio_i16.T.flatten().tobytes())
-    return buf.getvalue(), list(stems_a.keys())
+    return buf.getvalue(), list(stems_a.keys()), meta
 
 
 # ---------------------------------------------------------------------------
@@ -1033,6 +1161,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin",  "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Expose-Headers", "X-Crossfade-Meta, X-Crop-Count, X-Crop-Index, X-Crop-Position, X-Audio-Source, X-Stems-Found")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -1246,12 +1375,17 @@ class Handler(BaseHTTPRequestHandler):
                 source_label = "vae-latent"
             elif beatmatch:
                 with _decode_lock:
-                    wav_bytes, stems_found = beatmatch_crossfade_to_wav(
+                    ret = beatmatch_crossfade_to_wav(
                         track_a, track_b, pos_a, pos_b,
                         alphas, beta_a, beta_b,
                         shift_a, stretch_a, shift_b, stretch_b,
                         interp=interp, smart_loop=smart_loop, algo=bm_algo,
                     )
+                    if len(ret) == 3:
+                        wav_bytes, stems_found, meta = ret
+                    else:
+                        wav_bytes, stems_found = ret
+                        meta = None
                 source_label = "beatmatch"
             elif raw:
                 wav_bytes, stems_found = crossfade_raw_to_wav(
@@ -1274,7 +1408,10 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.send_header("Content-Type",   "audio/wav")
         self.send_header("Content-Length", str(len(wav_bytes)))
-        self.send_header("X-Stems-Found",  ",".join(stems_found))
+        if stems_found:
+            self.send_header("X-Stems-Found",  ",".join(stems_found))
+        if 'meta' in locals() and meta:
+            self.send_header("X-Crossfade-Meta", json.dumps(meta))
         self.send_header("X-Audio-Source", source_label)
         self.end_headers()
         self.wfile.write(wav_bytes)

@@ -140,6 +140,10 @@ class MasterPipelineConfig:
     skip_chroma: bool = False
     skip_hpcp_tiv: bool = False
     skip_timbral: bool = False
+    skip_timeseries: bool = True
+    timeseries_n_steps: int = 256
+    timeseries_timbral: bool = False
+    timeseries_timbral_steps: int = 16
     skip_syncopation: bool = False
     skip_complexity: bool = False
     skip_essentia: bool = False
@@ -303,6 +307,10 @@ class MasterPipelineConfig:
             skip_chroma=not features.get('chroma', True),
             skip_hpcp_tiv=not features.get('hpcp_tiv', True),
             skip_timbral=not features.get('timbral', True),
+            skip_timeseries=not features.get('timeseries', {}).get('enabled', False),
+            timeseries_n_steps=int(features.get('timeseries', {}).get('n_steps', 256)),
+            timeseries_timbral=features.get('timeseries', {}).get('timbral', False),
+            timeseries_timbral_steps=int(features.get('timeseries', {}).get('timbral_steps', 16)),
             skip_syncopation=not features.get('syncopation', True),
             skip_complexity=not features.get('complexity', True),
             skip_essentia=not features.get('essentia', True),
@@ -2363,6 +2371,10 @@ class MasterPipeline:
                 skip_harmonic=self.config.skip_chroma,
                 skip_hpcp_tiv=self.config.skip_hpcp_tiv,
                 skip_timbral=self.config.skip_timbral,
+                skip_timeseries=self.config.skip_timeseries,
+                timeseries_n_steps=self.config.timeseries_n_steps,
+                timeseries_timbral=self.config.timeseries_timbral,
+                timeseries_timbral_steps=self.config.timeseries_timbral_steps,
                 skip_per_stem=self.config.skip_per_stem,
                 skip_flamingo=self.config.skip_flamingo,
                 skip_audiobox=self.config.skip_audiobox,

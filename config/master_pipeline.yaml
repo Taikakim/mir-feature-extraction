@@ -142,6 +142,18 @@ features:
   per_stem_harmonic: true
   per_stem: true
 
+  # Time-series features: per-step arrays at configurable resolution.
+  # Keys written: rms_energy_{bass,body,mid,air}_ts, spectral_{flatness,flux,skewness,kurtosis}_ts,
+  #               beat_activations_ts, downbeat_activations_ts, onsets_activations_ts,
+  #               hpcp_ts (n_steps×12), tonic_ts, tonic_strength_ts.
+  # timbral: also extract brightness/roughness/hardness/depth/reverb at timbral_steps resolution
+  #          (each chunk = crop_length / timbral_steps; must be ≥ ~300 ms to be meaningful).
+  timeseries:
+    enabled: true
+    n_steps: 256            # Must match SAO latent length (sample_size / downsampling_ratio)
+    timbral: false          # Slow — benchmark first with benchmark_timeseries.py --include-timbral
+    timbral_steps: 16       # Lower res for timbral (~750 ms/chunk at 256 steps / 44.1 kHz)
+
   # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
   # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
   # Set true only for acoustic music where per-segment tempo variation is meaningful.
@@ -180,6 +192,7 @@ overwrite:
   audiobox: false                # Overwrite existing AudioBox aesthetics
   per_stem_rhythm: false         # Overwrite existing per-stem rhythm features
   per_stem_harmonic: false       # Overwrite existing per-stem harmonic features
+  timeseries: false              # Overwrite existing time-series features
   music_flamingo: false          # Overwrite existing AI descriptions
   metadata: false                # Overwrite existing metadata lookups
 

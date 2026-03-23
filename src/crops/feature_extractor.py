@@ -46,6 +46,10 @@ class CropFeatureExtractor:
         skip_audiobox: bool = False,
         skip_essentia: bool = False,
         skip_timbral: bool = False,
+        skip_timeseries: bool = True,
+        timeseries_n_steps: int = 256,
+        timeseries_timbral: bool = False,
+        timeseries_timbral_steps: int = 16,
         flamingo_model: str = 'Q6_K',
         flamingo_context_size: int = 1024,
         device: str = 'cuda',
@@ -82,6 +86,10 @@ class CropFeatureExtractor:
         self.skip_audiobox = skip_audiobox
         self.skip_essentia = skip_essentia
         self.skip_timbral = skip_timbral
+        self.skip_timeseries = skip_timeseries
+        self.timeseries_n_steps = timeseries_n_steps
+        self.timeseries_timbral = timeseries_timbral
+        self.timeseries_timbral_steps = timeseries_timbral_steps
         self.flamingo_model = flamingo_model
         self.flamingo_context_size = flamingo_context_size
         self.device = device
@@ -216,7 +224,12 @@ class CropFeatureExtractor:
         if not self.skip_essentia:
             self._extract_essentia(crop_path, results, timings, existing, overwrite)
 
-        # 9. Music Flamingo (descriptions)
+        # 9. Time-series features
+        if not self.skip_timeseries:
+            self._extract_timeseries(crop_path, results, timings, existing, overwrite,
+                                     crop_mono=crop_mono, crop_sr=sample_rate)
+
+        # 10. Music Flamingo (descriptions)
         if not self.skip_flamingo:
             self._extract_flamingo(crop_path, results, timings, existing, overwrite)
 
@@ -423,6 +436,41 @@ class CropFeatureExtractor:
             logger.info(f"  HPCP/TIV: {timings['hpcp_tiv']:.2f}s")
         except Exception as e:
             logger.warning(f"  HPCP/TIV failed: {e}")
+
+    def _extract_timeseries(self, crop_path: Path, results: Dict, timings: Dict,
+                            existing: Dict, overwrite: bool,
+                            crop_mono=None, crop_sr=None):
+        """Extract time-series features at self.timeseries_n_steps resolution."""
+        if not self._should_extract('rms_energy_bass_ts', existing, overwrite):
+            logger.debug("  Skipping time-series (already exists)")
+            return
+
+        try:
+            start = time.time()
+            import numpy as np
+            from spectral.timeseries_features import extract_timeseries
+
+            audio = crop_mono
+            if audio is None:
+                import soundfile as sf_
+                audio_raw, sr_ = sf_.read(str(crop_path))
+                audio = audio_raw.mean(axis=1) if audio_raw.ndim > 1 else audio_raw
+                crop_sr = sr_
+
+            ts_results = extract_timeseries(
+                audio.astype(np.float32),
+                crop_sr,
+                n_steps=self.timeseries_n_steps,
+                extract_hpcp=True,
+                extract_timbral=self.timeseries_timbral,
+                timbral_n_steps=self.timeseries_timbral_steps,
+            )
+            results.update(ts_results)
+            timings['timeseries'] = time.time() - start
+            logger.info(f"  Time-series ({self.timeseries_n_steps} steps): "
+                        f"{timings['timeseries']:.2f}s, {len(ts_results)} arrays")
+        except Exception as e:
+            logger.warning(f"  Time-series failed: {e}")
 
     def _extract_timbral(self, crop_path: Path, results: Dict, timings: Dict,
                          existing: Dict, overwrite: bool,
