@@ -77,6 +77,10 @@ class PipelineConfig:
     skip_hpcp_tiv: bool = False  # HPCP + TIV + tonic (independent of skip_harmonic)
     skip_timbral: bool = False
     skip_classification: bool = False
+    skip_timeseries: bool = True
+    timeseries_n_steps: int = 256
+    timeseries_timbral: bool = False
+    timeseries_timbral_steps: int = 16
     skip_per_stem: bool = False
     skip_flamingo: bool = False
     skip_audiobox: bool = False
@@ -210,6 +214,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     CHROMA_KEYS = [f'chroma_{i}' for i in range(12)]
     TIMBRAL_KEYS = ['brightness', 'roughness', 'hardness', 'depth',
                    'booming', 'reverberation', 'sharpness', 'warmth']
+    TIMESERIES_SENTINEL = 'rms_energy_bass_ts'  # first key written by extract_timeseries
 
     _ow_aliases = {'harmonic': 'chroma', 'rhythm': 'bpm', 'flamingo': 'music_flamingo'}
 
@@ -422,6 +427,39 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     generated.append(f'timbral({_op})')
                 except Exception as e:
                     logger.warning(f"Timbral failed for {crop_path.name}: {type(e).__name__}: {e}")
+
+        # Time-series features (per-step arrays at configurable resolution)
+        if not config_dict.get('skip_timeseries', True):
+            if _needs_processing([TIMESERIES_SENTINEL], 'timeseries'):
+                _op = 'overwrite' if TIMESERIES_SENTINEL in existing_keys else 'new'
+                try:
+                    import numpy as np
+                    n_steps = config_dict.get('timeseries_n_steps', 256)
+                    ts_timbral = config_dict.get('timeseries_timbral', False)
+                    ts_timbral_steps = config_dict.get('timeseries_timbral_steps', 16)
+                    if crop_mono is not None:
+                        from spectral.timeseries_features import extract_timeseries
+                        ts_results = extract_timeseries(
+                            crop_mono.astype(np.float32),
+                            crop_sr,
+                            n_steps=n_steps,
+                            extract_hpcp=True,
+                            extract_timbral=ts_timbral,
+                            timbral_n_steps=ts_timbral_steps,
+                        )
+                    else:
+                        from spectral.timeseries_features import extract_timeseries_from_file
+                        ts_results = extract_timeseries_from_file(
+                            crop_path,
+                            n_steps=n_steps,
+                            extract_hpcp=True,
+                            extract_timbral=ts_timbral,
+                            timbral_n_steps=ts_timbral_steps,
+                        )
+                    results.update(ts_results)
+                    generated.append(f'timeseries({_op})')
+                except Exception as e:
+                    logger.warning(f"Time-series failed for {crop_path.name}: {type(e).__name__}: {e}")
 
         return {'path': crop_path, 'results': results, 'success': True,
                 'generated': generated}
@@ -1090,6 +1128,10 @@ class Pipeline:
                 'skip_harmonic': self.config.skip_harmonic,
                 'skip_hpcp_tiv': self.config.skip_hpcp_tiv,
                 'skip_timbral': self.config.skip_timbral,
+                'skip_timeseries': self.config.skip_timeseries,
+                'timeseries_n_steps': self.config.timeseries_n_steps,
+                'timeseries_timbral': self.config.timeseries_timbral,
+                'timeseries_timbral_steps': self.config.timeseries_timbral_steps,
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
             }
@@ -1109,6 +1151,7 @@ class Pipeline:
                 'Chroma':     [f'chroma_{i}' for i in range(12)],
                 'Timbral':    ['brightness', 'roughness', 'hardness', 'depth',
                                'booming', 'reverberation', 'sharpness', 'warmth'],
+                'Timeseries': ['rms_energy_bass_ts'],
                 'Essentia':   ['danceability'],
                 'AudioBox':   ['content_enjoyment'],
                 'Flamingo':   ['music_flamingo_brief'],
@@ -1209,6 +1252,10 @@ class Pipeline:
                             any(k not in existing_keys
                                 for k in ['brightness', 'roughness', 'hardness', 'depth',
                                           'booming', 'reverberation', 'sharpness', 'warmth'])):
+                        needs_run = True
+                    if not needs_run and not self.config.skip_timeseries and (
+                            _ow('timeseries') or
+                            'rms_energy_bass_ts' not in existing_keys):
                         needs_run = True
 
                 if needs_run:

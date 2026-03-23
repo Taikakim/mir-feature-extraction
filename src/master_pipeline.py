@@ -2162,10 +2162,22 @@ class MasterPipeline:
         if not crop_folders:
             return
 
-        logger.info(f"[4-pre] Migrating track→crop features ({len(crop_folders)} folders, "
+        n_folders = len(crop_folders)
+        logger.info(f"[4-pre] Migrating track→crop features ({n_folders} folders, "
                     f"{len(keys)} candidate keys)...")
 
-        for crop_folder in crop_folders:
+        import time as _time
+        _log_interval = 30  # seconds between progress updates
+        _last_log = _time.monotonic()
+
+        for folder_idx, crop_folder in enumerate(crop_folders):
+            # Periodic progress update so the user can tell it's still running
+            now = _time.monotonic()
+            if now - _last_log >= _log_interval:
+                logger.info(fmt_dim(f"    [4-pre] migration: {folder_idx}/{n_folders} folders, "
+                                    f"{migrated_crops} crops updated so far..."))
+                _last_log = now
+
             # Derive matching track folder name (crop folder == track folder name)
             track_name = crop_folder.name
             track_info_path = self.working_dir / track_name / f"{track_name}.INFO"
@@ -2190,6 +2202,26 @@ class MasterPipeline:
                     f.with_suffix('.INFO')
                     for f in find_crop_files(crop_folder)
                 ]
+
+            # Fast-skip: if the first existing crop already has all keys (and no force),
+            # skip the remaining crops in this folder — idempotent re-run optimisation.
+            if not force_keys:
+                for probe_path in crop_info_paths:
+                    if probe_path.exists():
+                        try:
+                            probe_data = read_info(probe_path)
+                            if all(k in probe_data for k in to_copy):
+                                break  # folder already fully migrated
+                        except Exception:
+                            pass
+                else:
+                    # No existing crop found or probe raised — fall through to full scan
+                    probe_data = None
+                    probe_path = None
+
+                # If the break was hit (loop ended without exhausting), skip folder
+                if probe_path is not None and all(k in probe_data for k in to_copy):
+                    continue
 
             for crop_info_path in crop_info_paths:
                 if not crop_info_path.exists():
