@@ -226,6 +226,11 @@
   <div class="xfade-section" style="border-right:none; align-items:center;">
     <button id="btn_beatmatch" style="background:#444; color:#eee; border:1px solid #777; padding:4px 8px; border-radius:4px; font-weight:bold; cursor:pointer;" title="Align BPM and Key before crossfading">♫ Beat Match</button>
     <div id="bm_info" style="font-size:10px; color:#aaa; margin-top:5px; text-align:center; min-height:14px;"></div>
+    <label style="font-size:11px;color:#ccc;display:flex;align-items:center;gap:5px;cursor:pointer;">
+      <input type="checkbox" id="chk_smart_loop" style="accent-color:#00d2ff;">
+      Smart loop
+    </label>
+    <span id="smart_loop_hint" style="font-size:10px;color:#888;display:none;"></span>
   </div>
   <div class="xfade-section">
     <button id="btn_xfade_play">✕ Play Crossfade</button>
@@ -397,6 +402,31 @@
   let _tcB = null;  // same for crop B
   let _bmTransformB = null;  // { stretch, phase } or null
 
+  const chkSmartLoop = document.getElementById('chk_smart_loop');
+  const smartLoopHint = document.getElementById('smart_loop_hint');
+
+  const _XFADE_N = 128;
+  const _FADE_IN  = new Float32Array(_XFADE_N).map((_, i) => Math.sqrt(i / (_XFADE_N - 1)));
+  const _FADE_OUT = new Float32Array(_XFADE_N).map((_, i) => Math.sqrt(1 - i / (_XFADE_N - 1)));
+
+  let _loopScheduler = null;
+
+  function computeLoopEnd(buf) {
+    const beats  = _tcA ? _tcA.beats  : null;
+    const beatsB = _tcB ? _tcB.beats : null;
+    if (!beats || !beatsB || beats.length < 4 || beatsB.length < 4) return null;
+    const barsA = Math.floor(beats.length / 4);
+    const barsB = Math.floor(beatsB.length / 4);
+    let loopBars = Math.min(barsA, barsB);
+    loopBars = Math.floor(loopBars / 4) * 4;
+    if (loopBars === 0) return null;
+    const beatIdx = loopBars * 4;
+    if (beatIdx < beats.length) return beats[beatIdx];
+    const bpm = _tcA.bpm;
+    if (!bpm) return null;
+    return (loopBars * 4 / bpm) * 60;
+  }
+
   async function fetchTimecodes(track, crop, slot) {
     if (!track || !crop) return;
     try {
@@ -499,10 +529,11 @@
   // Play / stop crossfade
   btnXfadePlay.addEventListener("click", () => {
     if (xfadeSourceNode) {
-      xfadeSourceNode.stop();
+      try { xfadeSourceNode.stop(); } catch(e) {}
       xfadeSourceNode = null;
-      btnXfadePlay.textContent = "▶ Play Crossfade";
-      xfadeStatus.textContent = "Stopped";
+      if (_loopScheduler) { clearTimeout(_loopScheduler.timer); _loopScheduler = null; }
+      btnXfadePlay.textContent = '▶ Play Crossfade';
+      xfadeStatus.textContent = 'Stopped';
       return;
     }
     if (xfadeBuffer) {
@@ -649,6 +680,7 @@
             url += `&shift_b=${bm.shiftB}&stretch_b=${bm.stretchB.toFixed(4)}`;
         }
     }
+    if (chkSmartLoop.checked) url += '&smart_loop=0';
     return url;
   }
 
@@ -688,23 +720,82 @@
     if (!xfadeBuffer) return;
     const ctx = getXfadeCtx();
     if (xfadeSourceNode) { try { xfadeSourceNode.stop(); } catch(e){} }
-    const src = ctx.createBufferSource();
-    src.buffer = xfadeBuffer;
-    src.connect(ctx.destination);
-    const off = Math.max(0, offset % xfadeBuffer.duration);
-    src.start(0, off);
-    xfadeSourceNode = src;
-    xfadePlayStart = ctx.currentTime - off;
-    btnXfadePlay.textContent = "⏸ Stop Crossfade";
-    animationFrameId = requestAnimationFrame(updateAnimation);
-    src.onended = () => {
-      if (xfadeSourceNode === src) {
-        xfadeSourceNode = null;
-        xfadeBuffer = null;
-        btnXfadePlay.textContent = "✕ Play Crossfade";
-        xfadeStatus.textContent = "Ended";
+    xfadeSourceNode = null;
+
+    if (_loopScheduler) {
+      clearTimeout(_loopScheduler.timer);
+      _loopScheduler = null;
+    }
+
+    const XFADE_DUR = 0.010;
+
+    if (chkSmartLoop.checked) {
+      const loopEnd = computeLoopEnd(xfadeBuffer);
+      if (loopEnd === null || loopEnd <= XFADE_DUR * 2) {
+        chkSmartLoop.checked = false;
+        smartLoopHint.textContent = 'Not enough beat data for loop';
+        smartLoopHint.style.display = 'inline';
+        setTimeout(() => { smartLoopHint.style.display = 'none'; }, 3000);
+        startXfadePlayback(offset);
+        return;
       }
-    };
+      smartLoopHint.style.display = 'none';
+
+      function scheduleLoopCycle(startAt, fromOffset, applyFadeIn) {
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = applyFadeIn ? 0.0 : 1.0;
+        gainNode.connect(ctx.destination);
+
+        const src = ctx.createBufferSource();
+        src.buffer = xfadeBuffer;
+        src.connect(gainNode);
+
+        const off = Math.max(0, fromOffset % loopEnd);
+        src.start(startAt, off);
+
+        if (applyFadeIn) {
+          gainNode.gain.setValueCurveAtTime(_FADE_IN, startAt, XFADE_DUR);
+        }
+
+        const crossfadeAt = startAt + (loopEnd - off) - XFADE_DUR;
+        const fireIn = Math.max(0, (crossfadeAt - ctx.currentTime - 0.050) * 1000);
+
+        const timer = setTimeout(() => {
+          if (!chkSmartLoop.checked) return;
+          gainNode.gain.setValueCurveAtTime(_FADE_OUT, crossfadeAt, XFADE_DUR);
+          scheduleLoopCycle(crossfadeAt, 0, true);
+          src.stop(crossfadeAt + XFADE_DUR * 1.5);
+        }, fireIn);
+
+        xfadeSourceNode = src;
+        xfadePlayStart = startAt;
+        _loopScheduler = { timer, gainNode, src };
+      }
+
+      scheduleLoopCycle(ctx.currentTime, offset % loopEnd, false);
+    } else {
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 1;
+      gainNode.connect(ctx.destination);
+      const src = ctx.createBufferSource();
+      src.buffer = xfadeBuffer;
+      src.connect(gainNode);
+      const off = Math.max(0, offset % xfadeBuffer.duration);
+      src.start(0, off);
+      xfadeSourceNode = src;
+      xfadePlayStart = ctx.currentTime - off;
+      src.onended = () => {
+        if (xfadeSourceNode === src) {
+          xfadeSourceNode = null;
+          xfadeBuffer = null;
+          btnXfadePlay.textContent = '▶ Play Crossfade';
+          xfadeStatus.textContent = 'Ended';
+        }
+      };
+    }
+
+    btnXfadePlay.textContent = '⏸ Stop Crossfade';
+    animationFrameId = requestAnimationFrame(updateAnimation);
   }
 
   // ---- Ghost trace (morphed A↔B trajectory in 3D) ------------------------
