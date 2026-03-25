@@ -67,7 +67,7 @@
 
     /* Crossfade panel */
     #xfade-panel {
-      display: none; /* hidden until toggled */
+      display: flex;
       background: #181818;
       border-top: 1px solid #383838;
       padding: 8px 15px;
@@ -75,7 +75,6 @@
       align-items: center;
       flex-wrap: wrap;
     }
-    #xfade-panel.open { display: flex; }
     .xfade-section {
       display: flex; gap: 8px; align-items: center;
       padding-right: 14px; border-right: 1px solid #383838;
@@ -92,11 +91,18 @@
     }
     .beta-slider span { font-size: 9px; color: #aaa; }
     .beta-slider input[type=range] { width: 60px; accent-color: #cc44ff; }
-    #btn-xfade-toggle {
-      background: #2a2200; color: #ff9900; border: 1px solid #ff9900;
-      padding: 5px 10px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    .mode-switch { display: flex; gap: 0; }
+    .mode-switch button {
+      background: #2a2a2a; color: #aaa; border: 1px solid #555;
+      padding: 4px 10px; font-size: 11px; border-radius: 0; cursor: pointer;
+      border-right: none;
     }
-    #btn-xfade-toggle.open { background: #ff9900; color: #000; }
+    .mode-switch button:first-child { border-radius: 4px 0 0 4px; }
+    .mode-switch button:last-child  { border-radius: 0 4px 4px 0; border-right: 1px solid #555; }
+    .mode-switch button.active { background: #ff9900; color: #000; border-color: #ff9900; }
+    #xf_fullmix_row { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    #xf_fullmix_row span { font-size: 9px; color: #888; }
+    #xf_fullmix_row input[type=range] { width: 120px; accent-color: #ff9900; }
     #btn-xfade-play {
       width: 110px; font-weight: bold;
       background: #ff9900; color: #000; border: none;
@@ -146,19 +152,30 @@
       <span style="font-size: 11px; color:#888; text-transform:uppercase;">Manipulate:</span>
       <!-- Sliders injected here -->
   </div>
-  <div class="playback-panel" style="display: flex; gap: 10px; align-items: center; border-left: 1px solid #444; padding-left: 15px;">
-      <button id="btn_play" style="width: 80px; font-weight: bold; background: #00d2ff; color: #000; border:none;">▶ Load</button>
-      <span id="audio_status" style="font-size: 11px; color: #888; width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">No audio</span>
-  </div>
-  <!-- Crossfade toggle -->
-  <div style="display:flex; align-items:center; border-left: 1px solid #444; padding-left: 15px;">
-    <button id="btn-xfade-toggle" title="Toggle latent crossfade controls">✕ Crossfade</button>
+  <div class="panel" style="flex-direction: row; align-items: flex-end; gap: 8px; padding-bottom: 2px;">
+    <button id="btn_avg" style="background:#1a2a1a;color:#4cd137;border:1px solid #4cd137;padding:5px 8px;border-radius:4px;font-size:12px;" title="Decode and play average of all Track A latents">⊕ Avg</button>
+    <span id="avg_status" style="font-size:11px;color:#888;"></span>
   </div>
 </header>
 
-<!-- Crossfade panel (below header, hidden by default) -->
+<!-- Crossfade panel -->
 <div id="xfade-panel">
   <div class="xfade-section">
+    <label>Crossfade Mode</label>
+    <div class="mode-switch">
+      <button id="xf_mode_ab"     class="active" data-mode="ab">Full-mix</button>
+      <button id="xf_mode_latent" data-mode="latent">Stem latents</button>
+      <button id="xf_mode_stems"  data-mode="stems">Stem audio</button>
+    </div>
+  </div>
+  <div class="xfade-section" id="xf_fullmix_section">
+    <label>A → B (α)</label>
+    <div id="xf_fullmix_row">
+      <input type="range" id="xf_mix" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_mix_val">0.50</span>
+    </div>
+  </div>
+  <div class="xfade-section" id="xf_stem_section">
     <label>Stem A→B (α)</label>
     <div class="stem-alpha">
       <span>Drums</span>
@@ -213,7 +230,6 @@
 
 <div id="main-container">
   <div id="plot-container">
-    <canvas id="waveform_canvas" width="600" height="100" style="position: absolute; top: 15px; left: 15px; z-index: 99; pointer-events: none; background: rgba(0,0,0,0.5); border: 1px solid #444; border-radius: 4px; display: none;"></canvas>
     <div id="plot"></div>
     <div id="loader" class="loading">Loading...</div>
   </div>
@@ -240,9 +256,6 @@
   const btn_render = document.getElementById("btn_render");
   const loader = document.getElementById("loader");
   const legend_items = document.getElementById("legend_items");
-  const btn_play = document.getElementById("btn_play");
-  const audio_status = document.getElementById("audio_status");
-
   // Stem toggles
   const toggles = {
       fullmix: document.getElementById("chk_fullmix"),
@@ -281,14 +294,6 @@
       });
   });
 
-  // Audio Context
-  let audioCtx = null;
-  let audioBuffer = null;
-  let sourceNode = null;
-  let playStart = 0;
-  let pauseOffset = 0;
-  let animationFrameId = null;
-
   // Latent Manipulation globals
   let pcaComponents = null; // shape [3, 64]
   let correlations = null;
@@ -305,7 +310,6 @@
 
   // ---- Crossfade UI wiring ------------------------------------------------
   const xfadePanel = document.getElementById("xfade-panel");
-  const btnXfadeToggle = document.getElementById("btn-xfade-toggle");
   const btnXfadePlay = document.getElementById("btn_xfade_play");
   const xfadeStatus = document.getElementById("xfade_status");
   const btnBeatMatch = document.getElementById("btn_beatmatch");
@@ -338,6 +342,31 @@
   xfBetaB.addEventListener("change", () => reloadXfadeIfPlaying());
   xfInterp.addEventListener("change", () => reloadXfadeIfPlaying());
 
+  // ---- Mode switch --------------------------------------------------------
+  const xfModeButtons = document.querySelectorAll('.mode-switch button');
+  let xfMode = 'ab';  // 'ab' | 'latent' | 'stems'
+
+  function setXfMode(mode) {
+    xfMode = mode;
+    xfModeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    // Full-mix: show single α slider, hide per-stem sliders
+    const isFullMix = mode === 'ab';
+    document.getElementById('xf_fullmix_section').style.display = isFullMix ? '' : 'none';
+    document.getElementById('xf_stem_section').style.display    = isFullMix ? 'none' : '';
+    reloadXfadeIfPlaying();
+  }
+
+  xfModeButtons.forEach(b => b.addEventListener('click', () => setXfMode(b.dataset.mode)));
+  setXfMode('ab');  // initial state
+
+  // Wire the single-α slider
+  const xfMix    = document.getElementById('xf_mix');
+  const xfMixVal = document.getElementById('xf_mix_val');
+  xfMix.addEventListener('input', e => {
+    xfMixVal.textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  xfMix.addEventListener('change', () => reloadXfadeIfPlaying());
+
   let isBeatMatch = false;
   btnBeatMatch.addEventListener("click", () => {
     isBeatMatch = !isBeatMatch;
@@ -351,6 +380,8 @@
   let xfadeBuffer      = null;
   let xfadeSourceNode  = null;
   let xfadeAnimFrameId = null;
+  let xfadePlayStart   = 0;
+  let animationFrameId = null;
 
   function getXfadeCtx() {
     if (!xfadeAudioCtx) xfadeAudioCtx = new AudioContext();
@@ -367,22 +398,13 @@
     }
     xfadeBuffer = null; // force fresh decode on next play
     if (wasPlaying) {
-      btnXfadePlay.textContent = "✕ Play Crossfade";
+      btnXfadePlay.textContent = "▶ Play Crossfade";
       xfadeStatus.textContent = "Reloading...";
       setTimeout(() => fetchXfadeAudio(true), 50);
     } else {
       setTimeout(() => fetchXfadeAudio(false), 50);
     }
   }
-
-  // Toggle panel open/close
-  btnXfadeToggle.addEventListener("click", () => {
-    const isOpen = xfadePanel.classList.toggle("open");
-    btnXfadeToggle.classList.toggle("open", isOpen);
-    btnXfadeToggle.textContent = isOpen ? "▲ Crossfade" : "▶ Crossfade";
-    if (isOpen) renderGhostTrace();
-    else removeGhostTrace();
-  });
 
   // Play / stop crossfade
   btnXfadePlay.addEventListener("click", () => {
@@ -495,12 +517,24 @@
     const bA   = parseFloat(xfBetaA.value).toFixed(3);
     const bB   = parseFloat(xfBetaB.value).toFixed(3);
     const interp = xfInterp.value;
-    const stemParts = XF_STEMS.map(s =>
-      `${s}=${parseFloat(xfStemSliders[s].value).toFixed(3)}`
-    ).join("&");
 
-    let url = `http://localhost:7891/crossfade?mode=latent&track_a=${encodeURIComponent(tA)}&track_b=${encodeURIComponent(tB)}&pos_a=${posA}&pos_b=${posB}&${stemParts}&beta_a=${bA}&beta_b=${bB}&interp=${interp}`;
-    
+    let stemOrMixParams;
+    if (xfMode === 'ab') {
+      stemOrMixParams = `mix=${parseFloat(xfMix.value).toFixed(3)}`;
+    } else {
+      stemOrMixParams = XF_STEMS.map(s =>
+        `${s}=${parseFloat(xfStemSliders[s].value).toFixed(3)}`
+      ).join("&");
+    }
+
+    const manips = getGlobalManipulationOffsets();
+    let manipQS = "";
+    if (manips.manip_channels.length > 0) {
+        manipQS = `&manip_channels=${manips.manip_channels.join(",")}&manip_amounts=${manips.manip_amounts.map(v => v.toFixed(3)).join(",")}`;
+    }
+
+    let url = `http://localhost:7891/crossfade?mode=${xfMode}&track_a=${encodeURIComponent(tA)}&track_b=${encodeURIComponent(tB)}&pos_a=${posA}&pos_b=${posB}&${stemOrMixParams}&beta_a=${bA}&beta_b=${bB}&interp=${interp}${manipQS}`;
+
     if (isBeatMatch) {
         const bm = computeBeatMatch(tA, tB);
         if (bm) {
@@ -523,11 +557,9 @@
           if (!r.ok) throw new Error("HTTP " + r.status); 
           const metaStr = r.headers.get("X-Crossfade-Meta");
           if (metaStr) {
-              try { window._xfadeMeta = JSON.parse(metaStr); drawWaveforms(); } catch(e){}
-          } else {
-              window._xfadeMeta = null; drawWaveforms();
+              try { window._xfadeMeta = JSON.parse(metaStr); } catch(e){}
           }
-          return r.arrayBuffer(); 
+          return r.arrayBuffer();
       })
       .then(ab => getXfadeCtx().decodeAudioData(ab))
       .then(buf => {
@@ -555,7 +587,9 @@
     const off = Math.max(0, offset % xfadeBuffer.duration);
     src.start(0, off);
     xfadeSourceNode = src;
+    xfadePlayStart = ctx.currentTime - off;
     btnXfadePlay.textContent = "⏸ Stop Crossfade";
+    animationFrameId = requestAnimationFrame(updateAnimation);
     src.onended = () => {
       if (xfadeSourceNode === src) {
         xfadeSourceNode = null;
@@ -564,56 +598,6 @@
         xfadeStatus.textContent = "Ended";
       }
     };
-  }
-
-  function drawWaveforms() {
-      const meta = window._xfadeMeta;
-      const canvas = document.getElementById("waveform_canvas");
-      if (!meta || !meta.env_a || !meta.env_b) {
-          canvas.style.display = 'none';
-          return;
-      }
-      canvas.style.display = 'block';
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0,0,canvas.width, canvas.height);
-      
-      const lenA = meta.env_a.length;
-      const lenB = meta.env_b.length;
-      const maxLen = Math.max(lenA, lenB);
-      if (maxLen === 0) return;
-      
-      function drawEnv(env, color, yOffset, maxH) {
-          if (!env || env.length === 0) return;
-          ctx.beginPath();
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1;
-          for (let i = 0; i < Math.min(env.length, maxLen); i++) {
-              const x = (i / maxLen) * canvas.width;
-              const y = yOffset + (1 - env[i]) * maxH; 
-              ctx.moveTo(x, yOffset + maxH);
-              ctx.lineTo(x, y);
-          }
-          ctx.stroke();
-      }
-      
-      drawEnv(meta.env_a, 'rgba(255, 255, 100, 0.7)', 0, 50);
-      drawEnv(meta.env_b, 'rgba(255, 255, 100, 0.7)', 50, 50);
-      
-      if (meta.downbeats && meta.downbeats.length) {
-          ctx.strokeStyle = 'rgba(255, 50, 50, 0.8)';
-          ctx.setLineDash([2, 4]);
-          const dur_s = (maxLen * meta.env_chunk) / meta.sr;
-          for (let db of meta.downbeats) {
-              const x = (db / dur_s) * canvas.width;
-              if (x >= 0 && x <= canvas.width) {
-                  ctx.beginPath();
-                  ctx.moveTo(x, 0);
-                  ctx.lineTo(x, canvas.height);
-                  ctx.stroke();
-              }
-          }
-          ctx.setLineDash([]);
-      }
   }
 
   // ---- Ghost trace (morphed A↔B trajectory in 3D) ------------------------
@@ -642,7 +626,6 @@
   }
 
   function renderGhostTrace() {
-    if (!xfadePanel.classList.contains("open")) return;
     if (!_lastShapeA || !_lastShapeB) return;
     const t = meanAlpha();
     const GHOST_STEMS = ["fullmix", "drums", "bass", "other", "vocals"];
@@ -707,30 +690,6 @@
       .map((t, i) => (t.name && t.name.startsWith('Ghost')) ? i : -1)
       .filter(i => i >= 0);
     if (toDelete.length > 0) Plotly.deleteTraces('plot', toDelete).catch(() => {});
-  }
-
-  function getAudioCtx() {
-      if (!audioCtx) audioCtx = new AudioContext();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      return audioCtx;
-  }
-
-  // Stop current playback, clear stale buffer, and re-fetch if audio was active.
-  // Called after manipulation sliders change so the decoded audio reflects the new latent.
-  function reloadAudioIfPlaying() {
-      const wasPlaying = !!sourceNode;
-      if (sourceNode) {
-          try { sourceNode.stop(); } catch(e) {}
-          sourceNode = null;
-          cancelAnimationFrame(animationFrameId);
-          btn_play.textContent = "▶ Play";
-      }
-      audioBuffer = null;  // force re-fetch on next play
-      pauseOffset = 0;
-      if (wasPlaying) {
-          // Small delay so the stop clears cleanly before re-requesting
-          setTimeout(() => btn_play.click(), 50);
-      }
   }
 
   // Load tracks on init (fast, small JSON)
@@ -826,9 +785,9 @@
               renderPlot(); // Re-render instantly to see structural shift
           });
 
-          // On slider release: reload audio with the new manipulation if it was playing
+          // On slider release: reload crossfade audio with the new manipulation if it was playing
           slider.addEventListener("change", () => {
-              reloadAudioIfPlaying();
+              reloadXfadeIfPlaying();
           });
 
           wrapper.appendChild(lbl);
@@ -852,18 +811,19 @@
           if (val === 0) continue;
           
           const corr = correlations[key];
-          // We will push the top 5 positive and negative correlated channels
+          // Push the top 5 positive and negative correlated channels
           // proportionally to their correlation score * the slider value.
+          // Fall back to unit weights if scores were not computed (all zero).
           for (let i=0; i < corr.top_positive_channels.length; i++) {
               let ch = corr.top_positive_channels[i];
-              let score = corr.top_positive_scores[i];
+              let score = corr.top_positive_scores[i] || 1.0;  // fallback: unit weight
               chMap[ch] = (chMap[ch] || 0) + (score * val);
           }
           for (let i=0; i < corr.top_negative_channels.length; i++) {
               let ch = corr.top_negative_channels[i];
-              let score = corr.top_negative_scores[i]; // this is negative
-              // If we increase slider (val > 0), we want to DECREASE negative correlated channels
-              chMap[ch] = (chMap[ch] || 0) + (score * val * -1); 
+              // score is already negative; multiplying by val gives a negative delta
+              let score = corr.top_negative_scores[i] || -1.0;  // fallback: unit weight
+              chMap[ch] = (chMap[ch] || 0) + (score * val);
           }
       }
       
@@ -883,7 +843,6 @@
   });
   
   cropA_sel.addEventListener('change', () => {
-      reloadAudioIfPlaying();
       reloadXfadeIfPlaying();
   });
   cropB_sel.addEventListener('change', () => {
@@ -906,120 +865,24 @@
         // Auto-reload on track change after crops populate
         if (selectEl === cropA_sel) {
            renderPlot();
-           fetchSelectedAudio(false);
         } else if (selectEl === cropB_sel) {
-           if (xfadePanel.classList.contains("open")) fetchXfadeAudio(false);
+           fetchXfadeAudio(false);
         }
       });
   }
 
   cropA_sel.addEventListener('change', () => {
       renderPlot();
-      fetchSelectedAudio(false);
   });
-  
+
   cropB_sel.addEventListener('change', () => {
-      if (xfadePanel.classList.contains("open")) fetchXfadeAudio(false);
+      fetchXfadeAudio(false);
   });
 
   mode_sel.addEventListener('change', renderPlot);
 
   btn_render.style.display = "none";
   btn_render.addEventListener('click', renderPlot);
-
-  function fetchSelectedAudio(autoPlay = false) {
-    const tA = trackA_sel.value;
-    const cA = cropA_sel.value;
-    if(!tA || !cA) return;
-    
-    const opt = cropA_sel.options[cropA_sel.selectedIndex];
-    const pos = opt ? opt.dataset.position || 0.5 : 0.5;
-    
-    // Inject latent manipulation channels if any
-    const manips = getGlobalManipulationOffsets();
-    let manipQS = "";
-    if (manips.manip_channels.length > 0) {
-        manipQS = `&manip_channels=${manips.manip_channels.join(",")}&manip_amounts=${manips.manip_amounts.map(v => v.toFixed(3)).join(",")}`;
-    }
-
-    if (!autoPlay) {
-      btn_play.textContent = "⌛ Load";
-    }
-    audio_status.textContent = "Loading...";
-    
-    const url = `http://localhost:7891/decode?track=${encodeURIComponent(tA)}&position=${encodeURIComponent(pos)}${manipQS}`;
-    fetch(url)
-      .then(r => {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.arrayBuffer();
-      })
-      .then(ab => getAudioCtx().decodeAudioData(ab))
-      .then(buf => {
-          audioBuffer = buf;
-          audio_status.textContent = `Ready (${buf.duration.toFixed(1)}s)`;
-          btn_play.textContent = "▶ Play";
-          if (autoPlay) {
-              startPlayback(0);
-          }
-      })
-      .catch(e => {
-          console.error("Playback fetch failed", e);
-          audio_status.textContent = "Error: " + e.message;
-          btn_play.textContent = "▶ Play";
-      });
-  }
-
-  btn_play.addEventListener('click', () => {
-    if (sourceNode) {
-        // Stop playing
-        sourceNode.stop();
-        sourceNode = null;
-        pauseOffset = 0;
-        btn_play.textContent = "▶ Play";
-        cancelAnimationFrame(animationFrameId);
-        return;
-    }
-    
-    if (audioBuffer) {
-        // Resume playing
-        startPlayback(pauseOffset);
-        return;
-    }
-
-    const tA = trackA_sel.value;
-    const cA = cropA_sel.value;
-    if(!tA || !cA) return alert("Select Track A and Crop A first.");
-    
-    // If not loaded yet, fetch and autoplay
-    fetchSelectedAudio(true);
-  });
-
-  function startPlayback(offset) {
-      if (!audioBuffer) return;
-      const ctx = getAudioCtx();
-      if (sourceNode) { try { sourceNode.stop(); } catch(e){} }
-      
-      const src = ctx.createBufferSource();
-      src.buffer = audioBuffer;
-      src.connect(ctx.destination);
-      const off = Math.max(0, offset % audioBuffer.duration);
-      src.start(0, off);
-      
-      sourceNode = src;
-      playStart = ctx.currentTime - off;
-      btn_play.textContent = "⏸ Stop";
-      
-      src.onended = () => {
-          if (sourceNode === src) {
-              sourceNode = null;
-              pauseOffset = 0;
-              btn_play.textContent = "▶ Play";
-              cancelAnimationFrame(animationFrameId);
-          }
-      };
-      
-      animationFrameId = requestAnimationFrame(updateAnimation);
-  }
 
   async function fetchShape(track, crop) {
     const res = await fetch(`${BASE_URL}/api/shape?track=${encodeURIComponent(track)}&crop=${encodeURIComponent(crop)}`);
@@ -1258,8 +1121,8 @@
 
       await Plotly.react('plot', traces, layout);
 
-      // Re-inject ghost trace if crossfade panel is open and both shapes available
-      if (xfadePanel.classList.contains('open') && _lastShapeA && _lastShapeB) {
+      // Re-inject ghost trace if both shapes available
+      if (_lastShapeA && _lastShapeB) {
         renderGhostTrace();
       }
 
@@ -1273,10 +1136,10 @@
   
   // Animation syncing
   function updateAnimation() {
-      if (!sourceNode || !audioBuffer || !window.plottedTrajectories || window.plottedTrajectories.length === 0) return;
-      
-      const currentTime = getAudioCtx().currentTime - playStart;
-      const duration = audioBuffer.duration;
+      if (!xfadeSourceNode || !xfadeBuffer || !window.plottedTrajectories || window.plottedTrajectories.length === 0) return;
+
+      const currentTime = xfadeAudioCtx.currentTime - xfadePlayStart;
+      const duration = xfadeBuffer.duration;
       const progress = currentTime / duration;
       
       const targetData = [];
