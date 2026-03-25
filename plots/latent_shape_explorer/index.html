@@ -1102,10 +1102,15 @@
             y: yRange / maxRange,
             z: zRange / maxRange
           },
-          camera: {
-            eye: { x: 1.05, y: 1.05, z: 1.05 },
-            center: { x: 0, y: 0, z: 0 }
-          },
+          camera: (() => {
+            const plotDiv = document.getElementById('plot');
+            try {
+              const existing = plotDiv._fullLayout && plotDiv._fullLayout.scene
+                               && plotDiv._fullLayout.scene.camera;
+              if (existing && existing.eye) return existing;
+            } catch(e) {}
+            return { eye: { x: 1.05, y: 1.05, z: 1.05 }, center: { x: 0, y: 0, z: 0 } };
+          })(),
           domain: { x: [0, 1], y: [0, 1] }
         },
         paper_bgcolor: '#111',
