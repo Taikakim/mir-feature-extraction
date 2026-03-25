@@ -121,3 +121,56 @@ def test_timecodes_missing_crop_json_returns_none():
         srv._latent_dir = latent_dir
         srv._source_dir = source_dir
         assert srv._read_timecodes("TrackC", "missing_crop") is None
+
+
+def test_average_shape_returns_3d_points():
+    """_compute_average_shape averages latent files and returns PCA-projected points."""
+    import latent_shape_server as srv
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        latent_dir = tmp / "latents"
+        track_dir = latent_dir / "TrackD"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write two fake latent files of different lengths
+        lat1 = np.random.randn(64, 20).astype(np.float32)
+        lat2 = np.random.randn(64, 15).astype(np.float32)
+        np.save(str(track_dir / "crop01.npy"), lat1)
+        np.save(str(track_dir / "crop02.npy"), lat2)
+
+        srv._latent_dir = latent_dir
+        # Provide a trivial PCA model (identity-like)
+        srv._pca_mean       = np.zeros(64, dtype=np.float32)
+        srv._pca_components = np.eye(3, 64, dtype=np.float32)
+
+        points = srv._compute_average_shape("TrackD")
+        assert points is not None
+        assert len(points) == 20   # length of the longest crop
+        assert len(points[0]) == 3  # 3D
+
+
+def test_average_shape_skips_stem_files():
+    """_compute_average_shape ignores stem-suffixed .npy files."""
+    import latent_shape_server as srv
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        latent_dir = tmp / "latents"
+        track_dir = latent_dir / "TrackE"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        lat_fm   = np.ones((64, 10), dtype=np.float32)
+        lat_stem = np.full((64, 10), 99.0, dtype=np.float32)
+        np.save(str(track_dir / "crop01.npy"),       lat_fm)
+        np.save(str(track_dir / "crop01_drums.npy"), lat_stem)
+
+        srv._latent_dir     = latent_dir
+        srv._pca_mean       = np.zeros(64, dtype=np.float32)
+        srv._pca_components = np.eye(3, 64, dtype=np.float32)
+
+        points = srv._compute_average_shape("TrackE")
+        # If stem was included the mean would be ~50; fullmix-only mean is 1.0
+        assert points is not None
+        # PC1 projection of mean([1]*64) with identity components ≈ 1.0
+        assert abs(points[0][0] - 1.0) < 0.01

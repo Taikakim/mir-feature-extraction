@@ -183,6 +183,40 @@ def _read_timecodes(track: str, crop_id: str) -> dict | None:
     return result
 
 
+def _compute_average_shape(track: str) -> list | None:
+    """Load all full-mix latent files for a track, average, project 3D.
+
+    Shorter files are zero-padded to the length of the longest file.
+    Returns [[x,y,z], ...] or None if no latent files exist.
+    """
+    track_dir = _latent_dir / track
+    npys = [p for p in sorted(track_dir.glob("*.npy"))
+            if not any(p.stem.endswith(s) for s in STEM_SUFFIXES)]
+    if not npys:
+        return None
+
+    arrays = []
+    max_T  = 0
+    for npy in npys:
+        try:
+            arr = np.load(str(npy)).astype(np.float32)  # [64, T]
+            arrays.append(arr)
+            max_T = max(max_T, arr.shape[1])
+        except Exception:
+            pass
+
+    if not arrays:
+        return None
+
+    # Zero-pad all arrays to max_T, then average
+    padded = np.zeros((len(arrays), 64, max_T), dtype=np.float32)
+    for i, arr in enumerate(arrays):
+        padded[i, :, :arr.shape[1]] = arr
+    mean_latent = padded.mean(axis=0)   # [64, max_T]
+
+    return project_3d(mean_latent).tolist()
+
+
 # ---------------------------------------------------------------------------
 # API Handlers
 # ---------------------------------------------------------------------------
@@ -321,6 +355,18 @@ class LatentShapeHandler(SimpleHTTPRequestHandler):
                 return self.send_error_json(404,
                     "Crop not found or source_dir not configured")
             self.send_json(result)
+            return
+
+        if path == "/api/average-shape":
+            track = query.get("track", [""])[0]
+            if not track:
+                return self.send_error_json(400, "Missing track")
+            if not (_latent_dir / track).is_dir():
+                return self.send_error_json(404, "Track not found")
+            points = _compute_average_shape(track)
+            if points is None:
+                return self.send_error_json(404, "No latent files for track")
+            self.send_json({"points": points})
             return
 
         # Fallback to serving static files
