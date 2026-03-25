@@ -63,7 +63,7 @@ import torch
 
 # latent_crossfader.py lives alongside this script
 sys.path.insert(0, str(Path(__file__).parent))
-from latent_crossfader import STEMS, crossfade_stems, lerp, load_latent, slerp
+from latent_crossfader import STEMS, crossfade_stems, lerp, load_latent, slerp, reality_anchor
 
 from stable_audio_tools.models.factory import create_model_from_config
 from stable_audio_tools.models.utils import copy_state_dict, load_ckpt_state_dict
@@ -81,7 +81,8 @@ _sample_rate        = None
 _downsampling_ratio = None
 _latent_dir         = None
 _stem_dir           = None   # separate root for stem latents
-_raw_audio_dir      = None   # root of original source audio (for raw=1 playback)
+_raw_audio_dir      = None   # root of Goa_Separated_crops (per-crop INFO/audio)
+_source_dir         = None   # root of Goa_Separated (full-track BEATS_GRID/DOWNBEATS)
 _dtype              = None
 _device             = None
 _decode_lock        = threading.Lock()
@@ -198,23 +199,38 @@ def find_raw_audio(npy_path: Path, latent_root: Path) -> Path | None:
     return None
 
 
-def _load_crop_downbeats(npy_path: Path, latent_root: Path) -> list | None:
-    """Return downbeat timestamps (seconds) for the crop corresponding to a latent .npy.
+def _load_crop_downbeats(npy_path: Path, latent_root: Path) -> list:
+    """Return downbeat timestamps (seconds, crop-relative) for a latent .npy.
 
-    Looks for a .DOWNBEATS sidecar next to the source audio in raw_audio_dir.
-    Returns None if unavailable or fewer than 2 downbeats.
+    Reads start_time/end_time from the crop .INFO in raw_audio_dir, loads the
+    full-track .DOWNBEATS from source_dir, filters to [start, end], and shifts
+    by -start_time.  Returns [] if unavailable or fewer than 2 downbeats.
     """
-    if _raw_audio_dir is None:
-        return None
+    if _raw_audio_dir is None or _source_dir is None:
+        return []
     try:
-        rel  = npy_path.relative_to(latent_root).with_suffix('.DOWNBEATS')
-        path = _raw_audio_dir / rel
-        if not path.exists():
-            return None
-        times = [float(line.strip()) for line in path.read_text().splitlines() if line.strip()]
-        return times if len(times) >= 2 else None
+        rel = npy_path.relative_to(latent_root)
+        info_path = _raw_audio_dir / rel.with_suffix('.INFO')
+        if not info_path.exists():
+            return []
+
+        info = json.loads(info_path.read_text())
+        start_time = float(info.get('start_time', 0.0))
+        end_time   = float(info.get('end_time', 0.0))
+        if end_time <= start_time:
+            return []
+
+        track_name = info_path.parent.name
+        source_db  = _source_dir / track_name / f"{track_name}.DOWNBEATS"
+        if not source_db.exists():
+            return []
+
+        all_times = [float(ln.strip()) for ln in source_db.read_text().splitlines()
+                     if ln.strip()]
+        times = [t - start_time for t in all_times if start_time <= t <= end_time]
+        return times if len(times) >= 2 else []
     except Exception:
-        return None
+        return []
 
 
 def load_raw_wav(audio_path: Path, smart_loop: bool = False) -> bytes:
@@ -428,6 +444,7 @@ def beatmatch_crossfade_to_wav(
     interp: str = 'slerp',
     smart_loop: bool = False,
     algo: str = 'pedalboard',
+    qs: dict = None,
 ) -> tuple:
     """Load source stem audio, pitch-shift + time-stretch per track, encode to
     latent, then crossfade in latent space.  Requires raw_audio_dir to be set.
@@ -478,7 +495,7 @@ def beatmatch_crossfade_to_wav(
     # Computes bar intervals from the DOWNBEATS sidecar and meets in the middle.
     db_a = _load_crop_downbeats(npy_fm_a, _latent_dir)
     db_b = _load_crop_downbeats(npy_fm_b, _latent_dir)
-    if db_a and db_b:
+    if len(db_a) >= 2 and len(db_b) >= 2:
         iv_a = (db_a[-1] - db_a[0]) / (len(db_a) - 1)   # seconds per bar, crop A
         iv_b = (db_b[-1] - db_b[0]) / (len(db_b) - 1)   # seconds per bar, crop B
         tgt_iv = math.sqrt(iv_a * iv_b)                   # geometric mean
@@ -495,10 +512,10 @@ def beatmatch_crossfade_to_wav(
 
     phase_offset_s = 0.0
     shared_loop = None
-    if db_a and db_b:
+    if len(db_a) >= 2 and len(db_b) >= 2:
         t_a = db_a[0] * stretch_a
         t_b = db_b[0] * stretch_b
-        
+
         iv_a = (db_a[-1] - db_a[0]) / (len(db_a) - 1)
         iv_b = (db_b[-1] - db_b[0]) / (len(db_b) - 1)
         tgt_iv = math.sqrt(iv_a * iv_b)
@@ -599,7 +616,7 @@ def beatmatch_crossfade_to_wav(
     audio = crossfade_stems(
         stems_a, stems_b, fullmix_a, fullmix_b,
         alphas, beta_a, beta_b,
-        _autoencoder.decode,
+        lambda z: _autoencoder.decode(apply_manipulations(z, qs)),
         interp=interp,
         device=_device,
     )
@@ -710,13 +727,26 @@ def beatmatch_crossfade_to_wav(
 # Decode
 # ---------------------------------------------------------------------------
 
-def decode_to_wav(npy_path: Path, smart_loop: bool = False) -> bytes:
+
+def apply_manipulations(latent_t: torch.Tensor, qs: dict) -> torch.Tensor:
+    if qs and "manip_channels" in qs and "manip_amounts" in qs:
+        try:
+            chans = [int(x) for x in qs["manip_channels"][0].split(",")]
+            amts  = [float(x) for x in qs["manip_amounts"][0].split(",")]
+            for ch, amt in zip(chans, amts):
+                if 0 <= ch < latent_t.shape[1]:
+                    latent_t[0, ch, :] += amt
+        except Exception:
+            pass
+    return latent_t
+
+def decode_to_wav(npy_path: Path, smart_loop: bool = False, qs: dict = None) -> bytes:
     """Decode a latent .npy to WAV bytes. Call with _decode_lock held."""
     latent   = np.load(str(npy_path)).astype(np.float32)   # [64, L]
     latent_t = torch.from_numpy(latent).unsqueeze(0).to(device=_device, dtype=_dtype)
 
     with torch.no_grad():
-        audio = _autoencoder.decode(latent_t)   # [1, 2, samples]
+        audio = _autoencoder.decode(apply_manipulations(latent_t, qs))   # [1, 2, samples]
 
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
@@ -765,6 +795,7 @@ def crossfade_raw_to_wav(
     pos_a: float, pos_b: float,
     alphas: dict,
     smart_loop: bool = False,
+    qs: dict = None,
 ) -> tuple:
     """Mix raw source stem audio with per-stem alpha weights. No VAE involved."""
     stem_root = _stem_dir if _stem_dir is not None else _latent_dir
@@ -866,6 +897,7 @@ def crossfade_fullmix_to_wav(
     mix: float,
     interp: str = 'slerp',
     smart_loop: bool = False,
+    qs: dict = None,
 ) -> bytes:
     """Interpolate two full-mix latents in latent space and decode to WAV.
 
@@ -890,7 +922,7 @@ def crossfade_fullmix_to_wav(
     z_mixed = interp_fn(z_a, z_b, mix)
 
     with torch.no_grad():
-        audio = _autoencoder.decode(z_mixed)   # [1, 2, samples]
+        audio = _autoencoder.decode(apply_manipulations(z_mixed, qs))   # [1, 2, samples]
 
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
@@ -940,6 +972,7 @@ def latent_mix_to_wav(
     alphas: dict, beta_a: float, beta_b: float,
     interp: str = 'slerp',
     smart_loop: bool = False,
+    qs: dict = None,
 ) -> tuple:
     """Mix stem latents in latent space, then decode a single composite latent.
 
@@ -1024,7 +1057,7 @@ def latent_mix_to_wav(
     z_composite = z_composite * scale
 
     with torch.no_grad():
-        audio = _autoencoder.decode(z_composite)   # [1, 2, samples]
+        audio = _autoencoder.decode(apply_manipulations(z_composite, qs))   # [1, 2, samples]
 
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
@@ -1042,6 +1075,10 @@ def latent_mix_to_wav(
         if loop_end < audio_np.shape[1]:
             audio_np = audio_np[:, :loop_end]
 
+    # Peak-normalize to avoid quiet output from out-of-distribution composite latent
+    peak = np.abs(audio_np).max()
+    if peak > 1e-6:
+        audio_np = audio_np * (0.9 / peak)
     audio_np  = np.clip(audio_np, -1.0, 1.0)
     audio_i16 = (audio_np * 32767).astype(np.int16)
     buf = io.BytesIO()
@@ -1050,7 +1087,17 @@ def latent_mix_to_wav(
         wf.setsampwidth(2)
         wf.setframerate(_sample_rate)
         wf.writeframes(audio_i16.T.flatten().tobytes())
-    return buf.getvalue(), stems_found
+
+    # Build latent-energy envelopes for waveform alignment UI (no extra VAE decode needed)
+    z_a_np = fullmix_a[0].cpu().float().numpy()  # [C, T]
+    z_b_np = fullmix_b[0].cpu().float().numpy()
+    env_a = np.round(np.sqrt((z_a_np ** 2).mean(axis=0)), 3).tolist()
+    env_b = np.round(np.sqrt((z_b_np ** 2).mean(axis=0)), 3).tolist()
+    xfade_meta = {
+        "env_a": env_a, "env_b": env_b, "downbeats": [],
+        "env_chunk": _downsampling_ratio, "sr": _sample_rate,
+    }
+    return buf.getvalue(), stems_found, xfade_meta
 
 
 def _read_bpm(npy_path: Path) -> float | None:
@@ -1072,6 +1119,7 @@ def crossfade_to_wav(
     alphas: dict, beta_a: float, beta_b: float,
     interp: str = 'slerp',
     smart_loop: bool = False,
+    qs: dict = None,
 ) -> tuple:
     """Decode a stem crossfade to WAV bytes. Call with _decode_lock held."""
     stem_root = _stem_dir if _stem_dir is not None else _latent_dir
@@ -1113,7 +1161,7 @@ def crossfade_to_wav(
     audio = crossfade_stems(
         stems_a, stems_b, fullmix_a, fullmix_b,
         alphas, beta_a, beta_b,
-        _autoencoder.decode,
+        lambda z: _autoencoder.decode(apply_manipulations(z, qs)),
         interp=interp,
         device=_device,
     )
@@ -1179,7 +1227,7 @@ class Handler(BaseHTTPRequestHandler):
             position   = float(qs.get("position",   ["0.5"])[0])
             smart_loop = qs.get("smart_loop", ["0"])[0] == "1"
             raw        = qs.get("raw",        ["0"])[0] == "1"
-            self._handle_decode(track, position, smart_loop, raw)
+            self._handle_decode(track, position, smart_loop, raw, qs=qs)
         elif parsed.path == "/crops":
             track = qs.get("track", [""])[0]
             self._handle_crops(track)
@@ -1223,7 +1271,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_decode(self, track: str, position: float,
-                       smart_loop: bool = False, raw: bool = False):
+                       smart_loop: bool = False, raw: bool = False, qs: dict = None):
         if not track:
             self._error(400, "Missing track parameter")
             return
@@ -1251,7 +1299,7 @@ class Handler(BaseHTTPRequestHandler):
                 wav_bytes = load_raw_wav(audio_path, smart_loop=smart_loop)
             else:
                 with _decode_lock:
-                    wav_bytes = decode_to_wav(best_npy, smart_loop=smart_loop)
+                    wav_bytes = decode_to_wav(best_npy, smart_loop=smart_loop, qs=qs)
         except Exception as e:
             self._error(500, str(e))
             return
@@ -1360,26 +1408,18 @@ class Handler(BaseHTTPRequestHandler):
                     with _decode_lock:
                         wav_bytes = crossfade_fullmix_to_wav(
                             track_a, track_b, pos_a, pos_b,
-                            mix, interp=interp, smart_loop=smart_loop,
+                            mix, interp=interp, smart_loop=smart_loop, qs=qs,
                         )
                 stems_found = []
                 source_label = "raw" if raw else "vae"
-            elif mode == "latent":
-                # Stem latents mixed in latent space → single decode
-                with _decode_lock:
-                    wav_bytes, stems_found = latent_mix_to_wav(
-                        track_a, track_b, pos_a, pos_b,
-                        alphas, beta_a, beta_b, interp=interp,
-                        smart_loop=smart_loop,
-                    )
-                source_label = "vae-latent"
             elif beatmatch:
+                # Beat match takes priority over mode=latent — needs raw audio re-encode
                 with _decode_lock:
                     ret = beatmatch_crossfade_to_wav(
                         track_a, track_b, pos_a, pos_b,
                         alphas, beta_a, beta_b,
                         shift_a, stretch_a, shift_b, stretch_b,
-                        interp=interp, smart_loop=smart_loop, algo=bm_algo,
+                        interp=interp, smart_loop=smart_loop, algo=bm_algo, qs=qs,
                     )
                     if len(ret) == 3:
                         wav_bytes, stems_found, meta = ret
@@ -1387,6 +1427,20 @@ class Handler(BaseHTTPRequestHandler):
                         wav_bytes, stems_found = ret
                         meta = None
                 source_label = "beatmatch"
+            elif mode == "latent":
+                # Stem latents mixed in latent space → single decode
+                with _decode_lock:
+                    ret = latent_mix_to_wav(
+                        track_a, track_b, pos_a, pos_b,
+                        alphas, beta_a, beta_b, interp=interp,
+                        smart_loop=smart_loop, qs=qs,
+                    )
+                    if len(ret) == 3:
+                        wav_bytes, stems_found, meta = ret
+                    else:
+                        wav_bytes, stems_found = ret
+                        meta = None
+                source_label = "vae-latent"
             elif raw:
                 wav_bytes, stems_found = crossfade_raw_to_wav(
                     track_a, track_b, pos_a, pos_b, alphas, smart_loop=smart_loop,
@@ -1397,7 +1451,7 @@ class Handler(BaseHTTPRequestHandler):
                     wav_bytes, stems_found = crossfade_to_wav(
                         track_a, track_b, pos_a, pos_b,
                         alphas, beta_a, beta_b, interp=interp,
-                        smart_loop=smart_loop,
+                        smart_loop=smart_loop, qs=qs,
                     )
                 source_label = "vae"
         except (ValueError, Exception) as e:
@@ -1435,7 +1489,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global _autoencoder, _sample_rate, _downsampling_ratio
-    global _latent_dir, _stem_dir, _raw_audio_dir, _dtype, _device
+    global _latent_dir, _stem_dir, _raw_audio_dir, _source_dir, _dtype, _device
 
     parser = argparse.ArgumentParser(description="Latent audio decode server")
     parser.add_argument("--config",       default=str(DEFAULT_INI),
@@ -1469,9 +1523,10 @@ def main():
     # It is expanded automatically by configparser's %(sao_dir)s syntax.
     # If model_config / ckpt_path are not set in the ini, fall back to sao_dir-relative paths.
     sao_dir_str      = ini_get("model", "sao_dir")
-    latent_dir_str   = args.latent_dir   or ini_get("server", "latent_dir")
-    stem_dir_str     = args.stem_dir     or ini_get("server", "stem_dir")
+    latent_dir_str    = args.latent_dir   or ini_get("server", "latent_dir")
+    stem_dir_str      = args.stem_dir     or ini_get("server", "stem_dir")
     raw_audio_dir_str = ini_get("server", "raw_audio_dir")
+    source_dir_str    = ini_get("server", "source_dir")
     port             = args.port         or int(ini_get("server", "port", fallback="7891"))
     device           = args.device       or ini_get("model",  "device", fallback="cuda")
 
@@ -1510,6 +1565,7 @@ def main():
     _latent_dir       = Path(latent_dir_str)
     _stem_dir         = Path(stem_dir_str) if stem_dir_str else None
     _raw_audio_dir    = Path(raw_audio_dir_str) if raw_audio_dir_str else None
+    _source_dir       = Path(source_dir_str) if source_dir_str else None
     model_config_path = Path(model_config_str)
     ckpt_path         = Path(ckpt_path_str)
 
@@ -1539,6 +1595,10 @@ def main():
         print(f"  Raw audio  : {_raw_audio_dir}")
     else:
         print(f"  Raw audio  : not configured (raw=1 will return 404)")
+    if _source_dir:
+        print(f"  Source dir : {_source_dir}")
+    else:
+        print(f"  Source dir : not configured (downbeat BPM matching disabled)")
     print(f"  Device     : {_device}  half={model_half}\n")
     try:
         server.serve_forever()

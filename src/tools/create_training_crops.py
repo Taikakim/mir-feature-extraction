@@ -700,49 +700,6 @@ def crop_all_stems(folder_path: Path, crop_base_path: Path,
     return cropped_stems
 
 
-def slice_rhythm_file(source_path: Path, dest_path: Path,
-                      start_time: float, end_time: float):
-    """
-    Read timestamps from source_path, filter those within [start_time, end_time],
-    shift them by -start_time, and write to dest_path.
-    """
-    if not source_path.exists():
-        return
-        
-    try:
-        # Read timestamps (handle both single-column and multi-column if needed)
-        with open(source_path, 'r') as f:
-            lines = f.readlines()
-            
-        valid_lines = []
-        for line in lines:
-            if not line.strip(): continue
-            try:
-                # Assume first token is timestamp
-                parts = line.strip().split()
-                if not parts: continue
-                t = float(parts[0])
-                
-                if start_time <= t <= end_time:
-                    # Shift timestamp
-                    new_t = t - start_time
-                    # Reconstruct line with new timestamp
-                    if len(parts) > 1:
-                        new_line = f"{new_t:.6f} {' '.join(parts[1:])}"
-                    else:
-                        new_line = f"{new_t:.6f}"
-                    valid_lines.append(new_line)
-            except ValueError:
-                continue
-                
-        # Write only if we have data (or write empty file? Empty is fine)
-        with open(dest_path, 'w') as f:
-            f.write('\n'.join(valid_lines))
-            if valid_lines: f.write('\n')
-            
-    except Exception as e:
-        logger.warning(f"Failed to slice rhythm file {source_path.name}: {e}")
-
 
 def get_start_offset_above_threshold(audio: np.ndarray,
                                      threshold_db: float = -72.0,
@@ -965,15 +922,6 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                 preloaded_stems, folder_path, crop_path,
                 current_sample, end_sample, sr, fade_len, id3_metadata, preloaded_stems
             ))
-
-            # Slice rhythm files (beats, downbeats)
-            rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
-            for suffix in rhythm_suffixes:
-                candidates = list(folder_path.glob(f"*{suffix}"))
-                if candidates:
-                    source_file = candidates[0]
-                    dest_file = crop_path.with_suffix(suffix)
-                    slice_rhythm_file(source_file, dest_file, start_sec, end_sec)
 
             # Write all metadata to .INFO (no separate .json)
             info_path = get_info_path(crop_path)
@@ -1355,18 +1303,6 @@ def create_crops_for_file(folder_path: Path,
         # Metadata
         actual_start_sec = float(actual_start_sample / sr)
         actual_end_sec = float(actual_end_sample / sr)
-
-        # Slice Rhythm Files (NOT onsets - unused by crop analysis, would need re-detection)
-        rhythm_suffixes = ['.BEATS_GRID', '.DOWNBEATS']
-        folder = full_mix_path.parent
-        
-        for suffix in rhythm_suffixes:
-            # Try to find source file
-            candidates = list(folder.glob(f"*{suffix}"))
-            if candidates:
-                source_file = candidates[0]
-                dest_file = crop_path.with_suffix(suffix)
-                slice_rhythm_file(source_file, dest_file, actual_start_sec, actual_end_sec)
 
         num_downbeats = count_downbeats_in_range(align_grid, current_start_sec, final_end_sec)
         
