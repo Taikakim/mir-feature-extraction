@@ -584,13 +584,14 @@ def load_bs_roformer(model_name: str, model_dir: Union[str, Path], device: str =
     return model, model_cfg, audio_cfg, inf_cfg
 
 def separate_organized_folder(
-    folder_path: Path, 
-    model_name: str = 'model', 
-    model_dir: str = '', 
+    folder_path: Path,
+    model_name: str = 'model',
+    model_dir: str = '',
     batch_size: int = 1,
     overwrite: bool = True,
     device: str = 'cuda',
-    separator: Optional[torch.nn.Module] = None
+    separator: Optional[torch.nn.Module] = None,
+    save_extra_stems: bool = True,
 ) -> Dict[str, Path]:
     """
     Separate stems for a single organized folder using BS-RoFormer.
@@ -727,14 +728,16 @@ def separate_organized_folder(
             # Save standard stems
             output_paths[name] = save_stem(audio_data, name)
         else:
-            # Non-standard stems
-            # 1. Accumulate for combined 'other'
+            # Non-standard stems (e.g. piano, guitar)
+            # 1. Always accumulate for combined 'other'
             extra_stems_audio.append(audio_data)
-            
-            # 2. Save individually
-            if name != 'other':
+
+            # 2. Save individually only if requested
+            if name != 'other' and save_extra_stems:
                 save_stem(audio_data, name)
                 logger.info(f"Saved extra stem: {name}{target_ext}")
+            elif name != 'other':
+                logger.info(f"Skipping extra stem file: {name}{target_ext} (save_extra_stems=false)")
 
     # Save Mixed 'other' stem
     if extra_stems_audio:

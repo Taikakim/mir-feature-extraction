@@ -26,6 +26,7 @@ Config file: config/master_pipeline.yaml contains all options with documentation
 
 import argparse
 import logging
+import multiprocessing
 import os
 import re
 import subprocess
@@ -37,6 +38,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Must be set before any child process is created.
+# 'fork' (Linux default) deadlocks when workers inherit ROCm/CUDA GPU state
+# from the parent process (e.g. after BS-RoFormer or Essentia GPU init).
+# 'spawn' starts fresh worker processes with no inherited GPU context.
+if multiprocessing.get_start_method(allow_none=True) is None:
+    multiprocessing.set_start_method('spawn')
 
 # Set ROCm environment before torch imports
 from core.rocm_env import setup_rocm_env
@@ -110,6 +118,7 @@ class MasterPipelineConfig:
     bs_roformer_dir: Path = Path('/home/kim/Projects/mir/models/bs-roformer')
     bs_roformer_batch_size: int = 1
     bs_roformer_device: str = 'cuda'
+    bs_roformer_save_extra_stems: bool = False
 
     # Demucs settings
     demucs_model: str = 'htdemucs'  # htdemucs (fast), htdemucs_ft (4x slower, better)
@@ -276,6 +285,7 @@ class MasterPipelineConfig:
             bs_roformer_dir=Path(bs_roformer.get('model_dir', '/home/kim/Projects/mir/models/bs-roformer')),
             bs_roformer_batch_size=bs_roformer.get('batch_size', 1),
             bs_roformer_device=bs_roformer.get('device', 'cuda'),
+            bs_roformer_save_extra_stems=bs_roformer.get('save_extra_stems', False),
 
             # Demucs (support both new 'demucs' sub-block and legacy top-level 'demucs')
             demucs_model=demucs_cfg.get('model', demucs_legacy.get('model', 'htdemucs')),
@@ -501,10 +511,15 @@ class MasterPipeline:
         cached = cached or {}
         durations = {}
         total = len(folders)
+        uncached = sum(1 for f in folders if f.name not in cached or cached[f.name] <= 0)
+        if uncached:
+            logger.info(f"  Reading audio durations ({uncached} uncached of {total} tracks)...")
 
         for i, folder in enumerate(folders):
             if self.ui:
                 self.ui.set_current(operation='Reading audio durations…', done=i, total=total)
+            if uncached and (i + 1) % 200 == 0:
+                logger.info(f"  Reading durations: {i+1}/{total}")
             # Use cached duration if available
             if folder.name in cached and cached[folder.name] > 0:
                 durations[folder.name] = cached[folder.name]
@@ -604,6 +619,7 @@ class MasterPipeline:
         if crops_dir.exists() and not self.config.should_overwrite('crops'):
             # Count tracks and existing crops
             if source_folders:
+                logger.info(f"  Checking crop existence for {len(source_folders)} tracks...")
                 tracks_with_crops = sum(
                     1 for f in source_folders
                     if self._check_existing_crops(f, crops_dir)
@@ -965,10 +981,10 @@ class MasterPipeline:
         
         if self.config.separation_backend == 'bs_roformer':
             logger.info(f"Using backend: {fmt_notification('BS-RoFormer')}")
-            self._run_bs_roformer_batch(folders)
+            newly_separated = self._run_bs_roformer_batch(folders) or []
         else:
             logger.info(f"Using backend: {fmt_notification('Demucs')}")
-            self._run_demucs_batch(folders)
+            newly_separated = self._run_demucs_batch(folders) or []
 
         sep_time = self.stats.end_operation('demucs',
             items_processed=self.stats.tracks_separated,
@@ -977,9 +993,13 @@ class MasterPipeline:
         logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
 
         # Sub-stage 2a-ii: Stem quality filtering (optional)
+        # Only check tracks that were actually just separated — not the full library.
         if self.config.stem_quality_enabled:
-            logger.info("\n[2a-ii] Stem Quality Filtering")
-            self._run_stem_quality_check(folders)
+            if newly_separated:
+                logger.info(f"\n[2a-ii] Stem Quality Filtering ({len(newly_separated)} newly separated tracks)")
+                self._run_stem_quality_check(newly_separated)
+            else:
+                logger.info(fmt_dim("    Stem quality check: no new separations — skipping"))
 
         # Sub-stage 2a-iii: Vocal removal (optional)
         if self.config.vocal_removal_enabled:
@@ -1031,7 +1051,7 @@ class MasterPipeline:
 
         self.stats.time_track_analysis = time.time() - start_time
 
-    def _run_bs_roformer_batch(self, folders: List[Path]):
+    def _run_bs_roformer_batch(self, folders: List[Path]) -> List[Path]:
         """Run BS-RoFormer separation on all tracks."""
         from core.graceful_shutdown import shutdown_requested
         from preprocessing.bs_roformer_sep import separate_organized_folder, load_bs_roformer
@@ -1048,6 +1068,7 @@ class MasterPipeline:
         tracks_to_process = []
         skipped = 0
         stem_names = ['drums', 'bass', 'other', 'vocals']
+        logger.info(f"  Checking {len(folders)} tracks for existing stems...")
 
         for folder in folders:
             # Check for existing stems
@@ -1073,7 +1094,7 @@ class MasterPipeline:
 
         if not tracks_to_process:
             logger.info("No tracks need stem separation")
-            return
+            return []
 
         logger.info(f"Processing {fmt_notification(str(len(tracks_to_process)))} tracks...")
 
@@ -1112,7 +1133,8 @@ class MasterPipeline:
                     batch_size=batch_size,
                     overwrite=True,  # We already filtered above
                     device=device,
-                    separator=separator
+                    separator=separator,
+                    save_extra_stems=self.config.bs_roformer_save_extra_stems,
                 )
                 success_count += 1
                 logger.info(fmt_success(f"  Success: {folder.name}"))
@@ -1121,9 +1143,10 @@ class MasterPipeline:
                 logger.error(f"  Failed: {folder.name} - {e}")
                 
         self.stats.tracks_separated = success_count
+        return tracks_to_process
 
 
-    def _run_demucs_batch(self, folders: List[Path]):
+    def _run_demucs_batch(self, folders: List[Path]) -> List[Path]:
         """Run Demucs separation on all tracks (parallel subprocess-based)."""
         num_workers = self.config.demucs_workers
         logger.info(f"Separating stems (model={fmt_notification(self.config.demucs_model)}, "
@@ -1132,6 +1155,7 @@ class MasterPipeline:
         # Find all tracks that need processing
         tracks_to_process = []
         skipped = 0
+        logger.info(f"  Checking {len(folders)} tracks for existing stems...")
 
         for folder in folders:
             full_mix_files = list(folder.glob('full_mix.*'))
@@ -1175,7 +1199,7 @@ class MasterPipeline:
 
         if not tracks_to_process:
             logger.info("No tracks need stem separation")
-            return
+            return []
 
         logger.info(f"Processing {fmt_notification(str(len(tracks_to_process)))} tracks with "
                     f"{fmt_notification(str(num_workers))} parallel workers...")
@@ -1222,6 +1246,8 @@ class MasterPipeline:
         except Exception as e:
             logger.error(f"Demucs batch failed: {e}")
             self.stats.errors.append(f"Demucs: {e}")
+
+        return [t.parent for t in tracks_to_process]
 
     def _run_stem_quality_check(self, folders: List[Path]):
         """Check stem quality and mix flagged stems back to 'other' in one parallel pass."""
@@ -1956,9 +1982,10 @@ class MasterPipeline:
             self._crop_folder_index = index
             return index
 
-        for crop_folder in crops_dir.iterdir():
-            if not crop_folder.is_dir():
-                continue
+        all_dirs = [d for d in crops_dir.iterdir() if d.is_dir()]
+        total = len(all_dirs)
+        logger.info(f"  Scanning crop index ({total} folders in {crops_dir.name})...")
+        for i, crop_folder in enumerate(all_dirs):
             # Quick check: any file matching *_N.ext pattern
             has_crops = False
             for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
@@ -1968,9 +1995,11 @@ class MasterPipeline:
                     break
             if has_crops:
                 index.add(crop_folder.name)
+            if (i + 1) % 500 == 0:
+                logger.info(f"  Scanning crop index: {i+1}/{total}")
 
         self._crop_folder_index = index
-        logger.debug(f"Crop folder index: {len(index)} folders with crops")
+        logger.info(f"  Crop index: {len(index)}/{total} folders contain crops")
         return index
 
     def _check_existing_crops(self, folder: Path, crops_dir: Path) -> bool:

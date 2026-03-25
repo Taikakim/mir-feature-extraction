@@ -9,8 +9,8 @@
 # PATHS
 # =============================================================================
 paths:
-  input: /run/media/kim/Lehto/goa-new                     # Required: Input directory (raw audio or organized)
-  output: /run/media/kim/Mantu/ai-music/Goa_Separated                  # Output directory for organized files (null = in-place)
+  input: /run/media/kim/Mantu/ai-music/Goa_Separated                      # Required: Input directory (raw audio or organized)
+  output: null                  # Output directory for organized files (null = in-place)
   latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
 
 # =============================================================================
@@ -18,8 +18,8 @@ paths:
 # =============================================================================
 stages:
   organize: false                 # Stage 1: Organize raw files into project structure
-  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
-  cropping: false                 # Stage 3: Create training crops
+  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  cropping: true                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -46,6 +46,11 @@ source_separation:
     batch_size: 2
 
     device: cuda
+
+    # Whether to save extra stems (e.g. piano, guitar) as individual files.
+    # Extra stems are always downmixed into 'other' regardless of this setting.
+    # Set to true only if you need the individual piano/guitar files.
+    save_extra_stems: false
 
   # ---------------------------------------------------------------------------
   # DEMUCS CONFIGURATION
