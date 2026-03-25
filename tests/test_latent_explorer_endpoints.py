@@ -174,3 +174,22 @@ def test_average_shape_skips_stem_files():
         assert points is not None
         # PC1 projection of mean([1]*64) with identity components ≈ 1.0
         assert abs(points[0][0] - 1.0) < 0.01
+
+
+def test_average_wav_function_signature():
+    """_average_track_to_wav exists and has the expected signature.
+
+    latent_server imports torch and calls setup_rocm_env() at module level,
+    so this test requires the GPU/ROCm environment.  It is skipped in CI or
+    CPU-only environments.
+    """
+    try:
+        import latent_server as srv
+    except Exception as e:
+        pytest.skip(f"latent_server not importable in this environment: {e}")
+
+    import inspect
+    sig = inspect.signature(srv._average_track_to_wav)
+    assert "track" in sig.parameters
+    # Should not require GPU arguments (those are module globals)
+    assert len(sig.parameters) == 1

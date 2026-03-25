@@ -786,6 +786,58 @@ def decode_to_wav(npy_path: Path, smart_loop: bool = False, qs: dict = None) -> 
     return buf.getvalue()
 
 
+def _average_track_to_wav(track: str) -> bytes:
+    """Average all full-mix latents for a track, decode once, return WAV bytes.
+
+    Caller must hold _decode_lock.
+    """
+    track_dir = _latent_dir / track
+    stem_suffixes = {"_bass", "_drums", "_other", "_vocals"}
+    npys = [p for p in sorted(track_dir.glob("*.npy"))
+            if not any(p.stem.endswith(s) for s in stem_suffixes)]
+    if not npys:
+        raise FileNotFoundError(f"No full-mix latent files for track: {track}")
+
+    arrays = []
+    max_T  = 0
+    for npy in npys:
+        try:
+            arr = np.load(str(npy)).astype(np.float32)   # [64, T]
+            arrays.append(arr)
+            max_T = max(max_T, arr.shape[1])
+        except Exception:
+            pass
+
+    if not arrays:
+        raise ValueError("Could not load any latent files")
+
+    padded = np.zeros((len(arrays), 64, max_T), dtype=np.float32)
+    for i, arr in enumerate(arrays):
+        padded[i, :, :arr.shape[1]] = arr
+    mean_np = padded.mean(axis=0)   # [64, max_T]
+
+    mean_t = torch.from_numpy(mean_np).unsqueeze(0).to(device=_device, dtype=_dtype)
+    with torch.no_grad():
+        audio = _autoencoder.decode(mean_t)   # [1, 2, samples]
+
+    audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
+
+    # Peak-normalise to 0.9
+    peak = np.abs(audio_np).max()
+    if peak > 1e-6:
+        audio_np = audio_np * (0.9 / peak)
+    audio_np  = np.clip(audio_np, -1.0, 1.0)
+    audio_i16 = (audio_np * 32767).astype(np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(_sample_rate)
+        wf.writeframes(audio_i16.T.flatten().tobytes())
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Crossfade decode
 # ---------------------------------------------------------------------------
@@ -1233,6 +1285,26 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_crops(track)
         elif parsed.path == "/crossfade":
             self._handle_crossfade(qs)
+        elif parsed.path == "/average":
+            track = qs.get("track", [""])[0]
+            if not track:
+                self._error(400, "Missing track parameter")
+                return
+            if not (_latent_dir / track).is_dir():
+                self._error(404, f"Track not found: {track}")
+                return
+            try:
+                with _decode_lock:
+                    wav_bytes = _average_track_to_wav(track)
+            except Exception as e:
+                self._error(500, str(e))
+                return
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type",   "audio/wav")
+            self.send_header("Content-Length", str(len(wav_bytes)))
+            self.end_headers()
+            self.wfile.write(wav_bytes)
         else:
             self.send_response(404)
             self._cors()
