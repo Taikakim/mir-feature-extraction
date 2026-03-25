@@ -380,6 +380,7 @@
     btnBeatMatch.style.background = isBeatMatch ? "#5bc4ff" : "#444";
     btnBeatMatch.style.color      = isBeatMatch ? "#000" : "#eee";
     updateBmInfo();
+    updateAlignmentTransform();
     reloadXfadeIfPlaying();
   });
 
@@ -594,6 +595,23 @@
       bmInfo.innerHTML = lines.join('<br>') || "No BPM/Chroma data";
   }
 
+  function updateAlignmentTransform() {
+    if (!isBeatMatch) {
+      _bmTransformB = null;
+    } else {
+      const tA = trackA_sel.value;
+      const tB = trackB_sel.value;
+      if (tA && tB) {
+        const bm = computeBeatMatch(tA, tB);
+        _bmTransformB = (bm && bm.stretchB !== 1.0)
+          ? { stretch: 1.0 / bm.stretchB, phase: 0 }
+          : null;
+      } else {
+        _bmTransformB = null;
+      }
+    }
+    drawAlignmentBar();
+  }
 
   function buildXfadeURL() {
     const tA = trackA_sel.value;
@@ -925,10 +943,14 @@
       return { manip_channels, manip_amounts };
   }
 
-  trackA_sel.addEventListener('change', () => loadCrops(trackA_sel.value, cropA_sel));
+  trackA_sel.addEventListener('change', () => {
+    loadCrops(trackA_sel.value, cropA_sel);
+    updateAlignmentTransform();
+  });
   trackB_sel.addEventListener('change', () => {
     if(trackB_sel.value) loadCrops(trackB_sel.value, cropB_sel, true);
     else cropB_sel.innerHTML = '<option value="">-- None --</option>';
+    updateAlignmentTransform();
   });
   
   cropA_sel.addEventListener('change', () => {
