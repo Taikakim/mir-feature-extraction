@@ -104,6 +104,32 @@ Track Name/
 
 **Statistical Analysis:** `tools/statistical_analysis.py`. Scans `.INFO` files recursively. Basic stats + outlier detection per feature. `--per-track` aggregates crops to one value per track. `--top N --key bpm` queries ranked values. Feature selection: `--vif`, `--pca`, `--cluster`, `--mi`, `--feature-select` (all). Plots (heatmap, dendrogram, scree, VIF bar) via `--plots-dir`.
 
+## TimeseriesDB
+
+Time-coded feature arrays (one value per analysis step across the crop duration) are stored in a SQLite database at `data/timeseries.db`, **not** in `.INFO` sidecar files. This keeps companion JSONs compact (~3 KB instead of ~130 KB).
+
+**Fields stored in DB** (all `*_ts` numeric arrays):
+- `rms_energy_{bass,body,mid,air}_ts` — per-band energy over time (shape `(n_steps,)`)
+- `spectral_{flatness,flux,skewness,kurtosis}_ts`
+- `beat_activations_ts`, `downbeat_activations_ts`, `onsets_activations_ts`
+- `hpcp_ts` — chroma over time (shape `(n_steps, 12)`)
+- `tonic_ts`, `tonic_strength_ts`
+- Optional timbral `_ts` fields when `timeseries_timbral: true`
+
+**API:**
+```python
+from core.timeseries_db import TimeseriesDB
+
+db = TimeseriesDB.open()             # opens data/timeseries.db
+arrays = db.get("Artist - Title_0")  # {field: np.ndarray} or None
+db.has("Artist - Title_0")           # bool
+db.count()                           # total entries
+```
+
+**Pipeline integration:** `pipeline.py` writes to TimeseriesDB instead of `results` dict when `skip_timeseries: false`. The `existing_keys` / sentinel pattern is bypassed — the DB `has()` check is the source of truth for resume logic.
+
+**Encoding:** `encode_dataset.py` already strips all list fields from companion JSONs (the `padding_mask` exception is for SAT training). TimeseriesDB is for analysis tools and future conditioning only — the encoder does not read from it.
+
 ## Development Rules
 
 ### JSON handling

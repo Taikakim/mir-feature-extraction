@@ -429,9 +429,16 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     logger.warning(f"Timbral failed for {crop_path.name}: {type(e).__name__}: {e}")
 
         # Time-series features (per-step arrays at configurable resolution)
+        # Arrays are stored in TimeseriesDB, NOT in the .INFO sidecar, to keep
+        # companion JSON files compact (~3 KB instead of ~130 KB).
         if not config_dict.get('skip_timeseries', True):
-            if _needs_processing([TIMESERIES_SENTINEL], 'timeseries'):
-                _op = 'overwrite' if TIMESERIES_SENTINEL in existing_keys else 'new'
+            from core.timeseries_db import TimeseriesDB
+            _ts_db = TimeseriesDB.open()
+            _crop_key = crop_path.stem
+            _ts_in_db = _ts_db.has(_crop_key)
+            _ts_needs = overwrite or config_dict.get('per_feature_overwrite', {}).get('timeseries', False) or not _ts_in_db
+            if _ts_needs:
+                _op = 'overwrite' if _ts_in_db else 'new'
                 try:
                     import numpy as np
                     n_steps = config_dict.get('timeseries_n_steps', 256)
@@ -456,7 +463,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             extract_timbral=ts_timbral,
                             timbral_n_steps=ts_timbral_steps,
                         )
-                    results.update(ts_results)
+                    _ts_db.put(_crop_key, ts_results)
                     generated.append(f'timeseries({_op})')
                 except Exception as e:
                     logger.warning(f"Time-series failed for {crop_path.name}: {type(e).__name__}: {e}")
@@ -1166,8 +1173,9 @@ class Pipeline:
             if _dataset_path and _dataset_path.exists():
                 try:
                     from core.data_store import DataStore
+                    logger.info(f"  Loading coverage from dataset.json...")
                     _ds = DataStore.load(_dataset_path)
-                    _ds_cov = _ds.coverage()  # {feature_key: {"pct": float, ...}}
+                    _ds_cov = _ds.coverage()
                     _n_ds = len(_ds)
                     if _n_ds > 0:
                         self.stats['feature_coverage'] = {
@@ -1178,8 +1186,8 @@ class Pipeline:
                             for lbl, keys in _COV_KEY_GROUPS.items()
                         }
                         self.stats['feature_coverage_n'] = _n_ds
-                        logger.debug(
-                            f"Pre-loaded coverage from dataset.json ({_n_ds} entries)"
+                        logger.info(
+                            f"  Coverage pre-loaded from dataset.json ({_n_ds} entries)"
                         )
                 except Exception as _e:
                     logger.debug(f"Could not pre-load coverage from dataset.json: {_e}")
@@ -1189,6 +1197,7 @@ class Pipeline:
             _n_total = len(all_crops)
 
             tasks = []
+            logger.info(f"  Scanning {_n_total} crop INFO files for pending work...")
             for _scan_i, crop_path in enumerate(all_crops):
                 if shutdown_requested.is_set():
                     logger.info("  Shutdown requested — aborting pre-scan.")
@@ -1209,6 +1218,8 @@ class Pipeline:
                         lbl: cnt / _n_total for lbl, cnt in _cov_counts.items()
                     }
                     self.stats['feature_coverage_n'] = _n_total
+                    if _scan_i % 5000 == 0 and _scan_i > 0:
+                        logger.info(f"  Scanning crops: {_scan_i}/{_n_total} ({100*_scan_i//_n_total}%)")
 
                 # Check if this crop needs ANY processing — use ALL keys per group
                 # so a crop missing only one key in a group is still queued.
