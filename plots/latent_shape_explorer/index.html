@@ -427,6 +427,86 @@
     return (loopBars * 4 / bpm) * 60;
   }
 
+  // ---- ⊕ Avg button -------------------------------------------------------
+  const btnAvg   = document.getElementById('btn_avg');
+  const avgStatus = document.getElementById('avg_status');
+
+  btnAvg.addEventListener('click', async () => {
+    const track = trackA_sel.value;
+    if (!track) { avgStatus.textContent = 'Select Track A first'; return; }
+
+    btnAvg.disabled = true;
+    avgStatus.textContent = 'Loading...';
+
+    try {
+      const [audioResp, shapeResp] = await Promise.all([
+        fetch(`http://localhost:7891/average?track=${encodeURIComponent(track)}`),
+        fetch(`${SHAPE_BASE}/api/average-shape?track=${encodeURIComponent(track)}`),
+      ]);
+
+      if (!audioResp.ok) throw new Error(`Audio: HTTP ${audioResp.status}`);
+      if (!shapeResp.ok) throw new Error(`Shape: HTTP ${shapeResp.status}`);
+
+      const [arrayBuf, shapeData] = await Promise.all([
+        audioResp.arrayBuffer(),
+        shapeResp.json(),
+      ]);
+
+      const ctx = getXfadeCtx();
+      const buf = await ctx.decodeAudioData(arrayBuf);
+      if (xfadeSourceNode) { try { xfadeSourceNode.stop(); } catch(e){} xfadeSourceNode = null; }
+      if (_loopScheduler) { clearTimeout(_loopScheduler.timer); _loopScheduler = null; }
+      const gain = ctx.createGain();
+      gain.gain.value = 1;
+      gain.connect(ctx.destination);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(gain);
+      src.start();
+      xfadeSourceNode = src;
+      xfadeBuffer     = buf;
+      xfadePlayStart  = ctx.currentTime;
+      btnXfadePlay.textContent = '⏸ Stop Crossfade';
+      src.onended = () => {
+        if (xfadeSourceNode === src) {
+          xfadeSourceNode = null; xfadeBuffer = null;
+          btnXfadePlay.textContent = '▶ Play Crossfade';
+        }
+      };
+
+      const pts = shapeData.points;
+      if (pts && pts.length > 0) {
+        const x = pts.map(p => p[0]);
+        const y = pts.map(p => p[1]);
+        const z = pts.map(p => p[2]);
+        const n = pts.length;
+        const colors = Array.from({length: n}, (_, i) => i / Math.max(n-1, 1));
+        const avgTrace = {
+          type: 'scatter3d', mode: 'lines',
+          x, y, z,
+          line: { width: 4, color: colors, colorscale: [[0,'rgba(77,193,55,0.1)'],[1,'rgb(77,193,55)']] },
+          name: `⊕ Avg ${track}`,
+          hoverinfo: 'name',
+        };
+        const plotDiv = document.getElementById('plot');
+        const existingNames = (plotDiv.data || []).map(t => t.name);
+        const avgIdx = existingNames.findIndex(n => n && n.startsWith('⊕ Avg'));
+        if (avgIdx >= 0) {
+          Plotly.restyle('plot', { x: [x], y: [y], z: [z] }, [avgIdx]);
+        } else {
+          Plotly.addTraces('plot', avgTrace);
+        }
+      }
+
+      avgStatus.textContent = `${buf.duration.toFixed(1)}s`;
+    } catch(e) {
+      avgStatus.textContent = 'avg failed';
+      console.error('⊕ Avg error:', e);
+    } finally {
+      btnAvg.disabled = false;
+    }
+  });
+
   async function fetchTimecodes(track, crop, slot) {
     if (!track || !crop) return;
     try {
