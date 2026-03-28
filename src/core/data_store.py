@@ -49,6 +49,20 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _compact_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace list values with their length before storing in dataset.json.
+
+    Timeseries arrays (e.g. rms_energy_bass_ts: [256 floats]) and beat arrays
+    (downbeats, beat_activations_ts, …) can each be hundreds of floats.  Storing
+    full arrays in a consolidated JSON file causes it to balloon to tens of GB.
+
+    The length value is sufficient for coverage tracking (key present = feature
+    was extracted; length = expected resolution).  Raw arrays are always available
+    in the per-crop .INFO files when needed.
+    """
+    return {k: len(v) if isinstance(v, list) else v for k, v in entry.items()}
+
+
 class DataStore:
     """Consolidated in-memory view of all .INFO files under a directory root."""
 
@@ -88,7 +102,7 @@ class DataStore:
                 with open(info_file, "r", encoding="utf-8") as f:
                     entry = json.load(f)
                 key = info_file.stem
-                data[key] = entry
+                data[key] = _compact_entry(entry)
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning(f"DataStore: skipping {info_file}: {exc}")
 

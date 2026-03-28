@@ -45,7 +45,7 @@ def get_tidal_session():
     # Try loading existing session from disk
     if session_file.exists():
         try:
-            session.load_session_from_file(str(session_file))
+            session.load_session_from_file(session_file)
             if session.check_login():
                 logger.debug("Tidal session loaded from file")
                 _tidal_session_cache = session
@@ -71,7 +71,7 @@ def get_tidal_session():
             session.login_oauth_simple()
             if session.check_login():
                 print("Authentication successful! Saving session...")
-                session.save_session_to_file(str(session_file))
+                session.save_session_to_file(session_file)
                 _tidal_session_cache = session
                 return session
             else:

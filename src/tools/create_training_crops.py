@@ -49,14 +49,64 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
 logger = logging.getLogger(__name__)
 
+# ── OOM / write-queue constants ───────────────────────────────────────────────
+# Maximum number of in-flight async write jobs per worker process.
+# Each job holds one crop_audio array in memory until the write completes.
+# Increasing this improves write throughput on fast storage; decrease if OOM.
+MAX_WRITE_QUEUE: int = 8
+
+# Minimum free RAM (MB) required before preloading stems.
+# Used when psutil is available.
+_RAM_GUARD_MB: int = 1024
+
+# Hard cap on stem preload size when psutil is not installed.
+_STEM_HARD_CAP_MB: int = 2048
+
 
 def preload_stems(folder_path: Path, target_sr: int) -> Dict[str, Tuple[np.ndarray, Path]]:
     """
     Pre-load all stem audio files into RAM for a track folder.
 
     Returns dict mapping stem name to (audio_array, source_path).
+    Returns an empty dict when available RAM is insufficient to hold the stems
+    (guarded via psutil if installed, or a 2 GB hard cap otherwise).
     Audio is resampled to target_sr if needed and shaped as (samples, channels).
     """
+    # ── RAM guard: estimate stem footprint before committing to the load ──────
+    stem_bytes_est = 0
+    for stem_name in STEM_NAMES:
+        for ext in ['.flac', '.wav', '.mp3', '.m4a']:
+            potential = folder_path / f"{stem_name}{ext}"
+            if potential.exists():
+                try:
+                    info = sf.info(str(potential))
+                    stem_bytes_est += info.frames * info.channels * 4  # float32
+                except Exception:
+                    pass
+                break
+
+    if stem_bytes_est == 0:
+        return {}
+
+    stem_mb = stem_bytes_est / (1024 ** 2)
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available / (1024 ** 2)
+        if avail_mb < stem_mb + _RAM_GUARD_MB:
+            logger.warning(
+                f"{folder_path.name}: skipping stem preload — need ~{stem_mb:.0f} MB, "
+                f"only {avail_mb:.0f} MB available (want {_RAM_GUARD_MB} MB headroom)"
+            )
+            return {}
+    except ImportError:
+        if stem_mb > _STEM_HARD_CAP_MB:
+            logger.warning(
+                f"{folder_path.name}: skipping stem preload — ~{stem_mb:.0f} MB exceeds "
+                f"{_STEM_HARD_CAP_MB} MB cap (install psutil for live RAM check)"
+            )
+            return {}
+
+    # ── Actual load ───────────────────────────────────────────────────────────
     loaded = {}
 
     for stem_name in STEM_NAMES:
@@ -90,6 +140,63 @@ def preload_stems(folder_path: Path, target_sr: int) -> Dict[str, Tuple[np.ndarr
             logger.warning(f"Failed to pre-load stem {stem_name}: {e}")
 
     return loaded
+
+
+def _extract_features_inline(
+    crop_audio: np.ndarray,
+    sr: int,
+    crop_path: Path,
+    feature_config: dict,
+) -> dict:
+    """
+    Run fast CPU-only features on an in-memory crop array during crop creation.
+
+    Called while crop_audio is already resident in RAM (just sliced from the
+    source track), eliminating a disk re-read in Stage 4 PASS 1.  Only the
+    features that accept pre-loaded numpy arrays are included; timbral (needs a
+    real file path) and chroma (benefits from stem files) are left for Stage 4.
+
+    Args:
+        crop_audio:    (samples, channels) or (samples,) float32 array
+        sr:            sample rate
+        crop_path:     path the file WILL be written to (passed as dummy arg
+                       to functions that require a path for logging/caching)
+        feature_config: dict with skip_* flags (same keys as pipeline config)
+
+    Returns:
+        dict of computed feature values; empty on complete failure.
+    """
+    results = {}
+
+    if not feature_config.get('skip_loudness'):
+        try:
+            from timbral.loudness import analyze_file_loudness
+            results.update(analyze_file_loudness(crop_path, audio=crop_audio, sr=sr))
+        except Exception:
+            pass
+
+    if not feature_config.get('skip_spectral'):
+        try:
+            from spectral.spectral_features import analyze_spectral_features
+            results.update(analyze_spectral_features(crop_path, audio=crop_audio, sr=sr))
+        except Exception:
+            pass
+
+    if not feature_config.get('skip_saturation'):
+        try:
+            from spectral.saturation import analyze_saturation
+            results.update(analyze_saturation(crop_path, audio=crop_audio, sr=sr))
+        except Exception:
+            pass
+
+    if not feature_config.get('skip_multiband_rms'):
+        try:
+            from spectral.multiband_rms import analyze_multiband_rms
+            results.update(analyze_multiband_rms(crop_path, audio=crop_audio, sr=sr))
+        except Exception:
+            pass
+
+    return results
 
 # Check for mutagen (for ID3 tag writing)
 try:
@@ -825,7 +932,8 @@ def apply_fades(crop_audio: np.ndarray, fade_len: int) -> np.ndarray:
 def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                             audio: np.ndarray, full_mix_path: Path,
                             output_dir: Optional[Path] = None,
-                            preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None) -> int:
+                            preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None,
+                            feature_config: Optional[dict] = None) -> int:
     """
     Create simple sequential crops at fixed sample length.
     No beat alignment, just exact sample boundaries with fades.
@@ -909,6 +1017,15 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
             end_sec = end_sample / sr
             position = start_sec / duration_sec
 
+            # OOM guard: drain write queue before adding another job
+            if len(write_futures) >= MAX_WRITE_QUEUE:
+                for _f in write_futures:
+                    try:
+                        _f.result()
+                    except Exception as _we:
+                        logger.warning(f"Async write failed: {_we}")
+                write_futures.clear()
+
             # Schedule async writes: full mix crop + stem crops
             def _write_crop(audio_data, path, src_path, meta, stem_data, folder, base_path,
                             s_start, s_end, s_sr, s_fade, s_meta, s_preloaded):
@@ -923,9 +1040,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                 current_sample, end_sample, sr, fade_len, id3_metadata, preloaded_stems
             ))
 
-            # Write all metadata to .INFO (no separate .json)
+            # .INFO: position metadata + optional inline CPU features
             info_path = get_info_path(crop_path)
-            safe_update(info_path, {
+            info_data = {
                 "position": position,
                 "start_time": start_sec,
                 "end_time": end_sec,
@@ -936,7 +1053,10 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
                 "source": str(full_mix_path.name),
                 "has_stems": len(preloaded_stems) > 0,
                 "stem_names": stem_names_loaded,
-            })
+            }
+            if feature_config is not None:
+                info_data.update(_extract_features_inline(crop_audio, sr, crop_path, feature_config))
+            safe_update(info_path, info_data)
 
             crop_count += 1
             current_sample = end_sample  # Sequential: next starts where this ended
@@ -960,18 +1080,25 @@ def create_crops_for_file(folder_path: Path,
                           div4: bool = False,
                           sequential: bool = False,
                           output_dir: Optional[Path] = None,
-                          overwrite: bool = False) -> int:
+                          overwrite: bool = False,
+                          feature_config: Optional[dict] = None) -> int:
     """
     Generate crops for a single folder.
 
     Args:
-        folder_path: Path to organized folder
+        folder_path:    Path to organized folder
         length_samples: Target crop length in samples
-        overlap: If True, next crop starts at last_start + length/2
-        div4: If True, ensure each crop contains downbeats divisible by 4
-        sequential: If True, use simple sequential mode (no beat alignment)
-        output_dir: Optional output directory for crops
-        overwrite: If False, skip folders that already have crops
+        overlap:        If True, next crop starts at last_start + length/2
+        div4:           If True, ensure each crop contains downbeats divisible by 4
+        sequential:     If True, use simple sequential mode (no beat alignment)
+        output_dir:     Optional output directory for crops
+        overwrite:      If False, skip folders that already have crops
+        feature_config: Optional dict of skip_* flags.  When provided, fast
+                        CPU-only features (loudness, spectral, saturation,
+                        multiband_rms) are extracted on the in-memory crop
+                        array and saved to .INFO during crop creation,
+                        eliminating a disk re-read in Stage 4 PASS 1.
+                        Pass None (default) to preserve original behaviour.
     """
     stems = get_stem_files(folder_path, include_full_mix=True)
     if 'full_mix' not in stems:
@@ -1075,7 +1202,8 @@ def create_crops_for_file(folder_path: Path,
             audio = audio.T
         preloaded_stems = preload_stems(folder_path, sr)
         return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path,
-                                       output_dir, preloaded_stems=preloaded_stems)
+                                       output_dir, preloaded_stems=preloaded_stems,
+                                       feature_config=feature_config)
 
     # Beat-aligned mode - load beat grid (BPM not needed when grids are available)
     beat_times = None
@@ -1111,7 +1239,8 @@ def create_crops_for_file(folder_path: Path,
             audio = audio.T
         fallback_stems = preload_stems(folder_path, sr)
         return create_sequential_crops(folder_path, length_samples, sr, audio, full_mix_path,
-                                       output_dir, preloaded_stems=fallback_stems)
+                                       output_dir, preloaded_stems=fallback_stems,
+                                       feature_config=feature_config)
 
     # Get BPM from INFO file or calculate from beat times
     info_path = get_info_path(full_mix_path)
@@ -1293,6 +1422,21 @@ def create_crops_for_file(folder_path: Path,
         crop_name = f"{track_name}_{crop_count}{source_ext}"
         crop_path = crops_dir / crop_name
 
+        # OOM guard: drain write queue before adding another job.
+        # Also flush pending .INFO writes so positional metadata + inline
+        # features survive a kill between batches (beat-aligned path writes
+        # .INFO in batch at end; without this flush a crash loses everything).
+        if len(write_futures) >= MAX_WRITE_QUEUE:
+            for _f in write_futures:
+                try:
+                    _f.result()
+                except Exception as _we:
+                    logger.warning(f"Async write failed: {_we}")
+            write_futures.clear()
+            if pending_info_writes:
+                batch_write_info(pending_info_writes, merge=False)
+                pending_info_writes.clear()
+
         # Schedule async writes: full mix crop + stem crops
         write_futures.append(write_pool.submit(
             _write_crop_and_stems, crop_audio, crop_path, full_mix_path, id3_metadata,
@@ -1341,6 +1485,10 @@ def create_crops_for_file(folder_path: Path,
 
         # Add pre-loaded transferrable features (already loaded before loop)
         crop_info_data.update(source_transferrable)
+
+        # Inline CPU features — crop_audio is in RAM, no disk re-read needed in Stage 4
+        if feature_config is not None:
+            crop_info_data.update(_extract_features_inline(crop_audio, sr, crop_path, feature_config))
 
         # Queue for batch write
         pending_info_writes.append((crop_info_path, crop_info_data))

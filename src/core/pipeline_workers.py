@@ -11,10 +11,34 @@ Usage:
         futures = [executor.submit(process_folder_features, (folder, False)) for folder in folders]
 """
 
+import logging
 import subprocess
 import time
 from pathlib import Path
 from typing import Tuple
+
+
+def init_worker():
+    """Initializer for every ProcessPoolExecutor worker.
+
+    Must live in this module (not master_pipeline.py) so that workers only
+    import core.pipeline_workers when unpickling the initializer.  Importing
+    master_pipeline.py in a worker triggers setup_rocm_env() which registers
+    atexit(os._exit, 0); that makes workers exit abruptly on pool shutdown,
+    breaking the executor's cleanup protocol and raising BrokenProcessPool.
+
+    Suppresses all logging so worker module-level logger.warning() calls
+    don't fall back to Python's lastResort handler and print raw to the
+    terminal, breaking the TUI display.
+    """
+    logging.root.addHandler(logging.NullHandler())
+    logging.root.setLevel(logging.ERROR)
+    # Pin thread-parallel libraries to 1 thread per worker — the pipeline
+    # uses process-level parallelism, not per-process thread pools.
+    import os
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
 
 
 def process_folder_features(args) -> Tuple[str, bool, str]:
@@ -154,17 +178,24 @@ def process_folder_features(args) -> Tuple[str, bool, str]:
             return (folder_name, False, str(e))
 
 
-def process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool, bool]) -> Tuple[str, int, str]:
+def process_folder_crops(args) -> Tuple[str, int, str]:
     """
     Worker function for parallel crop creation.
 
     Args:
-        args: Tuple of (folder_path, crops_dir, length_samples, sequential, overlap, div4, overwrite)
+        args: Tuple of (folder_path, crops_dir, length_samples, sequential,
+              overlap, div4, overwrite[, feature_config])
+              feature_config is an optional dict of skip_* flags; when present,
+              fast CPU features are extracted inline during crop creation.
 
     Returns:
         Tuple of (folder_name, crop_count, message)
     """
-    folder, crops_dir, length_samples, sequential, overlap, div4, overwrite = args
+    if len(args) == 8:
+        folder, crops_dir, length_samples, sequential, overlap, div4, overwrite, feature_config = args
+    else:
+        folder, crops_dir, length_samples, sequential, overlap, div4, overwrite = args
+        feature_config = None
     folder_name = folder.name
 
     # Import here to avoid issues with multiprocessing
@@ -186,6 +217,7 @@ def process_folder_crops(args: Tuple[Path, Path, int, bool, bool, bool, bool]) -
                 overlap=overlap,
                 div4=div4,
                 overwrite=overwrite,
+                feature_config=feature_config,
             )
             return (folder_name, count, f"Created {count} crops")
 

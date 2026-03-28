@@ -647,6 +647,8 @@ class PipelineUI:
                 + getattr(self._stats, 'tracks_separated', 0)
             )
             crops_analyzed = getattr(self._stats, 'crops_analyzed', 0)
+            # Also reflect crops being *created* (stage 3) before analysis begins
+            crops_analyzed = max(crops_analyzed, getattr(self._stats, 'crops_created', 0))
             if crop_stats:
                 crops_analyzed = max(crops_analyzed, crop_stats.get('crops_processed', 0))
             metadata_found = getattr(self._stats, 'tracks_metadata_found', 0)

@@ -75,7 +75,8 @@ from core.pipeline_stats import TimingStats, PipelineStats
 from core.pipeline_workers import (
     process_folder_features as _process_folder_features,
     process_folder_crops as _process_folder_crops,
-    process_demucs_subprocess as _process_demucs_subprocess
+    process_demucs_subprocess as _process_demucs_subprocess,
+    init_worker as _init_worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,7 @@ class MasterPipelineConfig:
     # Stage control
     skip_organize: bool = False
     skip_track_analysis: bool = False
+    skip_separate: bool = False        # Skip stem separation only (beats/metadata/crops still run)
     skip_crops: bool = False
     skip_crop_analysis: bool = False
 
@@ -119,6 +121,7 @@ class MasterPipelineConfig:
     bs_roformer_batch_size: int = 1
     bs_roformer_device: str = 'cuda'
     bs_roformer_save_extra_stems: bool = False
+    bs_roformer_discard_stems: List[str] = field(default_factory=list)
 
     # Demucs settings
     demucs_model: str = 'htdemucs'  # htdemucs (fast), htdemucs_ft (4x slower, better)
@@ -273,6 +276,7 @@ class MasterPipelineConfig:
             # Stages (inverted - config has enabled flags, we have skip flags)
             skip_organize=not stages.get('organize', True),
             skip_track_analysis=not stages.get('track_analysis', True),
+            skip_separate=not stages.get('separate', True),
             skip_crops=not stages.get('cropping', True),
             skip_crop_analysis=not stages.get('crop_analysis', True),
 
@@ -286,6 +290,7 @@ class MasterPipelineConfig:
             bs_roformer_batch_size=bs_roformer.get('batch_size', 1),
             bs_roformer_device=bs_roformer.get('device', 'cuda'),
             bs_roformer_save_extra_stems=bs_roformer.get('save_extra_stems', False),
+            bs_roformer_discard_stems=bs_roformer.get('discard_stems', []),
 
             # Demucs (support both new 'demucs' sub-block and legacy top-level 'demucs')
             demucs_model=demucs_cfg.get('model', demucs_legacy.get('model', 'htdemucs')),
@@ -662,6 +667,16 @@ class MasterPipeline:
                 if self.ui:
                     self.ui.set_tracks_total(len(new_folders))
                 logger.info(f"Post-organise rescan: {len(new_folders)} tracks indexed")
+            elif self.config.output_dir and self.config.input_dir != self.config.output_dir:
+                # Nothing was copied — check if input is already organized
+                input_folders = list(find_organized_folders(self.config.input_dir))
+                if input_folders:
+                    logger.warning(
+                        f"\nOrganise step copied 0 files, but {len(input_folders)} organized folders"
+                        f" exist in input dir ({self.config.input_dir.name})."
+                        f"\nThe input is already organized — set 'output: null' and"
+                        f" 'stages.organize: false' to process it in-place."
+                    )
             state.mark_stage_completed('organize')
             state.save()
         else:
@@ -976,21 +991,25 @@ class MasterPipeline:
         logger.info(f"Found {len(folders)} tracks to analyze")
 
         # Sub-stage 2a: Stem Separation
-        logger.info("\n[2a] Stem Separation")
-        self.stats.start_operation('demucs')
-        
-        if self.config.separation_backend == 'bs_roformer':
-            logger.info(f"Using backend: {fmt_notification('BS-RoFormer')}")
-            newly_separated = self._run_bs_roformer_batch(folders) or []
+        newly_separated = []
+        if self.config.skip_separate:
+            logger.info("\n[2a] Stem Separation — skipped (stages.separate: false)")
         else:
-            logger.info(f"Using backend: {fmt_notification('Demucs')}")
-            newly_separated = self._run_demucs_batch(folders) or []
+            logger.info("\n[2a] Stem Separation")
+            self.stats.start_operation('demucs')
 
-        sep_time = self.stats.end_operation('demucs',
-            items_processed=self.stats.tracks_separated,
-            items_skipped=len(folders) - self.stats.tracks_separated,
-            audio_duration=self.stats.total_audio_duration)
-        logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
+            if self.config.separation_backend == 'bs_roformer':
+                logger.info(f"Using backend: {fmt_notification('BS-RoFormer')}")
+                newly_separated = self._run_bs_roformer_batch(folders) or []
+            else:
+                logger.info(f"Using backend: {fmt_notification('Demucs')}")
+                newly_separated = self._run_demucs_batch(folders) or []
+
+            sep_time = self.stats.end_operation('demucs',
+                items_processed=self.stats.tracks_separated,
+                items_skipped=len(folders) - self.stats.tracks_separated,
+                audio_duration=self.stats.total_audio_duration)
+            logger.info(fmt_dim(f"    Separation completed in {sep_time:.1f}s"))
 
         # Sub-stage 2a-ii: Stem quality filtering (optional)
         # Only check tracks that were actually just separated — not the full library.
@@ -1135,6 +1154,7 @@ class MasterPipeline:
                     device=device,
                     separator=separator,
                     save_extra_stems=self.config.bs_roformer_save_extra_stems,
+                    discard_stems=self.config.bs_roformer_discard_stems,
                 )
                 success_count += 1
                 logger.info(fmt_success(f"  Success: {folder.name}"))
@@ -1148,6 +1168,7 @@ class MasterPipeline:
 
     def _run_demucs_batch(self, folders: List[Path]) -> List[Path]:
         """Run Demucs separation on all tracks (parallel subprocess-based)."""
+        from core.graceful_shutdown import shutdown_requested
         num_workers = self.config.demucs_workers
         logger.info(f"Separating stems (model={fmt_notification(self.config.demucs_model)}, "
                     f"shifts={self.config.demucs_shifts}, workers={fmt_notification(str(num_workers))})")
@@ -1217,13 +1238,17 @@ class MasterPipeline:
         progress = ProgressBar(len(tracks_to_process), desc="Demucs")
 
         try:
-            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            with ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
                 future_to_track = {
                     executor.submit(_process_demucs_subprocess, args): args[0]
                     for args in args_list
                 }
 
                 for i, future in enumerate(as_completed(future_to_track), 1):
+                    if shutdown_requested.is_set():
+                        logger.info("Shutdown requested — stopping stem separation.")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
                     track = future_to_track[future]
                     try:
                         folder_name, success, elapsed, message = future.result()
@@ -1366,6 +1391,7 @@ class MasterPipeline:
             return
 
         from concurrent.futures import ProcessPoolExecutor, as_completed
+        from core.graceful_shutdown import shutdown_requested
         from core.pipeline_workers import process_folder_rhythm
 
         overwrite = self.config.should_overwrite('beats')
@@ -1405,10 +1431,14 @@ class MasterPipeline:
                     )
                 logger.info(progress.update(i))
         else:
-            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            with ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
                 futures = {executor.submit(process_folder_rhythm, args): args[0]
                            for args in args_list}
                 for i, future in enumerate(as_completed(futures), 1):
+                    if shutdown_requested.is_set():
+                        logger.info("Shutdown requested — stopping rhythm analysis.")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
                     folder_name, status, msg = future.result()
                     if status == 'success':
                         success += 1
@@ -1771,7 +1801,7 @@ class MasterPipeline:
         progress = ProgressBar(len(folders), desc="Features")
         _feat_start = time.time()
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
             # Submit all tasks
             future_to_folder = {
                 executor.submit(_process_folder_features, args): args[0]
@@ -1782,6 +1812,7 @@ class MasterPipeline:
             for i, future in enumerate(as_completed(future_to_folder), 1):
                 if shutdown_requested.is_set():
                     logger.info("Shutdown requested — stopping first-stage features.")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
                 folder = future_to_folder[future]
                 try:
@@ -2013,6 +2044,7 @@ class MasterPipeline:
 
     def _run_cropping(self):
         """Stage 3: Create crops from full tracks (parallel processing)."""
+        from core.graceful_shutdown import shutdown_requested
         logger.info("\n" + fmt_header("=" * 70))
         logger.info(fmt_stage("[STAGE 3] CROPPING"))
         logger.info(fmt_header("=" * 70))
@@ -2075,10 +2107,19 @@ class MasterPipeline:
 
                 # Prepare arguments for worker function
                 sequential = self.config.crop_mode == 'sequential'
+                # Inline CPU features: fast non-GPU analyses run during crop
+                # creation while crop_audio is already in RAM, eliminating the
+                # disk re-read that Stage 4 PASS 1 would otherwise need.
+                _inline_feature_config = {
+                    'skip_loudness':     self.config.skip_loudness,
+                    'skip_spectral':     self.config.skip_spectral,
+                    'skip_saturation':   self.config.skip_saturation,
+                    'skip_multiband_rms': self.config.skip_multiband_rms,
+                }
                 args_list = [
                     (folder, crops_dir, self.config.crop_length_samples,
                      sequential, self.config.crop_overlap, self.config.crop_div4,
-                     self.config.should_overwrite('crops'))
+                     self.config.should_overwrite('crops'), _inline_feature_config)
                     for folder in folders
                 ]
 
@@ -2086,15 +2127,21 @@ class MasterPipeline:
                 fail_count = 0
                 total_crops = 0
                 progress = ProgressBar(len(folders), desc="Cropping")
+                _crop_start = time.time()
 
-                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                with ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker) as executor:
                     future_to_folder = {
                         executor.submit(_process_folder_crops, args): args[0]
                         for args in args_list
                     }
 
                     for i, future in enumerate(as_completed(future_to_folder), 1):
+                        if shutdown_requested.is_set():
+                            logger.info("Shutdown requested — stopping cropping.")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
                         folder = future_to_folder[future]
+                        folder_name = folder.name
                         try:
                             folder_name, crop_count, message = future.result()
                             if crop_count > 0:
@@ -2109,6 +2156,19 @@ class MasterPipeline:
                         except Exception as e:
                             fail_count += 1
                             logger.error(f"{folder.name}: {e}")
+
+                        # Update TUI with rate + ETA
+                        self.stats.crops_created = total_crops
+                        if self.ui:
+                            elapsed = time.time() - _crop_start
+                            rate = i / elapsed if elapsed > 0.5 else 0.0
+                            self.ui.set_current(
+                                file=folder_name,
+                                operation='Cropping',
+                                done=i,
+                                total=len(folders),
+                                rate=rate,
+                            )
 
                         # Progress bar update
                         logger.info(progress.update(i, f"{total_crops} crops"))
@@ -2139,6 +2199,12 @@ class MasterPipeline:
 
         progress = ProgressBar(len(folders), desc="Cropping")
         total_crops = 0
+        _inline_feature_config = {
+            'skip_loudness':      self.config.skip_loudness,
+            'skip_spectral':      self.config.skip_spectral,
+            'skip_saturation':    self.config.skip_saturation,
+            'skip_multiband_rms': self.config.skip_multiband_rms,
+        }
 
         for i, folder in enumerate(folders, 1):
             try:
@@ -2150,6 +2216,7 @@ class MasterPipeline:
                     overlap=self.config.crop_overlap,
                     div4=self.config.crop_div4,
                     overwrite=self.config.should_overwrite('crops'),
+                    feature_config=_inline_feature_config,
                 )
                 self.stats.crops_created += count
                 total_crops += count

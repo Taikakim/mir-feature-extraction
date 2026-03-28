@@ -10,15 +10,16 @@
 # =============================================================================
 paths:
   input: /run/media/kim/Mantu/ai-music/Goa_Separated                      # Required: Input directory (raw audio or organized)
-  output: null                  # Output directory for organized files (null = in-place)
+  output: null                 # Output directory for organized files (null = in-place)
   latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
 
 # =============================================================================
 # STAGE CONTROL
 # =============================================================================
 stages:
-  organize: false                 # Stage 1: Organize raw files into project structure
+  organize: false                 # Stage 1: Organize raw files into project structure. set to false when running on a folder of already separated input files
   track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  separate: false                 # Stage 2a: Stem separation — set false to skip separation and process only existing separated folders
   cropping: true                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
@@ -51,6 +52,11 @@ source_separation:
     # Extra stems are always downmixed into 'other' regardless of this setting.
     # Set to true only if you need the individual piano/guitar files.
     save_extra_stems: false
+
+    # Stems to suppress — never saved as individual files, always downmixed into 'other'.
+    # Works for both extra stems (piano, guitar) and standard stems (bass, drums, vocals).
+    # Example: [guitar, piano]
+    discard_stems: [guitar, piano]
 
   # ---------------------------------------------------------------------------
   # DEMUCS CONFIGURATION
@@ -99,7 +105,7 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: true                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 10                     # Parallel workers for cropping
+  workers: 4                     # Parallel workers for cropping
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -205,7 +211,7 @@ overwrite:
 # MUSIC FLAMINGO (AI Descriptions)
 # =============================================================================
 music_flamingo:
-  enabled: false
+  enabled: true
   model: Q8_0                    # IQ3_M (fast), Q6_K (balanced), Q8_0 (best quality)
   context_size: 16384             # LLM context window (1024-2048 plenty for descriptions)
                                  # Lower = less VRAM. Audio is pre-encoded, not in context.
@@ -229,7 +235,7 @@ music_flamingo:
   # Granite revision: condense MF output into shorter focused descriptions
   # Each key under prompts → music_flamingo_{key} in .INFO
   revision:
-    enabled: false
+    enabled: true
     model: models/LMM/granite-4.0-h-tiny-GGUF/granite-4.0-h-tiny-Q8_0.gguf
     max_tokens: 512
     temperature: 0.7
@@ -334,5 +340,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
-  essentia_workers: 6            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
+  feature_workers: 4             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  essentia_workers: 2            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)

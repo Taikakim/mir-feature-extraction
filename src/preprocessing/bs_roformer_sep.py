@@ -88,19 +88,29 @@ MelBandRoformer = BSRoformer
 # Audio Format Helpers
 # =============================================================================
 
+_BITRATE_TIERS = [128, 192, 256, 320]
+
+def round_up_bitrate(bitrate: int) -> int:
+    """Round bitrate up to the nearest standard MP3 tier (128/192/256/320)."""
+    for tier in _BITRATE_TIERS:
+        if bitrate <= tier:
+            return tier
+    return 320
+
 def get_audio_bitrate(file_path: Path) -> int:
-    """Detect audio bitrate using mutagen or default to 128kbps."""
+    """Detect audio bitrate using mutagen, rounded up to nearest MP3 tier."""
     if not MUTAGEN_AVAILABLE:
         return 128
-        
+
     ext = file_path.suffix.lower()
     try:
         if ext == '.mp3':
-            audio = MP3(str(file_path))
-            return audio.info.bitrate // 1000
+            return round_up_bitrate(MP3(str(file_path)).info.bitrate // 1000)
         elif ext in ('.m4a', '.aac'):
-            audio = MP4(str(file_path))
-            return audio.info.bitrate // 1000
+            return round_up_bitrate(MP4(str(file_path)).info.bitrate // 1000)
+        elif ext == '.ogg':
+            from mutagen.oggvorbis import OggVorbis
+            return round_up_bitrate(OggVorbis(str(file_path)).info.bitrate // 1000)
     except Exception:
         pass
     return 128
@@ -592,6 +602,7 @@ def separate_organized_folder(
     device: str = 'cuda',
     separator: Optional[torch.nn.Module] = None,
     save_extra_stems: bool = True,
+    discard_stems: Optional[List[str]] = None,
 ) -> Dict[str, Path]:
     """
     Separate stems for a single organized folder using BS-RoFormer.
@@ -668,7 +679,16 @@ def separate_organized_folder(
     # 4. Process Audio
     logger.info(f"Processing {full_mix.name}...")
     audio, sr = load_audio(full_mix, audio_cfg.sample_rate)
-    
+
+    # For lossy non-mp3 sources (ogg, m4a), save full_mix as FLAC so downstream
+    # feature analysis has a lossless copy without re-encoding the stems again.
+    _lossy_non_mp3 = {'.ogg', '.m4a', '.aac'}
+    if full_mix.suffix.lower() in _lossy_non_mp3:
+        flac_path = folder_path / 'full_mix.flac'
+        if not flac_path.exists():
+            sf.write(str(flac_path), audio, sr)
+            logger.info(f"Saved full_mix.flac from {full_mix.suffix} source")
+
     # Normalize input
     audio = normalize_audio(audio)
     
@@ -688,12 +708,14 @@ def separate_organized_folder(
     # - If input is lossy (mp3, m4a): Use same extension
     LOSSLESS_EXTS = {'.flac', '.wav', '.aiff', '.aif'}
     
+    LOSSY_TO_MP3 = {'.m4a', '.aac', '.ogg'}  # re-encode stems as mp3; ogg has no soundfile write support
+
     if input_ext in LOSSLESS_EXTS:
         target_ext = '.flac'
-    elif input_ext in {'.m4a', '.aac'}:
-        target_ext = '.mp3'  # m4a/aac causes issues with downstream analysis tools
+    elif input_ext in LOSSY_TO_MP3:
+        target_ext = '.mp3'
     else:
-        target_ext = input_ext # e.g., .mp3
+        target_ext = input_ext  # e.g., .mp3
         
     instruments = model_cfg.instruments
     if not instruments:
@@ -708,23 +730,28 @@ def separate_organized_folder(
         stem_map[instruments[i]] = stems[i]
         
     STANDARD_STEMS = {'drums', 'bass', 'vocals'}
+    _discard_set = set(discard_stems) if discard_stems else set()
     extra_stems_audio = []
-    
+
     # Helper to save (async)
     saver = AsyncAudioSaver.get_instance()
-    
+
     def save_stem(audio_data, file_name_base):
         # Normalize stem
         normalized = normalize_audio(audio_data)
         out_path = folder_path / f"{file_name_base}{target_ext}"
-        
+
         # Submit to background thread
         saver.save_async(normalized, out_path, sr, source_path=full_mix)
         return out_path
 
     # Iterate all stems
     for name, audio_data in stem_map.items():
-        if name in STANDARD_STEMS:
+        if name in _discard_set:
+            # Discarded stems are downmixed into 'other' and never saved individually
+            extra_stems_audio.append(audio_data)
+            logger.info(f"Discarding stem '{name}' — downmixing into 'other'")
+        elif name in STANDARD_STEMS:
             # Save standard stems
             output_paths[name] = save_stem(audio_data, name)
         else:

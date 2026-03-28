@@ -1282,14 +1282,7 @@ class Pipeline:
             if tasks:
                 logger.info(f"  Processing {len(tasks)} files in background (GPU passes run concurrently)...")
 
-                def _init_cpu_worker():
-                    """Pin OMP/BLAS to 1 thread per worker process.
-                    Parent sets OMP_NUM_THREADS=8 for GPU ops; CPU workers need
-                    process-level parallelism instead of per-process thread pools."""
-                    import os
-                    os.environ['OMP_NUM_THREADS'] = '1'
-                    os.environ['OPENBLAS_NUM_THREADS'] = '1'
-                    os.environ['MKL_NUM_THREADS'] = '1'
+                from core.pipeline_workers import init_worker as _init_cpu_worker
 
                 def _pass1_worker():
                     from concurrent.futures import wait as cf_wait, FIRST_COMPLETED
