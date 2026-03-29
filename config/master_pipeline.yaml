@@ -10,7 +10,7 @@
 # =============================================================================
 paths:
   input: /run/media/kim/Mantu/ai-music/Goa_Separated                      # Required: Input directory (raw audio or organized)
-  output: null                 # Output directory for organized files (null = in-place)
+  output: /home/kim/Projects/goa_crops                 # Output directory for organized files (null = in-place)
   latent_dataset: /run/media/kim/Lehto/goa-small                         # Optional: secondary dataset (latents); track features are propagated here too
 
 # =============================================================================
@@ -105,7 +105,21 @@ cropping:
   overlap: false                 # 50% overlap between crops
   div4: true                    # Ensure downbeats divisible by 4 (beat-aligned mode)
   include_stems: true            # Also crop stems alongside full mix
-  workers: 4                     # Parallel workers for cropping
+  skip_stems: [vocals]           # Stems to skip when creating crops. e.g. [vocals], [vocals, drums]
+  workers: 8                     # Parallel workers for cropping
+  flac_compression_level: 4      # FLAC compression level (0-8). Benchmark on 50 × 12s crops (NVMe, tmpfs write):
+                                 #   Lvl  Time(50f)  Speed      Size(50f)  vs raw   Total(960k crops)
+                                 #     0    0.39 s   503 MB/s    43.8 MB   22.5%       840 GB
+                                 #     1    0.40 s   487 MB/s    42.6 MB   21.9%       817 GB
+                                 #     2    0.43 s   455 MB/s    42.3 MB   21.8%       811 GB
+                                 #     3    0.42 s   460 MB/s    41.5 MB   21.3%       796 GB
+                                 #     4    0.46 s   423 MB/s    39.8 MB   20.5%       764 GB  ← default
+                                 #     5    0.54 s   363 MB/s    39.6 MB   20.4%       760 GB
+                                 #     6    0.69 s   282 MB/s    39.3 MB   20.2%       754 GB
+                                 #     7    0.79 s   247 MB/s    39.0 MB   20.1%       749 GB
+                                 #     8    1.14 s   171 MB/s    38.9 MB   20.0%       747 GB
+                                 # Speed is input-bytes/s (CPU-bound on NVMe). Actual disk write =
+                                 # size/time: ~87 MB/s at lvl 4. Levels 5-8 save <5 GB per 10k crops.
 
 # =============================================================================
 # FEATURE EXTRACTION

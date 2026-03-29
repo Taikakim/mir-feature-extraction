@@ -160,6 +160,8 @@ def analyze_multiband_rms(audio_path: str | Path,
             audio = audio.mean(axis=1)
     else:
         logger.info(f"Analyzing multiband RMS: {audio_path.name} (pre-loaded)")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
 
     logger.debug(f"Loaded audio: {len(audio)} samples @ {sr} Hz")
 

@@ -138,7 +138,9 @@ class MasterPipelineConfig:
     crop_overlap: bool = False
     crop_div4: bool = False
     crop_include_stems: bool = True
+    crop_skip_stems: List[str] = field(default_factory=list)  # e.g. ['vocals']
     crop_workers: int = 6  # Parallel workers for cropping
+    flac_compression_level: int = 4  # 0-8; see benchmark in master_pipeline.yaml
 
     # Rhythm analysis
     rhythm_workers: int = 4  # Parallel workers for beat/downbeat detection
@@ -308,7 +310,9 @@ class MasterPipelineConfig:
             crop_overlap=cropping.get('overlap', False),
             crop_div4=cropping.get('div4', False),
             crop_include_stems=cropping.get('include_stems', True),
+            crop_skip_stems=cropping.get('skip_stems', []),
             crop_workers=cropping.get('workers', 6),
+            flac_compression_level=cropping.get('flac_compression_level', 4),
 
             # Rhythm
             rhythm_workers=rhythm.get('workers', 4),
@@ -488,11 +492,27 @@ class MasterPipeline:
         self._state = None  # Set in run()
         self.ui = None       # Set by main() when --no-ui is not passed
 
-        # Determine working directory
-        if config.output_dir:
+        # Determine working directory.
+        # When organize=true, output_dir is where the organized tracks are copied,
+        # so it becomes the working dir for all subsequent stages.
+        # When organize=false (already-separated input), the tracks live in input_dir.
+        # In that case, output_dir (if set) is used as the crops output dir directly,
+        # not as working_dir — so we leave working_dir pointing at the source tracks.
+        if config.output_dir and not config.skip_organize:
             self.working_dir = config.output_dir
         else:
             self.working_dir = config.input_dir
+
+    def _get_crops_dir(self) -> Path:
+        """Return the directory where crops are written.
+
+        When organize=false and output_dir is explicitly set, output_dir IS the
+        crops directory (the user is redirecting crops to a different drive).
+        Otherwise, use the standard convention: working_dir.parent / working_dir.name_crops.
+        """
+        if self.config.output_dir and self.config.skip_organize:
+            return self.config.output_dir
+        return self.working_dir.parent / f"{self.working_dir.name}_crops"
 
     def _get_source_folders(self) -> List[Path]:
         """Get source folders from state cache or by scanning."""
@@ -584,7 +604,7 @@ class MasterPipeline:
         self._state = state  # make accessible to sub-methods
         config_hash = PipelineState.compute_config_hash(self.config)
 
-        crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+        crops_dir = self._get_crops_dir()
         skip_to_crop_analysis = False
 
         if state.is_valid_for(config_hash):
@@ -798,7 +818,7 @@ class MasterPipeline:
                 from core.data_store import DataStore
                 crops_dir = getattr(self, 'crops_dir', None)
                 if crops_dir is None:
-                    crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+                    crops_dir = self._get_crops_dir()
                 if crops_dir.exists():
                     DataStore.bootstrap(crops_dir)
             except Exception as _ds_exc:
@@ -2053,7 +2073,7 @@ class MasterPipeline:
         self.stats.start_operation('cropping')
 
         # Determine crops output directory
-        crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+        crops_dir = self._get_crops_dir()
 
         logger.info(f"Creating crops in: {fmt_filename(str(crops_dir))}")
         logger.info(f"Mode: {fmt_notification(self.config.crop_mode)}")
@@ -2115,6 +2135,8 @@ class MasterPipeline:
                     'skip_spectral':     self.config.skip_spectral,
                     'skip_saturation':   self.config.skip_saturation,
                     'skip_multiband_rms': self.config.skip_multiband_rms,
+                    'flac_compression_level': self.config.flac_compression_level,
+                    'skip_stem_names': self.config.crop_skip_stems,
                 }
                 args_list = [
                     (folder, crops_dir, self.config.crop_length_samples,
@@ -2204,6 +2226,7 @@ class MasterPipeline:
             'skip_spectral':      self.config.skip_spectral,
             'skip_saturation':    self.config.skip_saturation,
             'skip_multiband_rms': self.config.skip_multiband_rms,
+            'flac_compression_level': self.config.flac_compression_level,
         }
 
         for i, folder in enumerate(folders, 1):
@@ -2352,7 +2375,7 @@ class MasterPipeline:
         # Find crops directory
         crops_dir = getattr(self, 'crops_dir', None)
         if not crops_dir:
-            crops_dir = self.working_dir.parent / f"{self.working_dir.name}_crops"
+            crops_dir = self._get_crops_dir()
 
         if not crops_dir.exists():
             logger.warning(f"Crops directory not found: {crops_dir}")
@@ -2393,7 +2416,7 @@ class MasterPipeline:
         from core.file_utils import get_crop_stem_files
         sample_stems = get_crop_stem_files(sample_crop)
 
-        has_stems = len([k for k in sample_stems if k != 'source']) >= 4
+        has_stems = len([k for k in sample_stems if k != 'source']) >= 1
 
         if not has_stems:
             # Need to run Demucs on crops
@@ -2967,7 +2990,7 @@ Config file template: config/master_pipeline.yaml
     if getattr(args, 'rebuild_dataset', False):
         try:
             from core.data_store import DataStore
-            crops_dir = pipeline.working_dir.parent / f"{pipeline.working_dir.name}_crops"
+            crops_dir = pipeline._get_crops_dir()
             if crops_dir.exists():
                 logger.info(f"[--rebuild-dataset] Rebuilding dataset.json from {crops_dir} ...")
                 DataStore.bootstrap(crops_dir)

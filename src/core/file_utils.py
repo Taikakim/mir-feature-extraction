@@ -387,6 +387,8 @@ def deduplicate_folders(folders: List[Path], warn: bool = True) -> List[Path]:
 
     Detects duplicates by fingerprinting the full_mix audio file.
     When duplicates are found, keeps the first one (alphabetically).
+    Also reports pairs where one folder name has a redundant suffix like
+    "(Original Mix)" and the other does not, listing whether they are identical.
 
     Args:
         folders: List of organized folder paths
@@ -395,7 +397,10 @@ def deduplicate_folders(folders: List[Path], warn: bool = True) -> List[Path]:
     Returns:
         Deduplicated list of folders
     """
+    import re
+
     seen_fingerprints: Dict[str, Path] = {}
+    folder_fingerprints: Dict[Path, str] = {}
     unique_folders = []
     duplicates_skipped = 0
 
@@ -424,10 +429,46 @@ def deduplicate_folders(folders: List[Path], warn: bool = True) -> List[Path]:
                 logger.warning(f"Skipping duplicate: {folder.name} (same audio as {original.name})")
         else:
             seen_fingerprints[fingerprint] = folder
+            folder_fingerprints[folder] = fingerprint
             unique_folders.append(folder)
 
     if duplicates_skipped > 0:
         logger.info(f"Skipped {duplicates_skipped} duplicate folder(s) with identical audio")
+
+    # Second pass: report name-based pairs where one has a redundant mix suffix.
+    # These are detected by name similarity; fingerprints determine whether files
+    # are actually identical (already removed above) or just same-named variants.
+    _REDUNDANT_SUFFIXES = re.compile(
+        r'\s*[\(\[](original mix|original|radio edit|album version|album mix)[\)\]]\s*$',
+        re.IGNORECASE,
+    )
+    stripped: Dict[str, Path] = {}  # normalised_name -> first folder seen
+    for folder in sorted(folders):
+        norm = _REDUNDANT_SUFFIXES.sub('', folder.name).rstrip()
+        if norm != folder.name:
+            # This folder has a redundant suffix — check if a bare-name version exists
+            if norm in stripped:
+                bare = stripped[norm]
+                fp_suffixed = folder_fingerprints.get(folder, get_file_fingerprint(
+                    next((f for ext in AUDIO_EXTENSIONS
+                          for f in folder.glob(f'full_mix{ext}')), Path('/dev/null'))
+                ))
+                fp_bare = folder_fingerprints.get(bare, get_file_fingerprint(
+                    next((f for ext in AUDIO_EXTENSIONS
+                          for f in bare.glob(f'full_mix{ext}')), Path('/dev/null'))
+                ))
+                if fp_suffixed and fp_bare and fp_suffixed == fp_bare:
+                    logger.warning(
+                        f"Identical audio, redundant name: '{folder.name}'"
+                        f" == '{bare.name}'"
+                    )
+                else:
+                    logger.info(
+                        f"Name-based pair (different audio): '{folder.name}'"
+                        f" / '{bare.name}'"
+                    )
+        else:
+            stripped.setdefault(norm, folder)
 
     return unique_folders
 
@@ -611,7 +652,6 @@ def get_crop_stem_files(crop_path: str | Path) -> Dict[str, Path]:
                 stems[stem_name] = stem_path
                 break
 
-    logger.debug(f"Looking for vocal stem: {crop_path.name}")
     return stems
 
 

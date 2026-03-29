@@ -650,7 +650,11 @@ class PipelineUI:
             # Also reflect crops being *created* (stage 3) before analysis begins
             crops_analyzed = max(crops_analyzed, getattr(self._stats, 'crops_created', 0))
             if crop_stats:
-                crops_analyzed = max(crops_analyzed, crop_stats.get('crops_processed', 0))
+                # Use per-pass counter so the display resets at each pass boundary
+                # and never exceeds the total (which counts unique crops, not pass × crops).
+                pass_val = crop_stats.get('pass_crops_processed', 0)
+                cumul_val = crop_stats.get('crops_processed', 0)
+                crops_analyzed = max(crops_analyzed, pass_val if pass_val > 0 else cumul_val)
             metadata_found = getattr(self._stats, 'tracks_metadata_found', 0)
             error_count = len(getattr(self._stats, 'errors', []))
 

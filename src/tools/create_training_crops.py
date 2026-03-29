@@ -560,7 +560,8 @@ def write_audio_preserving_format(
     output_path: Path,
     source_path: Optional[Path] = None,
     mp3_bitrate: Optional[int] = None,
-    metadata: Optional[Dict] = None
+    metadata: Optional[Dict] = None,
+    flac_compression_level: int = 4,
 ) -> bool:
     """
     Write audio to output_path, preserving the format indicated by the file extension.
@@ -586,23 +587,25 @@ def write_audio_preserving_format(
     if audio.ndim == 1:
         audio = audio[:, np.newaxis]
 
+    cl = flac_compression_level / 8.0  # soundfile uses 0.0-1.0
+
     # Lossless formats - use soundfile directly
     if ext in LOSSLESS_FORMATS:
-        sf.write(str(output_path), audio, sr)
+        sf.write(str(output_path), audio, sr, compression_level=cl)
         # Write metadata tags if provided
         if metadata:
             write_id3_tags(output_path, metadata)
         return True
-    
+
     # Lossy formats (MP3, M4A, AAC) - use pydub
     if ext in LOSSY_FORMATS:
         if not PYDUB_AVAILABLE:
             # Fall back to FLAC
             fallback_path = output_path.with_suffix('.flac')
-            sf.write(str(fallback_path), audio, sr)
+            sf.write(str(fallback_path), audio, sr, compression_level=cl)
             logger.warning(f"pydub not available, wrote FLAC instead: {fallback_path.name}")
             return False
-        
+
         try:
             # Determine bitrate
             bitrate = mp3_bitrate
@@ -614,11 +617,11 @@ def write_audio_preserving_format(
                     bitrate = int(bitrate * 1.25)
             if bitrate is None:
                 bitrate = 128
-            
+
             # Convert numpy array to pydub AudioSegment
             # pydub expects int16 samples
             audio_int16 = (audio * 32767).astype(np.int16)
-            
+
             # Flatten if stereo for raw data
             if audio_int16.shape[1] == 1:
                 channels = 1
@@ -626,14 +629,14 @@ def write_audio_preserving_format(
             else:
                 channels = audio_int16.shape[1]
                 raw_data = audio_int16.tobytes()
-            
+
             segment = AudioSegment(
                 data=raw_data,
                 sample_width=2,  # 16-bit = 2 bytes
                 frame_rate=sr,
                 channels=channels
             )
-            
+
             # Determine output format for pydub
             if ext == '.mp3':
                 pydub_format = 'mp3'
@@ -641,7 +644,7 @@ def write_audio_preserving_format(
                 pydub_format = 'ipod'  # pydub uses 'ipod' for M4A/AAC
             else:
                 pydub_format = 'mp3'
-            
+
             segment.export(str(output_path), format=pydub_format, bitrate=f'{bitrate}k')
             # Write metadata tags if provided
             if metadata:
@@ -651,16 +654,16 @@ def write_audio_preserving_format(
         except Exception as e:
             # Fall back to FLAC
             fallback_path = output_path.with_suffix('.flac')
-            sf.write(str(fallback_path), audio, sr)
+            sf.write(str(fallback_path), audio, sr, compression_level=cl)
             # Write metadata tags if provided
             if metadata:
                 write_id3_tags(fallback_path, metadata)
             logger.warning(f"Lossy export failed ({e}), wrote FLAC instead: {fallback_path.name}")
             return False
-    
+
     # Unknown format - default to FLAC
     fallback_path = output_path.with_suffix('.flac')
-    sf.write(str(fallback_path), audio, sr)
+    sf.write(str(fallback_path), audio, sr, compression_level=cl)
     logger.warning(f"Unknown format {ext}, wrote FLAC instead: {fallback_path.name}")
     return False
 
@@ -767,13 +770,15 @@ def crop_stem_file(stem_path: Path, crop_base_path: Path, stem_name: str,
 def crop_all_stems(folder_path: Path, crop_base_path: Path,
                    start_sample: int, end_sample: int, sr: int,
                    fade_len: int, metadata: Optional[Dict] = None,
-                   preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None) -> Dict[str, Path]:
+                   preloaded_stems: Optional[Dict[str, Tuple[np.ndarray, Path]]] = None,
+                   skip_stem_names: Optional[set] = None) -> Dict[str, Path]:
     """
     Crop all available stems at the same positions as the full mix.
 
     Args:
         metadata: Optional dict with track_metadata_* keys for ID3 tags
         preloaded_stems: Pre-loaded stems from preload_stems(), maps stem_name to (audio, path)
+        skip_stem_names: Set of stem names to skip (e.g. {'vocals'})
 
     Returns:
         Dict mapping stem names to cropped paths
@@ -781,6 +786,8 @@ def crop_all_stems(folder_path: Path, crop_base_path: Path,
     cropped_stems = {}
 
     for stem_name in STEM_NAMES:
+        if skip_stem_names and stem_name in skip_stem_names:
+            continue
         if preloaded_stems and stem_name in preloaded_stems:
             stem_audio, stem_path = preloaded_stems[stem_name]
         else:
@@ -943,6 +950,9 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
     duration_sec = total_samples / sr
     fade_len = int(0.01 * sr)  # 10ms fade
 
+    _flac_level = int((feature_config or {}).get('flac_compression_level', 4))
+    _skip_stems = set((feature_config or {}).get('skip_stem_names', []))
+
     # Preserve source format.
     # m4a/aac → mp3 (no lossless alternative, keep at high bitrate).
     # ogg → flac (decoded PCM saved losslessly, avoids double lossy encode).
@@ -1030,9 +1040,11 @@ def create_sequential_crops(folder_path: Path, length_samples: int, sr: int,
             def _write_crop(audio_data, path, src_path, meta, stem_data, folder, base_path,
                             s_start, s_end, s_sr, s_fade, s_meta, s_preloaded):
                 write_audio_preserving_format(audio_data, s_sr, path, source_path=src_path,
-                                              metadata=meta)
+                                              metadata=meta,
+                                              flac_compression_level=_flac_level)
                 crop_all_stems(folder, base_path, s_start, s_end, s_sr, s_fade,
-                               metadata=s_meta, preloaded_stems=s_preloaded)
+                               metadata=s_meta, preloaded_stems=s_preloaded,
+                               skip_stem_names=_skip_stems)
 
             write_futures.append(write_pool.submit(
                 _write_crop, crop_audio, crop_path, full_mix_path, id3_metadata,
@@ -1281,6 +1293,9 @@ def create_crops_for_file(folder_path: Path,
     align_grid = downbeat_times if (downbeat_times is not None and len(downbeat_times) > 0) else beat_times
     global_bpm = float(bpm) if bpm else 0.0
 
+    _flac_level = int((feature_config or {}).get('flac_compression_level', 4))
+    _skip_stems = set((feature_config or {}).get('skip_stem_names', []))
+
     # BPM fallback: if no beat grid but BPM is known, synthesise downbeat positions
     if (align_grid is None or len(align_grid) == 0) and global_bpm > 0:
         beat_interval = 60.0 / global_bpm
@@ -1325,15 +1340,20 @@ def create_crops_for_file(folder_path: Path,
                               s_stem_paths, s_preloaded_stems):
         """Write crop audio + all stem crops (runs in thread pool)."""
         write_audio_preserving_format(audio_data, s_sr, path, source_path=src_path,
-                                      metadata=meta)
+                                      metadata=meta,
+                                      flac_compression_level=_flac_level)
         if s_preloaded_stems:
             # Slice stems from RAM
             for s_name, (s_audio, s_path) in s_preloaded_stems.items():
+                if _skip_stems and s_name in _skip_stems:
+                    continue
                 crop_stem_file(s_path, base_path, s_name, s_start, s_end, s_sr, s_fade,
                                metadata=s_meta, preloaded_audio=s_audio)
         else:
             # Seek-read each stem crop from disk (lossless formats)
             for s_name, s_path in s_stem_paths.items():
+                if _skip_stems and s_name in _skip_stems:
+                    continue
                 crop_stem_file(s_path, base_path, s_name, s_start, s_end, s_sr, s_fade,
                                metadata=s_meta, preloaded_audio=None)
 

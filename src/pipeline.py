@@ -540,7 +540,9 @@ class Pipeline:
             "steps_skipped": 0,
             "crops_processed": 0,
             "crops_failed": 0,
-            "total_time": 0.0
+            "total_time": 0.0,
+            "pass_label": "",
+            "pass_crops_processed": 0,
         }
 
     def run_step(self, name: str, script: str, args: List[str],
@@ -1028,6 +1030,7 @@ class Pipeline:
                     logger.info(f"  Saved {len(results)} features to {info_path.name}")
 
                 self.stats["crops_processed"] += 1
+                self.stats["pass_crops_processed"] += 1
 
             except Exception as e:
                 logger.error(f"  Failed: {e}")
@@ -1123,6 +1126,8 @@ class Pipeline:
 
         if pass1_needed:
             self.stats['active_feature'] = 'Loudness · Spectral · Chroma · Timbral · RMS'
+            self.stats['pass_label'] = 'PASS 1 – CPU Features'
+            self.stats['pass_crops_processed'] = 0
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
             logger.info(f"  Parallel workers: {self.config.feature_workers}")
 
@@ -1328,6 +1333,7 @@ class Pipeline:
                                         if result['results']:
                                             safe_update(get_crop_info_path(crop_path), result['results'])
                                             self.stats["crops_processed"] += 1
+                                            self.stats["pass_crops_processed"] += 1
                                             # Update coverage fractions dynamically
                                             _n = self.stats.get('feature_coverage_n', 0)
                                             if _n > 0:
@@ -1418,6 +1424,8 @@ class Pipeline:
 
         if not self.config.skip_audiobox:
             self.stats['active_feature'] = 'AudioBox Aesthetics'
+            self.stats['pass_label'] = 'PASS 2 – AudioBox'
+            self.stats['pass_crops_processed'] = 0
             logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
             try:
                 from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics_batch, get_predictor
@@ -1467,6 +1475,7 @@ class Pipeline:
                                     if results:
                                         safe_update(get_crop_info_path(crop_path), results)
                                         self.stats["crops_processed"] += 1
+                                        self.stats["pass_crops_processed"] += 1
                                         _ab_done += 1
                                     else:
                                         self.stats["crops_failed"] += 1
@@ -1479,6 +1488,7 @@ class Pipeline:
                                         if results and results[0]:
                                             safe_update(get_crop_info_path(crop_path), results[0])
                                             self.stats["crops_processed"] += 1
+                                            self.stats["pass_crops_processed"] += 1
                                             _ab_done += 1
                                         else:
                                             self.stats["crops_failed"] += 1
@@ -1525,6 +1535,8 @@ class Pipeline:
 
         if not self.config.skip_classification:
             self.stats['active_feature'] = 'Essentia Classification'
+            self.stats['pass_label'] = 'PASS 3 – Essentia'
+            self.stats['pass_crops_processed'] = 0
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
             logger.info(f"  Processing sequentially (TensorFlow is not multiprocess-safe)")
             try:
@@ -1619,6 +1631,7 @@ class Pipeline:
                             if results:
                                 safe_update(get_crop_info_path(crop_path), results)
                                 self.stats["crops_processed"] += 1
+                                self.stats["pass_crops_processed"] += 1
                                 _es_done += 1
                         except Exception as e:
                             logger.error(f"  Essentia failed for {crop_path.name}: {e}")
@@ -1678,6 +1691,8 @@ class Pipeline:
 
         if not self.config.skip_flamingo:
             self.stats['active_feature'] = 'Music Flamingo'
+            self.stats['pass_label'] = 'PASS 4 – Flamingo'
+            self.stats['pass_crops_processed'] = 0
             logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, GGUF/CLI) - {len(all_crops)} files")
             try:
                 from src.classification.music_flamingo import MusicFlamingoGGUF, DEFAULT_PROMPTS
@@ -1767,6 +1782,7 @@ class Pipeline:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
                                     safe_update(get_crop_info_path(crop_path), results)
                                     self.stats["crops_processed"] += 1
+                                    self.stats["pass_crops_processed"] += 1
                                     _fl_done += 1
                                     if _n > 0:
                                         self.stats.setdefault('feature_coverage', {})['Flamingo'] = (

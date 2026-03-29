@@ -130,7 +130,7 @@ def save_audio_smart(audio: np.ndarray, output_path: Path, sample_rate: int,
     
     # 1. Lossless formats: Write natively with soundfile
     if ext in ['.flac', '.wav', '.aiff']:
-        sf.write(str(output_path), audio, sample_rate)
+        sf.write(str(output_path), audio, sample_rate, compression_level=0.125)
         return
 
     # 2. Lossy formats: Use pydub if available
@@ -170,7 +170,7 @@ def save_audio_smart(audio: np.ndarray, output_path: Path, sample_rate: int,
             
     # 3. Fallback: Write as FLAC if lossy write failed or not supported
     fallback_path = output_path.with_suffix('.flac')
-    sf.write(str(fallback_path), audio, sample_rate)
+    sf.write(str(fallback_path), audio, sample_rate, compression_level=0.125)
     if fallback_path != output_path:
         logger.info(f"Saved as FLAC instead: {fallback_path.name}") 
 
@@ -371,7 +371,7 @@ def normalize_audio(audio: np.ndarray, max_peak: float = 0.9, min_peak: float = 
 # Replaced by save_audio_smart, keeping for internal non-smart usage if needed
 def save_audio(audio: np.ndarray, output_path: Path, sample_rate: int = 44100):
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), audio, sample_rate)
+    sf.write(str(output_path), audio, sample_rate, compression_level=0.125)
 
 def load_config_from_yaml(config_path: Path) -> Tuple[AudioConfig, ModelConfig, InferenceConfig]:
     with open(config_path, 'r') as f:
@@ -686,7 +686,7 @@ def separate_organized_folder(
     if full_mix.suffix.lower() in _lossy_non_mp3:
         flac_path = folder_path / 'full_mix.flac'
         if not flac_path.exists():
-            sf.write(str(flac_path), audio, sr)
+            sf.write(str(flac_path), audio, sr, compression_level=0.125)
             logger.info(f"Saved full_mix.flac from {full_mix.suffix} source")
 
     # Normalize input

@@ -107,7 +107,7 @@ def convert_wav_to_flac_soundfile(input_path: Path, output_path: Path) -> bool:
         data, sr = sf.read(str(input_path))
 
         # Write as FLAC
-        sf.write(str(output_path), data, sr, format='FLAC')
+        sf.write(str(output_path), data, sr, format='FLAC', compression_level=0.125)
 
         logger.debug(f"Converted {input_path.name} to FLAC via soundfile")
         return True
