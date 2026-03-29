@@ -669,6 +669,7 @@ class PipelineUI:
         # ── Feature coverage (%) from pipeline's PASS 1 pre-scan ──────────
         feature_coverage: Dict[str, float] = {}
         active_crops: List[str] = []
+        pass_rate: float = 0.0
         if crop_stats is not None:
             feature_coverage = crop_stats.get('feature_coverage', {})
             active_crops = crop_stats.get('active_crops', [])
@@ -676,6 +677,7 @@ class PipelineUI:
             crop_active_feat = crop_stats.get('active_feature', '')
             if crop_active_feat:
                 current_feature = crop_active_feat
+            pass_rate = crop_stats.get('pass_rate', 0.0)
 
         # ── Assemble layout ────────────────────────────────────────────────
         layout = Layout()
@@ -705,7 +707,7 @@ class PipelineUI:
         layout['features'].update(
             self._render_features(stages, feature_enabled, disabled_stages,
                                    prog_done, prog_total, prog_rate, group_rates,
-                                   feature_coverage))
+                                   feature_coverage, current_feature, pass_rate))
         layout['current'].update(
             self._render_current(current_file, current_op, current_feature,
                                   prog_done, prog_total, prog_rate,
@@ -778,7 +780,9 @@ class PipelineUI:
                           disabled_stages: Set[str],
                           prog_done: int, prog_total: int, prog_rate: float,
                           group_rates: Dict[str, float],
-                          feature_coverage: Optional[Dict[str, float]] = None) -> 'BevelPanel':
+                          feature_coverage: Optional[Dict[str, float]] = None,
+                          active_feature: str = '',
+                          pass_rate: float = 0.0) -> 'BevelPanel':
         table = Table(box=None, padding=(0, 1), expand=True, show_header=False)
         table.add_column(width=2)           # icon
         table.add_column(min_width=9)       # group name
@@ -824,13 +828,19 @@ class PipelineUI:
                 # Currently processing — show progress + per-group rate if known
                 icon, icon_style, name_style = '▶', 'bold yellow', 'yellow'
                 count_str = f'{prog_done:,}/{prog_total:,}' if prog_total > 0 else ''
-                # Use the group's own measured rate; fall back to global rate only
-                # when this specific group has timing data (avoids all groups showing
-                # the same global throughput number).
+                # Use the group's own measured rate.
+                # Fall back to pass_rate only for the currently-active feature group
+                # (matched by checking if the label appears in active_feature string).
+                # This prevents all groups showing the same global throughput.
                 rate = group_rates.get(label, 0.0)
-                if rate == 0.0 and len(group_rates) == 0:
-                    # No per-group rates at all yet — show global rate
-                    rate = prog_rate
+                if rate == 0.0:
+                    is_active_group = (active_feature and
+                                       label.lower() in active_feature.lower())
+                    if is_active_group and pass_rate > 0:
+                        rate = pass_rate
+                    elif not active_feature and len(group_rates) == 0:
+                        # No per-group rates and no active feature yet — show global
+                        rate = prog_rate
                 if rate >= 10:
                     rate_str = f'@ {rate:,.0f}/s'
                 elif rate > 0:
