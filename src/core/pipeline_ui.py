@@ -678,6 +678,8 @@ class PipelineUI:
             if crop_active_feat:
                 current_feature = crop_active_feat
             pass_rate = crop_stats.get('pass_rate', 0.0)
+            pass_rtf = crop_stats.get('pass_rtf', 0.0)
+            last_file_rtf = crop_stats.get('last_file_rtf', 0.0)
 
         # ── Assemble layout ────────────────────────────────────────────────
         layout = Layout()
@@ -707,11 +709,11 @@ class PipelineUI:
         layout['features'].update(
             self._render_features(stages, feature_enabled, disabled_stages,
                                    prog_done, prog_total, prog_rate, group_rates,
-                                   feature_coverage, current_feature, pass_rate))
+                                   feature_coverage, current_feature, pass_rtf))
         layout['current'].update(
             self._render_current(current_file, current_op, current_feature,
                                   prog_done, prog_total, prog_rate,
-                                  active_crops))
+                                  active_crops, pass_rtf, last_file_rtf))
         layout['stats'].update(
             self._render_stats(tracks_processed, tracks_total,
                                 crops_analyzed, crop_total, metadata_found, error_count))
@@ -782,7 +784,7 @@ class PipelineUI:
                           group_rates: Dict[str, float],
                           feature_coverage: Optional[Dict[str, float]] = None,
                           active_feature: str = '',
-                          pass_rate: float = 0.0) -> 'BevelPanel':
+                          pass_rtf: float = 0.0) -> 'BevelPanel':
         table = Table(box=None, padding=(0, 1), expand=True, show_header=False)
         table.add_column(width=2)           # icon
         table.add_column(min_width=9)       # group name
@@ -832,19 +834,18 @@ class PipelineUI:
                 # Fall back to pass_rate only for the currently-active feature group
                 # (matched by checking if the label appears in active_feature string).
                 # This prevents all groups showing the same global throughput.
-                rate = group_rates.get(label, 0.0)
-                if rate == 0.0:
-                    is_active_group = (active_feature and
-                                       label.lower() in active_feature.lower())
-                    if is_active_group and pass_rate > 0:
-                        rate = pass_rate
-                    elif not active_feature and len(group_rates) == 0:
-                        # No per-group rates and no active feature yet — show global
-                        rate = prog_rate
-                if rate >= 10:
-                    rate_str = f'@ {rate:,.0f}/s'
-                elif rate > 0:
-                    rate_str = f'@ {rate:.1f}/s'
+                is_active_group = (active_feature and
+                                   label.lower() in active_feature.lower())
+                rtf = pass_rtf if is_active_group else group_rates.get(label, 0.0)
+                if rtf == 0.0 and not active_feature and len(group_rates) == 0:
+                    # Nothing active yet — fall back to global items/s as placeholder
+                    rtf = prog_rate
+                if rtf >= 100:
+                    rate_str = f'@ {rtf:,.0f}s/s'
+                elif rtf >= 10:
+                    rate_str = f'@ {rtf:.1f}s/s'
+                elif rtf > 0:
+                    rate_str = f'@ {rtf:.2f}s/s'
                 else:
                     rate_str = ''
                 rate_style = 'cyan'
@@ -893,7 +894,9 @@ class PipelineUI:
     def _render_current(self, current_file: str, current_op: str,
                          current_feature: str,
                          done: int, total: int, rate: float,
-                         active_crops: Optional[List[str]] = None) -> 'Panel':
+                         active_crops: Optional[List[str]] = None,
+                         pass_rtf: float = 0.0,
+                         last_file_rtf: float = 0.0) -> 'Panel':
         lines = []
 
         if active_crops:
@@ -926,8 +929,18 @@ class PipelineUI:
             pct = min(1.0, done / total)
             filled = int(pct * 24)
             bar = '█' * filled + '░' * (24 - filled)
-            rate_str = f'  {rate:.1f} it/s' if rate > 0 else ''
-            lines.append(Text(f'{bar}  {pct * 100:.0f}%{rate_str}', style='green'))
+            # Show cumulative s/s next to the bar; fall back to items/s before first crop
+            if pass_rtf >= 100:
+                bar_rate = f'  {pass_rtf:,.0f}s/s'
+            elif pass_rtf >= 10:
+                bar_rate = f'  {pass_rtf:.1f}s/s'
+            elif pass_rtf > 0:
+                bar_rate = f'  {pass_rtf:.2f}s/s'
+            elif rate > 0:
+                bar_rate = f'  {rate:.1f} it/s'
+            else:
+                bar_rate = ''
+            lines.append(Text(f'{bar}  {pct * 100:.0f}%{bar_rate}', style='green'))
 
             if rate > 0 and done < total:
                 remaining = (total - done) / rate
@@ -937,6 +950,28 @@ class PipelineUI:
                 lines.append(Text(f'ETA  {rh:02d}:{rm:02d}:{rs:02d}', style='dim'))
 
             lines.append(Text(f'{done:,} / {total:,}', style='dim'))
+
+            # Per-file RTF (sequential passes only; 0 in parallel/batch passes)
+            if last_file_rtf > 0:
+                if last_file_rtf >= 100:
+                    lf_str = f'{last_file_rtf:,.0f}s/s'
+                elif last_file_rtf >= 10:
+                    lf_str = f'{last_file_rtf:.1f}s/s'
+                else:
+                    lf_str = f'{last_file_rtf:.2f}s/s'
+                rtf_t = Text(no_wrap=True)
+                rtf_t.append('Last  ', style='dim')
+                rtf_t.append(lf_str, style='cyan')
+                if pass_rtf > 0:
+                    if pass_rtf >= 100:
+                        cum_str = f'{pass_rtf:,.0f}s/s'
+                    elif pass_rtf >= 10:
+                        cum_str = f'{pass_rtf:.1f}s/s'
+                    else:
+                        cum_str = f'{pass_rtf:.2f}s/s'
+                    rtf_t.append('   Avg  ', style='dim')
+                    rtf_t.append(cum_str, style='cyan')
+                lines.append(rtf_t)
 
         return BevelPanel(Group(*lines), title='[bold blue]Current[/]',
                           padding=(0, 1))

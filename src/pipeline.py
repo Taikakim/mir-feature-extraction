@@ -137,6 +137,15 @@ class PipelineConfig:
         return self.output_dir if self.output_dir else self.input_dir
 
 
+def _audio_duration(path: Path) -> float:
+    """Return audio duration in seconds by reading only the file header."""
+    try:
+        import soundfile as sf
+        return sf.info(str(path)).duration
+    except Exception:
+        return 0.0
+
+
 def _interpolate_genres(prompt_text: str, existing: Dict[str, Any]) -> str:
     """Replace {genres} and {metadata} placeholders in prompt with .INFO data.
 
@@ -543,9 +552,35 @@ class Pipeline:
             "total_time": 0.0,
             "pass_label": "",
             "pass_crops_processed": 0,
-            "pass_rate": 0.0,        # crops/s for the current pass (live)
-            "pass_start_time": 0.0,  # wall-clock start of current pass
+            "pass_rate": 0.0,          # crops/s for current pass (live, for ETA)
+            "pass_start_time": 0.0,    # wall-clock start of current pass
+            "pass_audio_seconds": 0.0, # cumulative audio-seconds processed this pass
+            "pass_rtf": 0.0,           # audio-s / wall-s for current pass (cumulative)
+            "last_file_rtf": 0.0,      # audio-s / wall-s for most-recently-finished crop
         }
+
+    def _update_pass_stats(self, crop_path: Path, file_proc_time: float = 0.0):
+        """Increment crop counter and update cumulative + per-file RTF stats.
+
+        Args:
+            crop_path:       Path to the processed crop (used for audio duration).
+            file_proc_time:  Wall-clock seconds spent on this crop alone (0 in
+                             parallel passes where per-file timing is unavailable).
+        """
+        self.stats["crops_processed"] += 1
+        self.stats["pass_crops_processed"] += 1
+        audio_dur = _audio_duration(crop_path)
+        if audio_dur > 0:
+            self.stats["pass_audio_seconds"] += audio_dur
+            elapsed = time.time() - self.stats["pass_start_time"]
+            if elapsed > 0:
+                self.stats["pass_rtf"] = self.stats["pass_audio_seconds"] / elapsed
+            if file_proc_time > 0:
+                self.stats["last_file_rtf"] = audio_dur / file_proc_time
+        # crops/s for ETA
+        _t = time.time() - self.stats["pass_start_time"]
+        if _t > 0:
+            self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
 
     def run_step(self, name: str, script: str, args: List[str],
                  skip_flag: bool = False) -> bool:
@@ -1031,11 +1066,7 @@ class Pipeline:
                     safe_update(info_path, results)
                     logger.info(f"  Saved {len(results)} features to {info_path.name}")
 
-                self.stats["crops_processed"] += 1
-                self.stats["pass_crops_processed"] += 1
-                _t = time.time() - self.stats["pass_start_time"]
-                if _t > 0:
-                    self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                self._update_pass_stats(crop_path)
 
             except Exception as e:
                 logger.error(f"  Failed: {e}")
@@ -1134,6 +1165,9 @@ class Pipeline:
             self.stats['pass_label'] = 'PASS 1 – CPU Features'
             self.stats['pass_crops_processed'] = 0
             self.stats['pass_rate'] = 0.0
+            self.stats['pass_audio_seconds'] = 0.0
+            self.stats['pass_rtf'] = 0.0
+            self.stats['last_file_rtf'] = 0.0
             self.stats['pass_start_time'] = time.time()
             logger.info(f"\n[PASS 1/5] Light Features (CPU) - {len(all_crops)} files")
             logger.info(f"  Parallel workers: {self.config.feature_workers}")
@@ -1339,11 +1373,7 @@ class Pipeline:
                                     if result['success']:
                                         if result['results']:
                                             safe_update(get_crop_info_path(crop_path), result['results'])
-                                            self.stats["crops_processed"] += 1
-                                            self.stats["pass_crops_processed"] += 1
-                                            _t = time.time() - self.stats["pass_start_time"]
-                                            if _t > 0:
-                                                self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                                            self._update_pass_stats(crop_path)
                                             # Update coverage fractions dynamically
                                             _n = self.stats.get('feature_coverage_n', 0)
                                             if _n > 0:
@@ -1437,6 +1467,9 @@ class Pipeline:
             self.stats['pass_label'] = 'PASS 2 – AudioBox'
             self.stats['pass_crops_processed'] = 0
             self.stats['pass_rate'] = 0.0
+            self.stats['pass_audio_seconds'] = 0.0
+            self.stats['pass_rtf'] = 0.0
+            self.stats['last_file_rtf'] = 0.0
             self.stats['pass_start_time'] = time.time()
             logger.info(f"\n[PASS 2/5] AudioBox Aesthetics - {len(all_crops)} files")
             try:
@@ -1486,11 +1519,7 @@ class Pipeline:
                                 for crop_path, results in zip(batch_paths, batch_results):
                                     if results:
                                         safe_update(get_crop_info_path(crop_path), results)
-                                        self.stats["crops_processed"] += 1
-                                        self.stats["pass_crops_processed"] += 1
-                                        _t = time.time() - self.stats["pass_start_time"]
-                                        if _t > 0:
-                                            self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                                        self._update_pass_stats(crop_path)
                                         _ab_done += 1
                                     else:
                                         self.stats["crops_failed"] += 1
@@ -1502,11 +1531,7 @@ class Pipeline:
                                         results = analyze_audiobox_aesthetics_batch([crop_path])
                                         if results and results[0]:
                                             safe_update(get_crop_info_path(crop_path), results[0])
-                                            self.stats["crops_processed"] += 1
-                                            self.stats["pass_crops_processed"] += 1
-                                            _t = time.time() - self.stats["pass_start_time"]
-                                            if _t > 0:
-                                                self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                                            self._update_pass_stats(crop_path)
                                             _ab_done += 1
                                         else:
                                             self.stats["crops_failed"] += 1
@@ -1556,6 +1581,9 @@ class Pipeline:
             self.stats['pass_label'] = 'PASS 3 – Essentia'
             self.stats['pass_crops_processed'] = 0
             self.stats['pass_rate'] = 0.0
+            self.stats['pass_audio_seconds'] = 0.0
+            self.stats['pass_rtf'] = 0.0
+            self.stats['last_file_rtf'] = 0.0
             self.stats['pass_start_time'] = time.time()
             logger.info(f"\n[PASS 3/5] Essentia Classification - {len(all_crops)} files")
             logger.info(f"  Processing sequentially (TensorFlow is not multiprocess-safe)")
@@ -1633,6 +1661,7 @@ class Pipeline:
 
                         try:
                             vocals_path = vocals_path_cache.get(crop_path) if self.config.essentia_gender else None
+                            _file_t0 = time.time()
 
                             _timings = {}
                             results = analyze_essentia_features(
@@ -1650,11 +1679,8 @@ class Pipeline:
                                 timing_acc[k].append(v)
                             if results:
                                 safe_update(get_crop_info_path(crop_path), results)
-                                self.stats["crops_processed"] += 1
-                                self.stats["pass_crops_processed"] += 1
-                                _t = time.time() - self.stats["pass_start_time"]
-                                if _t > 0:
-                                    self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                                self._update_pass_stats(crop_path,
+                                                        file_proc_time=time.time() - _file_t0)
                                 _es_done += 1
                         except Exception as e:
                             logger.error(f"  Essentia failed for {crop_path.name}: {e}")
@@ -1717,6 +1743,9 @@ class Pipeline:
             self.stats['pass_label'] = 'PASS 4 – Flamingo'
             self.stats['pass_crops_processed'] = 0
             self.stats['pass_rate'] = 0.0
+            self.stats['pass_audio_seconds'] = 0.0
+            self.stats['pass_rtf'] = 0.0
+            self.stats['last_file_rtf'] = 0.0
             self.stats['pass_start_time'] = time.time()
             logger.info(f"\n[PASS 4/5] Music Flamingo (Batched, GGUF/CLI) - {len(all_crops)} files")
             try:
@@ -1786,6 +1815,7 @@ class Pipeline:
 
                             self.stats['active_crops'] = [crop_path.stem]
                             results = {}
+                            _file_t0_fl = time.time()
                             try:
                                 for prompt_type, prompt_text in prompts_map.items():
                                     key = f'music_flamingo_{prompt_type}'
@@ -1806,11 +1836,8 @@ class Pipeline:
                                 if results:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
                                     safe_update(get_crop_info_path(crop_path), results)
-                                    self.stats["crops_processed"] += 1
-                                    self.stats["pass_crops_processed"] += 1
-                                    _t = time.time() - self.stats["pass_start_time"]
-                                    if _t > 0:
-                                        self.stats["pass_rate"] = self.stats["pass_crops_processed"] / _t
+                                    self._update_pass_stats(crop_path,
+                                                            file_proc_time=time.time() - _file_t0_fl)
                                     _fl_done += 1
                                     if _n > 0:
                                         self.stats.setdefault('feature_coverage', {})['Flamingo'] = (
