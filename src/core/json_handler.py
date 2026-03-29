@@ -81,7 +81,7 @@ def read_info(file_path: str | Path) -> Dict[str, Any]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            logger.debug(f"Successfully read {len(data)} keys from {file_path}")
+            logger.log(5, "Successfully read %d keys from %s", len(data), file_path)
             return data
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in {file_path}: {e}")
@@ -127,7 +127,7 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
                 # Merge: new data overwrites existing keys
                 existing_data.update(data)
                 data = existing_data
-                logger.debug(f"Merged data with existing {file_path}")
+                logger.log(5, "Merged data with existing %s", file_path)
             except Exception as e:
                 logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
 
@@ -139,7 +139,7 @@ def write_info(file_path: str | Path, data: Dict[str, Any], merge: bool = True) 
 
             # Atomic rename
             temp_path.replace(file_path)
-            logger.debug(f"Wrote {file_path} ({len(data)} keys total)")
+            logger.log(5, "Wrote %s (%d keys total)", file_path, len(data))
 
         except Exception as e:
             # Clean up temp file if it exists
@@ -171,7 +171,7 @@ def read_mir(file_path: str | Path) -> Dict[str, Any]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            logger.debug(f"Successfully read temporal data from {file_path}")
+            logger.log(5, "Successfully read temporal data from %s", file_path)
             return data
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in {file_path}: {e}")
@@ -216,7 +216,7 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
                 # Merge: new data overwrites existing keys
                 existing_data.update(data)
                 data = existing_data
-                logger.debug(f"Merged temporal data with existing {file_path}")
+                logger.log(5, "Merged temporal data with existing %s", file_path)
             except Exception as e:
                 logger.warning(f"Could not read existing data from {file_path}, will overwrite: {e}")
 
@@ -228,7 +228,7 @@ def write_mir(file_path: str | Path, data: Dict[str, Any], merge: bool = True) -
 
             # Atomic rename
             temp_path.replace(file_path)
-            logger.debug(f"Successfully wrote temporal data to {file_path}")
+            logger.log(5, "Successfully wrote temporal data to %s", file_path)
 
         except Exception as e:
             # Clean up temp file if it exists

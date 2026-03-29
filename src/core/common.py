@@ -368,6 +368,11 @@ def setup_logging(level: int = LOG_LEVEL, log_file: str = None) -> None:
         handlers=handlers
     )
 
+    # filelock emits DEBUG for every acquire/release — suppress it unless we're
+    # at TRACE level (< DEBUG).  These messages add no value in normal debug runs.
+    if level >= logging.DEBUG:
+        logging.getLogger('filelock').setLevel(logging.WARNING)
+
 
 def get_feature_range(feature_name: str) -> Dict[str, Any]:
     """
