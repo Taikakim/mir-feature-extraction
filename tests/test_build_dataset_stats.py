@@ -147,3 +147,77 @@ def test_run_scalar_pass_produces_js(tmp_path):
     assert "Artist - B" in js
     assert sorted_tracks == ["Artist - A", "Artist - B"]
     assert abs(tracks_data["Artist - A"]["bpm"] - 130.0) < 0.01
+
+
+from plots.build_dataset_stats import process_track_ts, run_timeseries_pass, _rotate_hpcp
+from src.core.timeseries_db import TimeseriesDB
+
+
+def _make_db(tmp_path, crop_key: str, n_steps: int = 64) -> TimeseriesDB:
+    db = TimeseriesDB(tmp_path / "test.db")
+    ts = {
+        "rms_energy_bass_ts":  np.random.rand(n_steps).astype(np.float32).tolist(),
+        "rms_energy_body_ts":  np.random.rand(n_steps).astype(np.float32).tolist(),
+        "hpcp_ts":             np.random.rand(n_steps, 12).astype(np.float32).tolist(),
+        "tonic_ts":            np.full(n_steps, 5.0, dtype=np.float32).tolist(),
+        "tonic_strength_ts":   np.random.rand(n_steps).astype(np.float32).tolist(),
+    }
+    db.put(crop_key, ts)
+    return db
+
+
+def test_process_track_ts_curve_length(tmp_path):
+    db = _make_db(tmp_path, "Artist - Title_0", n_steps=256)
+    result = process_track_ts(["Artist - Title_0"], db)
+    db.close()
+    assert result is not None
+    assert len(result["curves"]["rms_energy_bass_ts"]) == 32
+
+
+def test_process_track_ts_curve_normalised(tmp_path):
+    db = _make_db(tmp_path, "Artist - Title_0")
+    result = process_track_ts(["Artist - Title_0"], db)
+    db.close()
+    for field, curve in result["curves"].items():
+        assert max(curve) <= 1.0 + 1e-5, f"{field} not normalised"
+
+
+def test_process_track_ts_shape_scalars(tmp_path):
+    db = _make_db(tmp_path, "Artist - Title_0")
+    result = process_track_ts(["Artist - Title_0"], db)
+    db.close()
+    assert "rms_energy_bass_ts_mean" in result["shape"]
+    assert "rms_energy_bass_ts_std"  in result["shape"]
+
+
+def test_process_track_ts_tonic_rotation(tmp_path):
+    db = _make_db(tmp_path, "Artist - Title_0")  # tonic_ts all = 5.0
+    result = process_track_ts(["Artist - Title_0"], db)
+    db.close()
+    assert result is not None
+    expected_sin = float(np.sin(2 * np.pi * 5 / 12))
+    assert abs(result["shape"]["tonic_sin"] - expected_sin) < 1e-4
+    # hpcp_rot should be rotated version of hpcp_raw
+    raw = np.array(result["hpcp_raw"], dtype=np.float32)
+    rot = np.array(result["hpcp_rot"], dtype=np.float32)
+    expected_rot = _rotate_hpcp(raw, 5)
+    np.testing.assert_allclose(rot, expected_rot, atol=1e-4)
+
+
+def test_process_track_ts_variable_n_steps(tmp_path):
+    db = TimeseriesDB(tmp_path / "var.db")
+    # Two crops with different n_steps — both should contribute
+    for key, n in [("T_0", 64), ("T_1", 128), ("T_2", 256)]:
+        db.put(key, {"rms_energy_bass_ts": np.random.rand(n).astype(np.float32).tolist()})
+    result = process_track_ts(["T_0", "T_1", "T_2"], db)
+    db.close()
+    assert result is not None
+    assert len(result["curves"]["rms_energy_bass_ts"]) == 32
+
+
+def test_process_track_ts_missing_crops_skipped(tmp_path):
+    db = _make_db(tmp_path, "Artist - Title_0")
+    # "Artist - Title_1" is not in DB — should be silently skipped
+    result = process_track_ts(["Artist - Title_0", "Artist - Title_1"], db)
+    db.close()
+    assert result is not None  # still has data from crop 0

@@ -410,6 +410,8 @@ def _rotate_hpcp(hpcp: np.ndarray, tonic: int) -> np.ndarray:
 
 def _dominant_tonic(tonic_arr: np.ndarray) -> int:
     """Mode of rounded tonic values, clamped to [0, 11]."""
+    if len(tonic_arr) == 0:
+        return 0
     rounded = np.round(tonic_arr).astype(int) % 12
     return int(np.argmax(np.bincount(rounded, minlength=12)))
 
@@ -427,6 +429,7 @@ def _cosine_top_k(emb: np.ndarray, names: list, k: int = 20) -> dict:
     """
     dist = scipy.spatial.distance.cdist(emb, emb, metric='cosine')  # [N, N]
     sim  = (1.0 - dist).astype(np.float32)
+    np.nan_to_num(sim, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     np.fill_diagonal(sim, -2.0)  # exclude self
 
     result = {}
@@ -549,3 +552,158 @@ def write_data_js(sorted_tracks: list, tracks_data: dict,
 
     size = out.stat().st_size
     print(f"  Wrote {out.name}: {size:,} bytes  ({len(sorted_tracks)} tracks, {len(features_in_data)} features)")
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — timeseries pass
+# ---------------------------------------------------------------------------
+
+def process_track_ts(crop_keys: list, db) -> dict | None:
+    """Aggregate timeseries for all crops of one track.
+
+    Returns dict with:
+      'curves' : {field: list[32]}          — L∞-normalised to [0,1]
+      'shape'  : {field_mean/std/hpcp/tonic: float}
+      'hpcp_raw': list[12]
+      'hpcp_rot': list[12]
+    Returns None if no timeseries data found.
+    """
+    accumulated: dict[str, list] = {f: [] for f in TS_1D_FIELDS}
+    hpcp_vecs: list = []
+    tonic_vals: list = []
+
+    for key in crop_keys:
+        arrays = db.get(key)
+        if arrays is None:
+            continue
+        for f in TS_1D_FIELDS:
+            if f in arrays and len(arrays[f]) > 0:
+                accumulated[f].append(_interp32(arrays[f]))
+        if "hpcp_ts" in arrays:
+            h = arrays["hpcp_ts"]
+            if h.ndim == 2 and h.shape[1] == 12:
+                hpcp_vecs.append(h.mean(axis=0).astype(np.float32))
+        if "tonic_ts" in arrays and len(arrays["tonic_ts"]) > 0:
+            tonic_vals.extend(arrays["tonic_ts"].tolist())
+
+    has_1d = any(len(v) > 0 for v in accumulated.values())
+    if not has_1d and not hpcp_vecs:
+        return None
+
+    curves: dict = {}
+    shape: dict = {}
+
+    for f in TS_1D_FIELDS:
+        if not accumulated[f]:
+            continue
+        stack = np.stack(accumulated[f], axis=0)   # [n_crops, 32]
+        mean_curve = stack.mean(axis=0)             # [32]
+        mx = mean_curve.max()
+        curves[f] = (mean_curve / mx if mx > 0 else mean_curve).tolist()
+        shape[f + "_mean"] = float(stack.mean())
+        shape[f + "_std"]  = float(stack.std())
+
+    hpcp_raw_list = None
+    hpcp_rot_list = None
+    tonic = 0
+
+    if hpcp_vecs:
+        hpcp_raw_arr = np.stack(hpcp_vecs, axis=0).mean(axis=0)   # [12]
+        hpcp_raw_list = hpcp_raw_arr.tolist()
+        for i, v in enumerate(hpcp_raw_list):
+            shape[f"hpcp_raw_{i}"] = float(v)
+
+    if tonic_vals:
+        tonic_arr = np.array(tonic_vals, dtype=np.float32)
+        tonic = _dominant_tonic(tonic_arr)
+        shape["tonic_sin"] = float(np.sin(2 * np.pi * tonic / 12))
+        shape["tonic_cos"] = float(np.cos(2 * np.pi * tonic / 12))
+        if hpcp_raw_list is not None:
+            hpcp_rot_arr = _rotate_hpcp(np.array(hpcp_raw_list, dtype=np.float32), tonic)
+            hpcp_rot_list = hpcp_rot_arr.tolist()
+            for i, v in enumerate(hpcp_rot_list):
+                shape[f"hpcp_rot_{i}"] = float(v)
+
+    result: dict = {"curves": curves, "shape": shape}
+    if hpcp_raw_list is not None:
+        result["hpcp_raw"] = hpcp_raw_list
+    if hpcp_rot_list is not None:
+        result["hpcp_rot"] = hpcp_rot_list
+    return result
+
+
+def run_timeseries_pass(sorted_tracks: list, src: Path,
+                        output_dir: Path, db_path: Path) -> dict:
+    """Query TimeseriesDB for all tracks, build shape vectors and mini curves.
+
+    Saves .ts_cache.npz to output_dir for Stage 3 reuse.
+    Returns ts_data: {track_name: process_track_ts result}.
+    """
+    from core.timeseries_db import TimeseriesDB
+
+    output_dir = Path(output_dir)
+    db = TimeseriesDB.open(db_path)
+    print(f"Stage 2: TimeseriesDB has {db.count():,} entries")
+
+    # Map crop keys to track names
+    all_keys = db.all_keys()
+    crops_by_track: dict[str, list] = defaultdict(list)
+    track_set = set(sorted_tracks)
+    for key in all_keys:
+        track = _strip_crop_suffix(key)
+        if track in track_set:
+            crops_by_track[track].append(key)
+
+    print(f"  {len(crops_by_track)} tracks have timeseries data")
+
+    ts_data: dict[str, dict] = {}
+    for i, name in enumerate(sorted_tracks):
+        if i % 200 == 0:
+            print(f"  {i}/{len(sorted_tracks)} ...", end="\r")
+        crop_keys = crops_by_track.get(name, [])
+        if not crop_keys:
+            continue
+        result = process_track_ts(crop_keys, db)
+        if result is not None:
+            ts_data[name] = result
+
+    db.close()
+    print(f"\n  {len(ts_data)} tracks with ts data")
+
+    # Save cache for Stage 3 reuse — raw (un-normalised) embedding rows
+    N = len(sorted_tracks)
+    name_arr = np.array(sorted_tracks)
+    raw_emb = np.zeros((N, EMBEDDING_DIMS), dtype=np.float32)
+    mini_curves = np.zeros((N, len(TS_1D_FIELDS), 32), dtype=np.float32)
+
+    for i, name in enumerate(sorted_tracks):
+        td = ts_data.get(name)
+        if td is None:
+            continue
+        s = td.get("shape", {})
+        col = 0
+        for f in TS_1D_FIELDS:
+            raw_emb[i, col]   = s.get(f + "_mean", 0.0)
+            raw_emb[i, col+1] = s.get(f + "_std",  0.0)
+            col += 2
+        for j in range(12):
+            raw_emb[i, col+j] = s.get(f"hpcp_raw_{j}", 0.0)
+        col += 12
+        for j in range(12):
+            raw_emb[i, col+j] = s.get(f"hpcp_rot_{j}", 0.0)
+        col += 12
+        raw_emb[i, col]   = s.get("tonic_sin", 0.0)
+        raw_emb[i, col+1] = s.get("tonic_cos", 0.0)
+
+        for fi, f in enumerate(TS_1D_FIELDS):
+            c = td["curves"].get(f)
+            if c:
+                mini_curves[i, fi] = np.array(c, dtype=np.float32)
+
+    cache_path = output_dir / ".ts_cache.npz"
+    np.savez_compressed(cache_path,
+        track_names=name_arr,
+        raw_embedding=raw_emb,
+        mini_curves=mini_curves)
+    print(f"  Cache saved: {cache_path}")
+    return ts_data
