@@ -29,6 +29,8 @@ PLOTS_DIR   = Path(__file__).resolve().parent
 REPO_ROOT   = PLOTS_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from core.timeseries_db import TimeseriesDB  # noqa: E402 (after sys.path setup)
+
 DEFAULT_SRC    = Path("/run/media/kim/Mantu/ai-music/Goa_Separated_crops")
 DEFAULT_OUTDIR = Path("/run/media/kim/Lehto")
 DEFAULT_DB     = REPO_ROOT / "data" / "timeseries.db"
@@ -632,15 +634,12 @@ def process_track_ts(crop_keys: list, db) -> dict | None:
     return result
 
 
-def run_timeseries_pass(sorted_tracks: list, src: Path,
-                        output_dir: Path, db_path: Path) -> dict:
+def run_timeseries_pass(sorted_tracks: list, output_dir: Path, db_path: Path) -> dict:
     """Query TimeseriesDB for all tracks, build shape vectors and mini curves.
 
     Saves .ts_cache.npz to output_dir for Stage 3 reuse.
     Returns ts_data: {track_name: process_track_ts result}.
     """
-    from core.timeseries_db import TimeseriesDB
-
     output_dir = Path(output_dir)
     db = TimeseriesDB.open(db_path)
     print(f"Stage 2: TimeseriesDB has {db.count():,} entries")
