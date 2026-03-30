@@ -429,6 +429,7 @@ def _cosine_top_k(emb: np.ndarray, names: list, k: int = 20) -> dict:
     Returns:
         {track_name: [[neighbor_name, score], ...]} sorted descending
     """
+    k = min(k, len(names) - 1)
     dist = scipy.spatial.distance.cdist(emb, emb, metric='cosine')  # [N, N]
     sim  = (1.0 - dist).astype(np.float32)
     np.nan_to_num(sim, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
@@ -706,3 +707,214 @@ def run_timeseries_pass(sorted_tracks: list, output_dir: Path, db_path: Path) ->
         mini_curves=mini_curves)
     print(f"  Cache saved: {cache_path}")
     return ts_data
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — similarity pass
+# ---------------------------------------------------------------------------
+
+def build_embedding(track_names: list, ts_data: dict) -> np.ndarray:
+    """Build and z-score the [N, 44] embedding matrix.
+
+    Layout (44 dims):
+      [mean, std] × 9 1D fields (18)
+      hpcp_raw_0..11             (12)
+      hpcp_rot_0..11             (12)
+      tonic_sin, tonic_cos        (2)
+    """
+    N = len(track_names)
+    raw = np.zeros((N, EMBEDDING_DIMS), dtype=np.float32)
+
+    for i, name in enumerate(track_names):
+        td = ts_data.get(name)
+        if td is None:
+            continue
+        s = td.get("shape", {})
+        col = 0
+        for f in TS_1D_FIELDS:
+            raw[i, col]   = s.get(f + "_mean", 0.0)
+            raw[i, col+1] = s.get(f + "_std",  0.0)
+            col += 2
+        for j in range(12):
+            raw[i, col+j] = s.get(f"hpcp_raw_{j}", 0.0)
+        col += 12
+        for j in range(12):
+            raw[i, col+j] = s.get(f"hpcp_rot_{j}", 0.0)
+        col += 12
+        raw[i, col]   = s.get("tonic_sin", 0.0)
+        raw[i, col+1] = s.get("tonic_cos", 0.0)
+
+    mu = raw.mean(axis=0)
+    sigma = raw.std(axis=0)
+    sigma[sigma == 0] = 1.0
+    return ((raw - mu) / sigma).astype(np.float32)
+
+
+def run_similarity_pass(sorted_tracks: list, ts_data: dict, output_dir: Path) -> None:
+    """Compute cosine similarity for three DJ modes, write feature_explorer_timeseries.js."""
+    output_dir = Path(output_dir)
+    print(f"Stage 3: computing similarity for {len(sorted_tracks)} tracks ...")
+
+    emb = build_embedding(sorted_tracks, ts_data)
+
+    # Key-locked slice: hpcp_raw (12) + tonic_sin/cos (2) — cols 18..29 + 42..43
+    idx_raw_start = 9 * 2          # = 18
+    kl_idx = list(range(idx_raw_start, idx_raw_start + 12)) + [42, 43]
+    # Pitch-shift slice: hpcp_rot (12) — cols 30..41
+    ps_idx = list(range(idx_raw_start + 12, idx_raw_start + 24))
+
+    emb_kl = emb[:, kl_idx]
+    emb_ps = emb[:, ps_idx]
+
+    print("  overall similarity ...")
+    nbr_overall     = _cosine_top_k(emb,    sorted_tracks, k=20)
+    print("  key-locked similarity ...")
+    nbr_key_locked  = _cosine_top_k(emb_kl, sorted_tracks, k=20)
+    print("  pitch-shift similarity ...")
+    nbr_pitch_shift = _cosine_top_k(emb_ps, sorted_tracks, k=20)
+
+    # Build TS_CURVES and TS_NEIGHBORS JS objects
+    ts_curves_obj: dict = {}
+    for name in sorted_tracks:
+        td = ts_data.get(name)
+        if td is None:
+            continue
+        entry: dict = {}
+        for f in TS_1D_FIELDS:
+            c = td["curves"].get(f)
+            if c:
+                entry[f] = [round(v, 5) for v in c]
+        if "hpcp_raw" in td:
+            entry["hpcp_raw"] = [round(v, 5) for v in td["hpcp_raw"]]
+        if "hpcp_rot" in td:
+            entry["hpcp_rot"] = [round(v, 5) for v in td["hpcp_rot"]]
+        if entry:
+            ts_curves_obj[name] = entry
+
+    ts_neighbors_obj: dict = {}
+    for name in sorted_tracks:
+        if name not in ts_curves_obj:
+            continue
+        ts_neighbors_obj[name] = {
+            "overall":     nbr_overall.get(name, []),
+            "key_locked":  nbr_key_locked.get(name, []),
+            "pitch_shift": nbr_pitch_shift.get(name, []),
+        }
+
+    out = output_dir / "feature_explorer_timeseries.js"
+    with open(out, "w") as fh:
+        fh.write("// Auto-generated — re-generate: python plots/build_dataset_stats.py\n\n")
+        fh.write(f"const TS_CURVES = {json.dumps(ts_curves_obj, separators=(',', ':'))};\n")
+        fh.write(f"const TS_NEIGHBORS = {json.dumps(ts_neighbors_obj, separators=(',', ':'))};\n")
+
+    size = out.stat().st_size
+    print(f"  Wrote {out.name}: {size:,} bytes  ({len(ts_curves_obj)} tracks)")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Build all Feature Explorer dataset statistics")
+    p.add_argument("--source",    default=str(DEFAULT_SRC),
+                   help=f"Root crops directory (default: {DEFAULT_SRC})")
+    p.add_argument("--output-dir", default=str(DEFAULT_OUTDIR),
+                   help=f"Output directory for JS files (default: {DEFAULT_OUTDIR})")
+    p.add_argument("--db",        default=str(DEFAULT_DB),
+                   help=f"TimeseriesDB path (default: {DEFAULT_DB})")
+    p.add_argument("--skip-scalars",     action="store_true",
+                   help="Skip Stage 1 (load sorted_tracks from cache)")
+    p.add_argument("--skip-timeseries",  action="store_true",
+                   help="Skip Stages 2 and 3")
+    p.add_argument("--skip-curves",      action="store_true",
+                   help="Skip Stage 2 only (load cache, re-run Stage 3)")
+    p.add_argument("--skip-similarity",  action="store_true",
+                   help="Skip Stage 3 only")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    src        = Path(args.source)
+    output_dir = Path(args.output_dir)
+    db_path    = Path(args.db)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not src.exists():
+        print(f"Error: source not found: {src}", file=sys.stderr)
+        sys.exit(1)
+
+    sorted_tracks: list = []
+    tracks_data: dict = {}
+    ts_data: dict = {}
+
+    # --- Stage 1 ---
+    if not args.skip_scalars:
+        sorted_tracks, tracks_data = run_scalar_pass(src, output_dir)
+    else:
+        # Load track list from existing cache
+        cache = output_dir / ".ts_cache.npz"
+        if not cache.exists():
+            print(f"Error: --skip-scalars requires {cache} (run without flag first)",
+                  file=sys.stderr)
+            sys.exit(1)
+        sorted_tracks = list(np.load(cache, allow_pickle=True)["track_names"])
+        print(f"Stage 1 skipped — loaded {len(sorted_tracks)} tracks from cache")
+
+    # --- Stage 2 ---
+    if not args.skip_timeseries:
+        if not args.skip_curves:
+            ts_data = run_timeseries_pass(sorted_tracks, output_dir, db_path)
+        else:
+            cache = output_dir / ".ts_cache.npz"
+            if not cache.exists():
+                print(f"Error: --skip-curves requires {cache}", file=sys.stderr)
+                sys.exit(1)
+            npz = np.load(cache, allow_pickle=True)
+            # Rebuild ts_data from cache (curves not stored — similarity only)
+            raw_emb = npz["raw_embedding"]
+            names   = list(npz["track_names"])
+            # Minimal ts_data: shape scalars only (enough for similarity)
+            for i, name in enumerate(names):
+                shape: dict = {}
+                col = 0
+                for f in TS_1D_FIELDS:
+                    shape[f + "_mean"] = float(raw_emb[i, col])
+                    shape[f + "_std"]  = float(raw_emb[i, col+1])
+                    col += 2
+                for j in range(12):
+                    shape[f"hpcp_raw_{j}"] = float(raw_emb[i, col+j])
+                col += 12
+                for j in range(12):
+                    shape[f"hpcp_rot_{j}"] = float(raw_emb[i, col+j])
+                col += 12
+                shape["tonic_sin"] = float(raw_emb[i, col])
+                shape["tonic_cos"] = float(raw_emb[i, col+1])
+                ts_data[name] = {"shape": shape, "curves": {}}
+            sorted_tracks = names
+            print(f"Stage 2 skipped — loaded {len(ts_data)} tracks from cache")
+
+        # Merge ts shape scalars into tracks_data and re-write data JS
+        if not args.skip_scalars and ts_data:
+            features_in_data_set = set()
+            for td in tracks_data.values():
+                features_in_data_set.update(td.keys())
+            for name, tsd in ts_data.items():
+                if name in tracks_data:
+                    tracks_data[name].update(tsd.get("shape", {}))
+                    features_in_data_set.update(tsd.get("shape", {}).keys())
+            features_in_data = (
+                [f for f in NUMERIC_FEATURES + TS_NUMERIC_FEATURES if f in features_in_data_set]
+            )
+            write_data_js(sorted_tracks, tracks_data, features_in_data, output_dir)
+
+    # --- Stage 3 ---
+    if not args.skip_timeseries and not args.skip_similarity:
+        run_similarity_pass(sorted_tracks, ts_data, output_dir)
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()

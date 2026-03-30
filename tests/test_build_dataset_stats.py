@@ -221,3 +221,59 @@ def test_process_track_ts_missing_crops_skipped(tmp_path):
     result = process_track_ts(["Artist - Title_0", "Artist - Title_1"], db)
     db.close()
     assert result is not None  # still has data from crop 0
+
+
+from plots.build_dataset_stats import build_embedding, run_similarity_pass
+
+
+def _make_ts_data(n_tracks: int = 5) -> tuple[list, dict]:
+    from plots.build_dataset_stats import TS_1D_FIELDS
+    names = [f"Track {i}" for i in range(n_tracks)]
+    ts_data = {}
+    for name in names:
+        shape = {}
+        for f in TS_1D_FIELDS:
+            shape[f + "_mean"] = float(np.random.rand())
+            shape[f + "_std"]  = float(np.random.rand())
+        for j in range(12):
+            shape[f"hpcp_raw_{j}"] = float(np.random.rand())
+            shape[f"hpcp_rot_{j}"] = float(np.random.rand())
+        shape["tonic_sin"] = float(np.random.rand())
+        shape["tonic_cos"] = float(np.random.rand())
+        ts_data[name] = {"shape": shape, "curves": {}, "hpcp_raw": [0.0]*12, "hpcp_rot": [0.0]*12}
+    return names, ts_data
+
+
+def test_build_embedding_shape():
+    names, ts_data = _make_ts_data(10)
+    emb = build_embedding(names, ts_data)
+    assert emb.shape == (10, 44)
+    assert emb.dtype == np.float32
+
+
+def test_build_embedding_zscored():
+    names, ts_data = _make_ts_data(50)
+    emb = build_embedding(names, ts_data)
+    # After z-scoring, each column should have mean ≈ 0, std ≈ 1
+    np.testing.assert_allclose(emb.mean(axis=0), np.zeros(44), atol=1e-4)
+
+
+def test_build_embedding_missing_track_gets_zero():
+    names = ["A", "B", "C"]
+    ts_data = {"A": {"shape": {"rms_energy_bass_ts_mean": 1.0}, "curves": {}}}
+    emb = build_embedding(names, ts_data)
+    # B and C are missing — their rows should not raise and be finite
+    assert np.all(np.isfinite(emb))
+
+
+def test_run_similarity_pass_writes_js(tmp_path):
+    from plots.build_dataset_stats import TS_1D_FIELDS
+    names, ts_data = _make_ts_data(10)
+    run_similarity_pass(names, ts_data, tmp_path)
+
+    js = (tmp_path / "feature_explorer_timeseries.js").read_text()
+    assert "TS_CURVES" in js
+    assert "TS_NEIGHBORS" in js
+    assert "overall" in js
+    assert "key_locked" in js
+    assert "pitch_shift" in js
