@@ -18,9 +18,9 @@ paths:
 # =============================================================================
 stages:
   organize: false                 # Stage 1: Organize raw files into project structure. set to false when running on a folder of already separated input files
-  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
   separate: false                 # Stage 2a: Stem separation — set false to skip separation and process only existing separated folders
-  cropping: true                 # Stage 3: Create training crops
+  cropping: false                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
 
 # =============================================================================
@@ -354,5 +354,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 4             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
   essentia_workers: 2            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
