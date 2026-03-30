@@ -461,7 +461,7 @@ def load_track_data(track_dir: Path) -> dict | None:
         except Exception:
             continue
         for k, v in data.items():
-            if isinstance(v, (int, float)) and v is not None:
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v is not None:
                 feature_values[k].append(float(v))
             elif k in ("spotify_id", "musicbrainz_id", "track_metadata_artist",
                        "track_metadata_title", "music_flamingo_short_genre",
