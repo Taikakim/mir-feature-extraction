@@ -1242,8 +1242,22 @@ class Pipeline:
             _cov_counts = {lbl: 0 for lbl in _COV_KEY_GROUPS}
             _n_total = len(all_crops)
 
+            # Pre-compute sentinel keys for PASS 2/3/4 so we can build their
+            # to_process lists in one shared scan (avoids 3 × 200k re-reads).
+            _p2_audiobox_key = 'content_enjoyment'
+            _p3_essentia_keys = ['danceability', 'atonality']
+            if self.config.essentia_genre:   _p3_essentia_keys.append('essentia_genre')
+            if self.config.essentia_voice:   _p3_essentia_keys.append('voice_probability')
+            _p4_prompt_keys = [
+                f'music_flamingo_{p}'
+                for p in (self.config.flamingo_prompts or {}).keys()
+            ] or ['music_flamingo_full']
+
             tasks = []
-            logger.info(f"  Scanning {_n_total} crop INFO files for pending work...")
+            _pass2_to_process: List[Path] = []
+            _pass3_to_process: List[Path] = []
+            _pass4_candidates: List[Path] = []  # sampling applied later
+            logger.info(f"  Scanning {_n_total} crop INFO files for pending work (all passes)...")
             for _scan_i, crop_path in enumerate(all_crops):
                 if shutdown_requested.is_set():
                     logger.info("  Shutdown requested — aborting pre-scan.")
@@ -1257,6 +1271,17 @@ class Pipeline:
                 for _lbl, _keys in _COV_KEY_GROUPS.items():
                     if all(k in existing_keys for k in _keys):
                         _cov_counts[_lbl] += 1
+
+                # Build PASS 2/3/4 to_process lists — same read, no extra I/O.
+                if not self.config.skip_audiobox:
+                    if self.config.should_overwrite('audiobox') or _p2_audiobox_key not in existing_keys:
+                        _pass2_to_process.append(crop_path)
+                if not self.config.skip_classification:
+                    if self.config.should_overwrite('essentia') or any(k not in existing_keys for k in _p3_essentia_keys):
+                        _pass3_to_process.append(crop_path)
+                if not self.config.skip_flamingo:
+                    if self.config.should_overwrite('flamingo') or any(k not in existing_keys for k in _p4_prompt_keys):
+                        _pass4_candidates.append(crop_path)
 
                 # Publish coverage incrementally so TUI shows % from scan start
                 if _n_total > 0 and (_scan_i % 1000 == 0 or _scan_i == _n_total - 1):
@@ -1476,13 +1501,8 @@ class Pipeline:
                 from src.timbral.audiobox_aesthetics import analyze_audiobox_aesthetics_batch, get_predictor
                 from src.core.common import ProgressBar
 
-                # Check which files actually need processing
-                to_process = []
-                for crop_path in all_crops:
-                    info_path = get_crop_info_path(crop_path)
-                    existing = read_info(info_path) if info_path.exists() else {}
-                    if self.config.should_overwrite('audiobox') or 'content_enjoyment' not in existing:
-                        to_process.append(crop_path)
+                # Use list built during the shared PASS 1 scan (no re-read needed).
+                to_process = _pass2_to_process
 
                 # Update AudioBox coverage (pre-pass snapshot)
                 _n = self.stats.get('feature_coverage_n', len(all_crops))
@@ -1603,12 +1623,8 @@ class Pipeline:
                                    self.config.essentia_mood,
                                    self.config.essentia_instrument])
 
-                to_process = []
-                for crop_path in all_crops:
-                    info_path = get_crop_info_path(crop_path)
-                    existing = read_info(info_path) if info_path.exists() else {}
-                    if self.config.should_overwrite('essentia') or any(k not in existing for k in ESSENTIA_KEYS):
-                        to_process.append(crop_path)
+                # Use list built during the shared PASS 1 scan (no re-read needed).
+                to_process = _pass3_to_process
 
                 # Update Essentia coverage (pre-pass snapshot)
                 _n = self.stats.get('feature_coverage_n', len(all_crops))
@@ -1761,28 +1777,15 @@ class Pipeline:
                 else:
                     logger.info(f"  Active prompts: {', '.join(prompts_map.keys())}")
                     
-                    # Filter files needing processing (check if ALL active prompts are present)
+                    # Apply sampling to the candidate list built during PASS 1 scan.
                     prob = self.config.flamingo_sample_probability
                     to_process = []
                     skipped_by_sampling = 0
-                    for crop_path in all_crops:
-                        info_path = get_crop_info_path(crop_path)
-                        existing = read_info(info_path) if info_path.exists() else {}
-
-                        needs_run = False
-                        if self.config.should_overwrite('flamingo'):
-                            needs_run = True
+                    for crop_path in _pass4_candidates:
+                        if prob >= 1.0 or random.random() < prob:
+                            to_process.append(crop_path)
                         else:
-                            for p in prompts_map.keys():
-                                if f'music_flamingo_{p}' not in existing:
-                                    needs_run = True
-                                    break
-
-                        if needs_run:
-                            if prob >= 1.0 or random.random() < prob:
-                                to_process.append(crop_path)
-                            else:
-                                skipped_by_sampling += 1
+                            skipped_by_sampling += 1
 
                     # Update Flamingo coverage (pre-pass snapshot)
                     _n = self.stats.get('feature_coverage_n', len(all_crops))
