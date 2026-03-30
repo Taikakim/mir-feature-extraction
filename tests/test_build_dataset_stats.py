@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -10,6 +12,9 @@ from plots.build_dataset_stats import (
     _rotate_hpcp,
     _dominant_tonic,
     _cosine_top_k,
+    load_track_data,
+    run_scalar_pass,
+    write_data_js,
 )
 
 
@@ -101,3 +106,45 @@ def test_cosine_top_k_respects_k():
     names = [str(i) for i in range(10)]
     result = _cosine_top_k(emb, names, k=3)
     assert all(len(v) == 3 for v in result.values())
+
+
+def _make_info(path: Path, data: dict):
+    path.write_text(json.dumps(data))
+
+
+def test_load_track_data_averages_crops(tmp_path):
+    track_dir = tmp_path / "Artist - Title"
+    track_dir.mkdir()
+    _make_info(track_dir / "Artist - Title_0.INFO", {"bpm": 140.0, "lufs": -10.0})
+    _make_info(track_dir / "Artist - Title_1.INFO", {"bpm": 142.0, "lufs": -12.0})
+    result = load_track_data(track_dir)
+    assert result is not None
+    assert abs(result["bpm"] - 141.0) < 0.01
+    assert abs(result["lufs"] - -11.0) < 0.01
+
+
+def test_load_track_data_skips_stems(tmp_path):
+    track_dir = tmp_path / "Track"
+    track_dir.mkdir()
+    _make_info(track_dir / "Track_0.INFO",       {"bpm": 140.0})
+    _make_info(track_dir / "Track_0_bass.INFO",  {"bpm": 999.0})  # stem — skip
+    result = load_track_data(track_dir)
+    assert abs(result["bpm"] - 140.0) < 0.01
+
+
+def test_run_scalar_pass_produces_js(tmp_path):
+    # Two track dirs each with one crop
+    for name, bpm in [("Artist - A", 130.0), ("Artist - B", 145.0)]:
+        d = tmp_path / name
+        d.mkdir()
+        _make_info(d / f"{name}_0.INFO", {"bpm": bpm, "lufs": -14.0})
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    sorted_tracks, tracks_data = run_scalar_pass(tmp_path, out_dir)
+
+    js = (out_dir / "feature_explorer_data.js").read_text()
+    assert "Artist - A" in js
+    assert "Artist - B" in js
+    assert sorted_tracks == ["Artist - A", "Artist - B"]
+    assert abs(tracks_data["Artist - A"]["bpm"] - 130.0) < 0.01
