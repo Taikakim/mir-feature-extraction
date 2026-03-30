@@ -21,6 +21,7 @@ Features extracted (all 0-100 scale):
 - {warmth}: Mid-low frequency richness
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Optional
 import logging
@@ -301,16 +302,17 @@ def analyze_all_timbral_features(audio_path: str | Path,
     """
     Analyze all (or selected) Audio Commons timbral features.
 
-    When audio/sr are provided, the audio is written to /dev/shm (tmpfs RAM disk)
-    once, and all 8 timbral_models calls read from RAM instead of HDD.
-    This eliminates 7 redundant disk reads per analysis.
+    When audio/sr are provided, passes the numpy array directly to timbral_models
+    (no /dev/shm needed — the library accepts arrays natively).  The 7 non-reverb
+    features are run in two parallel threads (hardness is the slow one at ~1.9s,
+    the rest sum to ~1.7s, so parallel wall-time ≈ 1.9s vs 3.6s sequential).
 
     Args:
         audio_path: Path to audio file
         features: Optional list of features to extract. If None, extracts all.
                  Valid: ['brightness', 'roughness', 'hardness', 'depth',
                         'booming', 'reverberation', 'sharpness', 'warmth']
-        audio: Pre-loaded audio array (written to /dev/shm for timbral_models)
+        audio: Pre-loaded audio array passed directly to timbral_models.
         sr: Sample rate (required if audio is provided)
 
     Returns:
@@ -323,64 +325,74 @@ def analyze_all_timbral_features(audio_path: str | Path,
         raise ImportError("timbral_models is not installed")
 
     audio_path = Path(audio_path)
-    tmpfs_path = None
 
-    # If pre-loaded audio provided, write to /dev/shm for timbral_models
-    # (library only accepts file paths, so we use RAM disk to avoid HDD I/O)
+    # timbral_models accepts numpy arrays (file_read checks hasattr 'shape') or str paths.
+    # When audio is available pass the array; otherwise pass a str path for the library.
     if audio is not None and sr is not None:
-        try:
-            import soundfile as sf
-            import os
-            tmpfs_path = Path(f'/dev/shm/mir_timbral_{os.getpid()}.wav')
-            import numpy as np
-            audio_out = audio
-            if np.issubdtype(audio.dtype, np.floating):
-                audio_out = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-            sf.write(str(tmpfs_path), audio_out, sr, subtype='PCM_16')
-            analysis_path = tmpfs_path
-            logger.info(f"Analyzing {audio_path.name} timbral features (via /dev/shm)")
-        except Exception as e:
-            logger.debug(f"/dev/shm write failed ({e}), falling back to disk path")
-            analysis_path = audio_path
+        arg = audio
+        kw  = {'fs': sr}
     else:
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        analysis_path = audio_path
+        arg = str(audio_path)  # must be str, not Path — file_read uses isinstance(fname, str)
+        kw  = {}
 
-    # Define all available features and their analysis functions
-    all_features = {
-        'brightness': analyze_brightness,
-        'roughness': analyze_roughness,
-        'hardness': analyze_hardness,
-        'depth': analyze_depth,
-        'booming': analyze_booming,
-        'reverberation': analyze_reverb,
-        'sharpness': analyze_sharpness,
-        'warmth': analyze_warmth,
+    # Map feature names to timbral_models callables
+    _tm_fns = {
+        'brightness':   timbral_models.timbral_brightness,
+        'roughness':    timbral_models.timbral_roughness,
+        'hardness':     timbral_models.timbral_hardness,
+        'depth':        timbral_models.timbral_depth,
+        'booming':      timbral_models.timbral_booming,
+        'sharpness':    timbral_models.timbral_sharpness,
+        'warmth':       timbral_models.timbral_warmth,
     }
+    # Reverb has its own signature (dev_output=True) so keep the wrapper
+    _reverb_wrapper = analyze_reverb
 
-    # Use all features if none specified
     if features is None:
-        features = list(all_features.keys())
+        features = list(_tm_fns.keys()) + ['reverberation']
 
     logger.info(f"Analyzing {len(features)} timbral features: {audio_path.name}")
 
-    results = {}
-    try:
-        for feature_name in features:
-            if feature_name not in all_features:
-                logger.warning(f"Unknown feature: {feature_name}")
-                continue
+    # Split into parallelisable (timbral_models direct) and reverb (wrapper)
+    parallel_feats = [f for f in features if f in _tm_fns]
+    do_reverb      = 'reverberation' in features
 
+    results: Dict[str, float] = {}
+
+    def _run(name: str):
+        fn = _tm_fns[name]
+        try:
+            raw = fn(arg, **kw)
+            return name, clamp_feature_value(name, float(raw))
+        except Exception as e:
+            logger.warning(f"Could not analyze {name} for {audio_path.name}: {type(e).__name__}: {e}")
+            return name, None
+
+    if parallel_feats:
+        # Run hardness (slow, ~1.9 s) in one thread, everything else in another.
+        # numpy/scipy release the GIL during FFT so the threads genuinely overlap.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = {pool.submit(_run, f): f for f in parallel_feats}
+            for fut in as_completed(futs):
+                name, val = fut.result()
+                if val is not None:
+                    results[name] = val
+
+    if do_reverb:
+        try:
+            rev_path = audio_path  # reverb wrapper still uses file path
+            if audio is not None and sr is not None:
+                import soundfile as sf, numpy as np, os
+                rev_path = Path(f'/dev/shm/mir_rev_{os.getpid()}.wav')
+                audio_out = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+                sf.write(str(rev_path), audio_out, sr, subtype='PCM_16')
             try:
-                value = all_features[feature_name](analysis_path)
-                results[feature_name] = value
-            except Exception as e:
-                logger.warning(f"Could not analyze {feature_name} for {audio_path.name}: {type(e).__name__}: {e}")
-    finally:
-        # Clean up tmpfs file
-        if tmpfs_path is not None and tmpfs_path.exists():
-            tmpfs_path.unlink()
+                results['reverberation'] = _reverb_wrapper(rev_path)
+            finally:
+                if audio is not None and rev_path != audio_path and rev_path.exists():
+                    rev_path.unlink()
+        except Exception as e:
+            logger.warning(f"Could not analyze reverberation for {audio_path.name}: {type(e).__name__}: {e}")
 
     logger.info(f"Extracted {len(results)}/{len(features)} timbral features")
     return results

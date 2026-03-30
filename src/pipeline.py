@@ -207,10 +207,11 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     to all feature functions to avoid redundant disk reads (was 17 reads per crop,
     now 1-5 depending on stems).
 
-    Args is a tuple of (crop_path, config_dict, existing_keys) where existing_keys
-    is a set of keys already present in the .INFO file.
+    Args is a tuple of (crop_path, config_dict, existing_keys, existing_info) where
+    existing_keys is a set of keys already present in the .INFO file, and existing_info
+    is the full INFO dict (used to read start_time/end_time for timeseries beat loading).
     """
-    crop_path, config_dict, existing_keys = args
+    crop_path, config_dict, existing_keys, existing_info = args
     results = {}
     overwrite = config_dict.get('overwrite', False)
     per_feature_ow = config_dict.get('per_feature_overwrite', {})
@@ -453,12 +454,39 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     n_steps = config_dict.get('timeseries_n_steps', 256)
                     ts_timbral = config_dict.get('timeseries_timbral', False)
                     ts_timbral_steps = config_dict.get('timeseries_timbral_steps', 16)
+
+                    # Try to load pre-computed beats from the source BEATS_GRID file.
+                    # This avoids an expensive librosa.beat_track() call (~1s/crop).
+                    _beats_arr = None
+                    _downbeats_arr = None
+                    _input_dir = config_dict.get('input_dir')
+                    if _input_dir and existing_info:
+                        try:
+                            _track_name = crop_path.parent.name
+                            _bg_path = Path(_input_dir) / _track_name / f"{_track_name}.BEATS_GRID"
+                            _db_path = Path(_input_dir) / _track_name / f"{_track_name}.DOWNBEATS"
+                            _start = float(existing_info.get('start_time', 0.0))
+                            _end   = float(existing_info.get('end_time', 1e9))
+                            if _bg_path.exists():
+                                _all_beats = np.array([float(l) for l in _bg_path.read_text().splitlines() if l.strip()], dtype=np.float32)
+                                _mask = (_all_beats >= _start) & (_all_beats <= _end)
+                                _beats_arr = _all_beats[_mask] - _start
+                            if _db_path.exists():
+                                _all_db = np.array([float(l) for l in _db_path.read_text().splitlines() if l.strip()], dtype=np.float32)
+                                _mask = (_all_db >= _start) & (_all_db <= _end)
+                                _downbeats_arr = _all_db[_mask] - _start
+                        except Exception:
+                            _beats_arr = None
+                            _downbeats_arr = None
+
                     if crop_mono is not None:
                         from spectral.timeseries_features import extract_timeseries
                         ts_results = extract_timeseries(
                             crop_mono.astype(np.float32),
                             crop_sr,
                             n_steps=n_steps,
+                            beats=_beats_arr,
+                            downbeats=_downbeats_arr,
                             extract_hpcp=True,
                             extract_timbral=ts_timbral,
                             timbral_n_steps=ts_timbral_steps,
@@ -1187,6 +1215,7 @@ class Pipeline:
                 'timeseries_timbral_steps': self.config.timeseries_timbral_steps,
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
+                'input_dir': str(self.config.input_dir) if self.config.input_dir else None,
             }
 
             # Coverage keys: ALL keys for each FEATURE_GROUPS label.
@@ -1341,7 +1370,7 @@ class Pipeline:
                         needs_run = True
 
                 if needs_run:
-                    tasks.append((crop_path, worker_config, existing_keys))
+                    tasks.append((crop_path, worker_config, existing_keys, existing))
 
             # Final coverage snapshot (may already be published, ensures consistency)
             if _n_total > 0:
