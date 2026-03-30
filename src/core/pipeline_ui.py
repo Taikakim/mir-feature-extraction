@@ -670,6 +670,8 @@ class PipelineUI:
         feature_coverage: Dict[str, float] = {}
         active_crops: List[str] = []
         pass_rate: float = 0.0
+        pass_rtf: float = 0.0
+        last_file_rtf: float = 0.0
         if crop_stats is not None:
             feature_coverage = crop_stats.get('feature_coverage', {})
             active_crops = crop_stats.get('active_crops', [])
