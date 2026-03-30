@@ -90,6 +90,8 @@ TS_NUMERIC_FEATURES = (
     [f"hpcp_rot_{i}" for i in range(12)] +
     ["tonic_sin", "tonic_cos"]
 )
+assert len(TS_NUMERIC_FEATURES) == EMBEDDING_DIMS, \
+    f"TS_NUMERIC_FEATURES length {len(TS_NUMERIC_FEATURES)} != EMBEDDING_DIMS {EMBEDDING_DIMS}"
 
 # ---------------------------------------------------------------------------
 # Pure helper functions (all tested in tests/test_build_dataset_stats.py)
