@@ -882,7 +882,7 @@ class Pipeline:
                 logger.warning(f"Music Flamingo not available: {e}")
 
         import numpy as np
-        from src.core.graceful_shutdown import shutdown_requested
+        from core.graceful_shutdown import shutdown_requested
 
         # Process each crop
         for i, crop_path in enumerate(all_crops, 1):
@@ -1146,7 +1146,7 @@ class Pipeline:
         4. flamingo_pass: Heavy GPU - Load model once, process all.
         5. midi_pass: Heavy GPU - Load model once, process all.
         """
-        from src.core.graceful_shutdown import shutdown_requested, start_shutdown_listener, stop_shutdown_listener
+        from core.graceful_shutdown import shutdown_requested, start_shutdown_listener, stop_shutdown_listener
         start_shutdown_listener()
 
         # Pipeline state for progress tracking
