@@ -744,9 +744,13 @@ def build_embedding(track_names: list, ts_data: dict) -> np.ndarray:
         raw[i, col]   = s.get("tonic_sin", 0.0)
         raw[i, col+1] = s.get("tonic_cos", 0.0)
 
-    mu = raw.mean(axis=0)
-    sigma = raw.std(axis=0)
+    # Rows for missing tracks are all-zero; impute with column mean so they
+    # land at 0.0 (population mean) after z-scoring, not at -µ/σ.
+    missing_mask = ~np.array([name in ts_data for name in track_names])
+    mu = raw[~missing_mask].mean(axis=0) if (~missing_mask).any() else raw.mean(axis=0)
+    sigma = raw[~missing_mask].std(axis=0) if (~missing_mask).any() else raw.std(axis=0)
     sigma[sigma == 0] = 1.0
+    raw[missing_mask] = mu   # impute before z-scoring
     return ((raw - mu) / sigma).astype(np.float32)
 
 
@@ -845,6 +849,11 @@ def main():
         print(f"Error: source not found: {src}", file=sys.stderr)
         sys.exit(1)
 
+    if args.skip_scalars and args.skip_timeseries:
+        print("Error: --skip-scalars --skip-timeseries skips all stages. Nothing to do.",
+              file=sys.stderr)
+        sys.exit(1)
+
     sorted_tracks: list = []
     tracks_data: dict = {}
     ts_data: dict = {}
@@ -872,10 +881,13 @@ def main():
                 print(f"Error: --skip-curves requires {cache}", file=sys.stderr)
                 sys.exit(1)
             npz = np.load(cache, allow_pickle=True)
-            # Rebuild ts_data from cache (curves not stored — similarity only)
-            raw_emb = npz["raw_embedding"]
-            names   = list(npz["track_names"])
-            # Minimal ts_data: shape scalars only (enough for similarity)
+            raw_emb     = npz["raw_embedding"]        # [N, 44]
+            names       = list(npz["track_names"])
+            mini_curves = npz["mini_curves"] if "mini_curves" in npz else None
+            has_curves  = mini_curves is not None
+            # Column slices
+            idx_raw = 9 * 2          # 18: hpcp_raw starts
+            idx_rot = idx_raw + 12   # 30: hpcp_rot starts
             for i, name in enumerate(names):
                 shape: dict = {}
                 col = 0
@@ -884,18 +896,27 @@ def main():
                     shape[f + "_std"]  = float(raw_emb[i, col+1])
                     col += 2
                 for j in range(12):
-                    shape[f"hpcp_raw_{j}"] = float(raw_emb[i, col+j])
-                col += 12
+                    shape[f"hpcp_raw_{j}"] = float(raw_emb[i, idx_raw + j])
                 for j in range(12):
-                    shape[f"hpcp_rot_{j}"] = float(raw_emb[i, col+j])
-                col += 12
-                shape["tonic_sin"] = float(raw_emb[i, col])
-                shape["tonic_cos"] = float(raw_emb[i, col+1])
-                ts_data[name] = {"shape": shape, "curves": {}}
+                    shape[f"hpcp_rot_{j}"] = float(raw_emb[i, idx_rot + j])
+                shape["tonic_sin"] = float(raw_emb[i, 42])
+                shape["tonic_cos"] = float(raw_emb[i, 43])
+                curves: dict = {}
+                if has_curves:
+                    for fi, f in enumerate(TS_1D_FIELDS):
+                        curves[f] = mini_curves[i, fi].tolist()
+                ts_data[name] = {
+                    "shape":    shape,
+                    "curves":   curves,
+                    "hpcp_raw": raw_emb[i, idx_raw:idx_rot].tolist(),
+                    "hpcp_rot": raw_emb[i, idx_rot:idx_rot+12].tolist(),
+                }
             sorted_tracks = names
             print(f"Stage 2 skipped — loaded {len(ts_data)} tracks from cache")
 
         # Merge ts shape scalars into tracks_data and re-write data JS
+        if args.skip_scalars and ts_data:
+            print("Note: --skip-scalars set — feature_explorer_data.js not updated with ts scalars.")
         if not args.skip_scalars and ts_data:
             features_in_data_set = set()
             for td in tracks_data.values():

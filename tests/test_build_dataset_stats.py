@@ -277,3 +277,16 @@ def test_run_similarity_pass_writes_js(tmp_path):
     assert "overall" in js
     assert "key_locked" in js
     assert "pitch_shift" in js
+
+
+def test_build_embedding_missing_rows_at_zero_after_zscore():
+    """Missing tracks should land at 0 (population mean) after z-scoring."""
+    names, ts_data = _make_ts_data(20)
+    # Remove half the tracks so they're missing
+    missing = names[10:]
+    ts_data_partial = {k: v for k, v in ts_data.items() if k not in missing}
+    emb = build_embedding(names, ts_data_partial)
+    # Missing rows should be all zeros after z-scoring (population mean position)
+    for name in missing:
+        i = names.index(name)
+        np.testing.assert_allclose(emb[i], np.zeros(44), atol=1e-4)

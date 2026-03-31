@@ -1545,7 +1545,7 @@
     function showTsPanel(trackName) {
       if (!_tsAvailable) return;
       const curves = TS_CURVES[trackName];
-      if (!curves) return;
+      if (!curves) { hideTsPanel(); return; }
       _tsCurrentTrack = trackName;
 
       // Build sparkline grid
