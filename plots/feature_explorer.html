@@ -1512,6 +1512,104 @@
       document.getElementById('tp-links').innerHTML = lh;
       panel.style.display = '';
     }
+    // ========== Timeseries panel ==========
+    const _tsAvailable = typeof TS_CURVES !== 'undefined';
+    let _tsCurrentTrack = null;
+    let _tsCurMode = 'overall';
+
+    const _TS_FIELD_LABELS = {
+      rms_energy_bass_ts:    'RMS bass',
+      rms_energy_body_ts:    'RMS body',
+      rms_energy_mid_ts:     'RMS mid',
+      rms_energy_air_ts:     'RMS air',
+      spectral_flatness_ts:  'Sp. flat',
+      spectral_flux_ts:      'Sp. flux',
+      beat_activations_ts:   'Beat',
+      onsets_activations_ts: 'Onsets',
+      tonic_strength_ts:     'Key str.',
+    };
+    const _TS_FIELDS = Object.keys(_TS_FIELD_LABELS);
+    const _PITCH_CLASSES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+    const _TS_PLOT_LAYOUT = {
+      margin: {t:0,b:0,l:0,r:0},
+      paper_bgcolor: 'transparent',
+      plot_bgcolor:  'transparent',
+      xaxis: {visible:false},
+      yaxis: {visible:false, range:[0, 1.05]},
+      showlegend: false,
+    };
+    const _TS_PLOT_CFG = {staticPlot:true, displayModeBar:false, responsive:true};
+
+    function showTsPanel(trackName) {
+      if (!_tsAvailable) return;
+      const curves = TS_CURVES[trackName];
+      if (!curves) return;
+      _tsCurrentTrack = trackName;
+
+      // Build sparkline grid
+      const grid = document.getElementById('ts-curves-grid');
+      grid.innerHTML = '';
+      _TS_FIELDS.forEach(function(field) {
+        const cell = document.createElement('div');
+        cell.className = 'ts-curve-cell';
+        const lbl = document.createElement('div');
+        lbl.className = 'ts-curve-label';
+        lbl.textContent = _TS_FIELD_LABELS[field];
+        cell.appendChild(lbl);
+        const plotDiv = document.createElement('div');
+        plotDiv.style.height = '46px';
+        cell.appendChild(plotDiv);
+        grid.appendChild(cell);
+        const vals = curves[field];
+        if (vals && vals.length) {
+          Plotly.newPlot(plotDiv, [{
+            y: vals, type: 'scatter', mode: 'lines',
+            line: {color:'#00d2ff', width:1.5},
+            hoverinfo: 'none',
+          }], _TS_PLOT_LAYOUT, _TS_PLOT_CFG);
+        } else {
+          plotDiv.style.background = '#0a0f20';
+          plotDiv.style.borderRadius = '3px';
+        }
+      });
+
+      // Chroma bars
+      const _chromaLayout = {
+        margin: {t:0,b:18,l:0,r:0},
+        paper_bgcolor: 'transparent',
+        plot_bgcolor:  'transparent',
+        xaxis: {tickfont:{size:8,color:'#555'}, tickmode:'array',
+                tickvals:_PITCH_CLASSES, ticktext:_PITCH_CLASSES},
+        yaxis: {visible:false},
+        showlegend: false,
+        bargap: 0.05,
+      };
+      if (curves.hpcp_raw) {
+        Plotly.newPlot('ts-chroma-raw', [{
+          x: _PITCH_CLASSES, y: curves.hpcp_raw, type: 'bar',
+          marker: {color:'#e94560'}, hoverinfo: 'none',
+        }], _chromaLayout, _TS_PLOT_CFG);
+      }
+      if (curves.hpcp_rot) {
+        const rotLabels = _PITCH_CLASSES.map(function(_, i) { return i===0?'root':'+'+i; });
+        Plotly.newPlot('ts-chroma-rot', [{
+          x: rotLabels, y: curves.hpcp_rot, type: 'bar',
+          marker: {color:'#7b2fe0'}, hoverinfo: 'none',
+        }], Object.assign({}, _chromaLayout, {
+          xaxis: {tickfont:{size:8,color:'#555'}, tickmode:'array',
+                  tickvals:rotLabels, ticktext:rotLabels},
+        }), _TS_PLOT_CFG);
+      }
+
+      _renderTsNeighbors(trackName, _tsCurMode);
+      document.getElementById('ts-panel').style.display = '';
+    }
+
+    function hideTsPanel() {
+      document.getElementById('ts-panel').style.display = 'none';
+      _tsCurrentTrack = null;
+    }
     function hideTrackPanel() {
       document.getElementById('track-panel').style.display = 'none';
     }
