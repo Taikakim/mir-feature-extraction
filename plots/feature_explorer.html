@@ -1511,6 +1511,7 @@
       if (MBIDS[idx]) lh += '<a href="https://musicbrainz.org/recording/' + MBIDS[idx] + '" target="_blank" style="color:#e94560;">\uD83D\uDCC0 MB</a>';
       document.getElementById('tp-links').innerHTML = lh;
       panel.style.display = '';
+      if (_tsAvailable) showTsPanel(TRACKS[idx]);
     }
     // ========== Timeseries panel ==========
     const _tsAvailable = typeof TS_CURVES !== 'undefined';
@@ -1610,8 +1611,53 @@
       document.getElementById('ts-panel').style.display = 'none';
       _tsCurrentTrack = null;
     }
+
+    function _renderTsNeighbors(trackName, mode) {
+      if (typeof TS_NEIGHBORS === 'undefined') {
+        document.getElementById('ts-neighbor-list').innerHTML =
+          '<div style="color:#555;font-size:10px;">No similarity data</div>';
+        return;
+      }
+      const nbrs = TS_NEIGHBORS[trackName];
+      if (!nbrs) {
+        document.getElementById('ts-neighbor-list').innerHTML =
+          '<div style="color:#555;font-size:10px;">Track not in similarity index</div>';
+        return;
+      }
+      const list = nbrs[mode] || [];
+      const el = document.getElementById('ts-neighbor-list');
+      if (!list.length) {
+        el.innerHTML = '<div style="color:#555;font-size:10px;">No neighbors</div>';
+        return;
+      }
+      el.innerHTML = list.map(function(pair) {
+        const name = pair[0], score = pair[1];
+        const barW = Math.round(Math.max(0, score) * 80);
+        const idx  = TRACKS.indexOf(name);
+        const click = idx >= 0
+          ? 'showTrackPanel(' + idx + ',FEATURES)'
+          : '';
+        return '<div class="ts-neighbor-item" onclick="' + click + '">' +
+          '<div class="ts-neighbor-bar" style="width:' + barW + 'px;"></div>' +
+          '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'
+            + name.replace(/"/g,'&quot;') + '">' + name + '</span>' +
+          '<span style="color:#555;flex-shrink:0;">' + score.toFixed(3) + '</span>' +
+          '</div>';
+      }).join('');
+    }
+
+    function switchTsTab(mode) {
+      _tsCurMode = mode;
+      document.querySelectorAll('.ts-sim-tab').forEach(function(btn) {
+        btn.classList.toggle('active',
+          btn.getAttribute('onclick') === "switchTsTab('" + mode + "')");
+      });
+      if (_tsCurrentTrack) _renderTsNeighbors(_tsCurrentTrack, mode);
+    }
+
     function hideTrackPanel() {
       document.getElementById('track-panel').style.display = 'none';
+      hideTsPanel();
     }
 
     // ---- Lasso select sidebar --------------------------------------------------
