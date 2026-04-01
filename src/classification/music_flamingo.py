@@ -221,6 +221,7 @@ class MusicFlamingoGGUF:
         max_new_tokens: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        shutdown_event=None,
     ) -> str:
         """
         Analyze audio and generate description.
@@ -297,16 +298,44 @@ class MusicFlamingoGGUF:
             "--top-p", str(top_p),
         ]
 
-        # Run inference
+        # Run inference — use Popen + poll so a shutdown_event can interrupt mid-run.
         try:
             t0 = time.monotonic()
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,   # prevent child from consuming terminal keypresses
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 cwd=str(PROJECT_ROOT),
-                timeout=300,  # 5 minute timeout
+            )
+            # Poll every 0.5 s so a shutdown request interrupts within half a second.
+            _deadline = t0 + 300  # 5-minute hard timeout
+            while True:
+                try:
+                    stdout_data, stderr_data = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if shutdown_event is not None and shutdown_event.is_set():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Shutdown requested during Flamingo inference")
+                    if time.monotonic() > _deadline:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise subprocess.TimeoutExpired(cmd, 300)
+            # Reassemble into a CompletedProcess-compatible namespace
+            import types as _types
+            result = _types.SimpleNamespace(
+                returncode=proc.returncode,
+                stdout=stdout_data,
+                stderr=stderr_data,
             )
             wall_ms = (time.monotonic() - t0) * 1000
 

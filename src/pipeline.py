@@ -112,6 +112,11 @@ class PipelineConfig:
     # Pipeline state for resumable runs (passed from master pipeline)
     pipeline_state: Any = None
 
+    # Benchmark mode — enables per-feature timing; workers return _bench_timings
+    benchmark_mode: bool = False
+    benchmark_n_cpu: int = 200    # max crops for PASS 1
+    benchmark_n_gpu: int = 20     # max crops for PASS 2-4
+
     # Map internal feature names to YAML overwrite keys
     _OVERWRITE_ALIASES = {
         'harmonic': 'chroma',
@@ -216,6 +221,18 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
     overwrite = config_dict.get('overwrite', False)
     per_feature_ow = config_dict.get('per_feature_overwrite', {})
 
+    # Benchmark timing (only active when config_dict['benchmark_mode'] is True)
+    _bench_mode = config_dict.get('benchmark_mode', False)
+    _bt: dict = {}   # feature_name -> elapsed seconds; returned in result if bench_mode
+
+    def _bench_wrap(key, fn, *a, **kw):
+        if not _bench_mode:
+            return fn(*a, **kw)
+        _t0 = time.perf_counter()
+        r = fn(*a, **kw)
+        _bt[key] = time.perf_counter() - _t0
+        return r
+
     # Define all output keys for each feature type (check ALL, not just one)
     LOUDNESS_KEYS = ['lufs', 'lra']
     SPECTRAL_KEYS = ['spectral_flatness', 'spectral_flux', 'spectral_skewness', 'spectral_kurtosis']
@@ -263,7 +280,10 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         # =====================================================================
         # PRE-LOAD: Read crop audio ONCE from disk (eliminates ~12 redundant reads)
         # =====================================================================
+        _io_t0 = time.perf_counter()
         crop_audio, crop_sr = read_audio(str(crop_path))
+        if _bench_mode:
+            _bt['io.read_crop'] = time.perf_counter() - _io_t0
 
         # Mono version for most features
         if crop_audio.ndim > 1:
@@ -274,6 +294,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         # Pre-load stems into RAM (1 read each instead of repeated per-feature)
         stems = get_crop_stem_files(crop_path)
         preloaded_stems = {}  # stem_name -> (audio_array, sr)
+        _io_stems_t0 = time.perf_counter()
         for stem_name in ['drums', 'bass', 'other', 'vocals']:
             if stem_name in stems:
                 try:
@@ -281,6 +302,30 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                     preloaded_stems[stem_name] = (s_audio, s_sr)
                 except Exception:
                     pass
+        if _bench_mode and preloaded_stems:
+            _bt['io.read_stems'] = time.perf_counter() - _io_stems_t0
+
+        # Pre-load onset timestamps for this crop (used by timbral_hardness to skip
+        # its internal onset_detect call, which duplicates a mel-spectrogram).
+        _onsets_samples = None
+        _input_dir_str = config_dict.get('input_dir')
+        if _input_dir_str and existing_info:
+            try:
+                _track_name   = crop_path.parent.name
+                _onsets_path  = Path(_input_dir_str) / _track_name / f"{_track_name}.ONSETS"
+                _start_t      = float(existing_info.get('start_time', 0.0))
+                _end_t        = float(existing_info.get('end_time', 1e9))
+                if _onsets_path.exists():
+                    import numpy as _np
+                    _all_onsets = _np.array(
+                        [float(l) for l in _onsets_path.read_text().splitlines() if l.strip()],
+                        dtype=np.float32)
+                    _mask = (_all_onsets >= _start_t) & (_all_onsets <= _end_t)
+                    # Convert to sample indices relative to crop start
+                    _onsets_samples = [int((t - _start_t) * crop_sr)
+                                       for t in _all_onsets[_mask]]
+            except Exception:
+                _onsets_samples = None
 
         # =====================================================================
         # FEATURE EXTRACTION: All functions use pre-loaded arrays
@@ -292,7 +337,9 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
             if _needs_processing(LOUDNESS_KEYS, 'loudness'):
                 _op = 'overwrite' if any(k in existing_keys for k in LOUDNESS_KEYS) else 'new'
                 try:
-                    results.update(analyze_file_loudness(crop_path, audio=crop_audio, sr=crop_sr))
+                    _loud = _bench_wrap('loudness', analyze_file_loudness,
+                                        crop_path, audio=crop_audio, sr=crop_sr)
+                    results.update(_loud)
                     for stem_name, (s_audio, s_sr) in preloaded_stems.items():
                         stem_loud = analyze_file_loudness(
                             stems[stem_name], audio=s_audio, sr=s_sr)
@@ -330,8 +377,8 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
             if _needs_processing(SPECTRAL_KEYS, 'spectral'):
                 _op = 'overwrite' if any(k in existing_keys for k in SPECTRAL_KEYS) else 'new'
                 try:
-                    results.update(analyze_spectral_features(
-                        crop_path, audio=crop_mono, sr=crop_sr))
+                    results.update(_bench_wrap('spectral', analyze_spectral_features,
+                                               crop_path, audio=crop_mono, sr=crop_sr))
                     generated.append(f'spectral({_op})')
                 except Exception: pass
 
@@ -339,8 +386,8 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
         if not config_dict.get('skip_multiband_rms') and _needs_processing(MULTIBAND_KEYS, 'multiband_rms'):
             _op = 'overwrite' if any(k in existing_keys for k in MULTIBAND_KEYS) else 'new'
             try:
-                results.update(analyze_multiband_rms(
-                    crop_path, audio=crop_mono, sr=crop_sr))
+                results.update(_bench_wrap('multiband_rms', analyze_multiband_rms,
+                                           crop_path, audio=crop_mono, sr=crop_sr))
                 generated.append(f'rms({_op})')
             except Exception: pass
 
@@ -349,8 +396,8 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
             if _needs_processing(SATURATION_KEYS, 'saturation'):
                 _op = 'overwrite' if any(k in existing_keys for k in SATURATION_KEYS) else 'new'
                 try:
-                    results.update(analyze_saturation(
-                        crop_path, audio=crop_mono, sr=crop_sr))
+                    results.update(_bench_wrap('saturation', analyze_saturation,
+                                               crop_path, audio=crop_mono, sr=crop_sr))
                     generated.append(f'sat({_op})')
                 except Exception: pass
 
@@ -359,31 +406,31 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
             if _needs_processing(CHROMA_KEYS, 'harmonic'):
                 _op = 'overwrite' if any(k in existing_keys for k in CHROMA_KEYS) else 'new'
                 try:
-                    if 'other' in preloaded_stems:
-                        other_audio, other_sr = preloaded_stems['other']
-                        if other_audio.ndim > 1:
-                            other_audio = other_audio.mean(axis=1)
-                        if 'bass' in preloaded_stems:
-                            bass_audio, _ = preloaded_stems['bass']
-                            if bass_audio.ndim > 1:
-                                bass_audio = bass_audio.mean(axis=1)
-                            max_len = max(len(other_audio), len(bass_audio))
-                            other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
-                            bass_audio   = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
-                            mixed = other_audio + bass_audio
-                            mv = np.abs(mixed).max()
-                            if mv > 0:
-                                mixed = mixed / mv * 0.95
-                            chroma_audio = mixed.astype(np.float32)
+                    def _do_chroma():
+                        if 'other' in preloaded_stems:
+                            other_audio, other_sr = preloaded_stems['other']
+                            if other_audio.ndim > 1:
+                                other_audio = other_audio.mean(axis=1)
+                            if 'bass' in preloaded_stems:
+                                bass_audio, _ = preloaded_stems['bass']
+                                if bass_audio.ndim > 1:
+                                    bass_audio = bass_audio.mean(axis=1)
+                                max_len = max(len(other_audio), len(bass_audio))
+                                other_audio = np.pad(other_audio, (0, max_len - len(other_audio)))
+                                bass_audio   = np.pad(bass_audio,  (0, max_len - len(bass_audio)))
+                                mixed = other_audio + bass_audio
+                                mv = np.abs(mixed).max()
+                                if mv > 0:
+                                    mixed = mixed / mv * 0.95
+                                chroma_audio = mixed.astype(np.float32)
+                            else:
+                                chroma_audio = other_audio.astype(np.float32)
+                            return analyze_chroma(stems['other'], use_stems=False,
+                                                  audio=chroma_audio, sr=other_sr)
                         else:
-                            chroma_audio = other_audio.astype(np.float32)
-                        results.update(analyze_chroma(
-                            stems['other'], use_stems=False,
-                            audio=chroma_audio, sr=other_sr))
-                    else:
-                        results.update(analyze_chroma(
-                            crop_path, use_stems=False,
-                            audio=crop_mono.astype(np.float32), sr=crop_sr))
+                            return analyze_chroma(crop_path, use_stems=False,
+                                                  audio=crop_mono.astype(np.float32), sr=crop_sr)
+                    results.update(_bench_wrap('chroma', _do_chroma))
                     generated.append(f'chroma({_op})')
                 except Exception: pass
 
@@ -412,12 +459,14 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             hpcp_audio = mixed.astype(np.float32)
                         else:
                             hpcp_audio = other_audio.astype(np.float32)
-                        results.update(analyze_hpcp_tiv(crop_path, use_stems=False,
-                                                        audio=hpcp_audio, sr=other_sr))
+                        results.update(_bench_wrap('hpcp_tiv', analyze_hpcp_tiv,
+                                                   crop_path, use_stems=False,
+                                                   audio=hpcp_audio, sr=other_sr))
                     else:
-                        results.update(analyze_hpcp_tiv(crop_path, use_stems=False,
-                                                        audio=crop_mono.astype(np.float32),
-                                                        sr=crop_sr))
+                        results.update(_bench_wrap('hpcp_tiv', analyze_hpcp_tiv,
+                                                   crop_path, use_stems=False,
+                                                   audio=crop_mono.astype(np.float32),
+                                                   sr=crop_sr))
                     generated.append(f'hpcp_tiv({_op})')
                 except Exception: pass
 
@@ -431,9 +480,20 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
             if _timbral_missing:
                 _op = 'overwrite' if any(k in existing_keys for k in _timbral_missing) else 'new'
                 try:
-                    results.update(timbral_func(
-                        crop_path, audio=crop_audio, sr=crop_sr,
-                        features=_timbral_missing))
+                    if _bench_mode:
+                        _tb_results, _tb_times = timbral_func(
+                            crop_path, audio=crop_audio, sr=crop_sr,
+                            features=_timbral_missing,
+                            onsets_samples=_onsets_samples,
+                            _return_timings=True)
+                        results.update(_tb_results)
+                        _bt.update(_tb_times)                      # timbral.X per feature
+                        _bt['timbral_total'] = sum(_tb_times.values())
+                    else:
+                        results.update(timbral_func(
+                            crop_path, audio=crop_audio, sr=crop_sr,
+                            features=_timbral_missing,
+                            onsets_samples=_onsets_samples))
                     generated.append(f'timbral({_op})')
                 except Exception as e:
                     logger.warning(f"Timbral failed for {crop_path.name}: {type(e).__name__}: {e}")
@@ -481,7 +541,7 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
 
                     if crop_mono is not None:
                         from spectral.timeseries_features import extract_timeseries
-                        ts_results = extract_timeseries(
+                        _ts_call_result = extract_timeseries(
                             crop_mono.astype(np.float32),
                             crop_sr,
                             n_steps=n_steps,
@@ -490,23 +550,39 @@ def _safe_analyze_cpu(args) -> Dict[str, Any]:
                             extract_hpcp=True,
                             extract_timbral=ts_timbral,
                             timbral_n_steps=ts_timbral_steps,
+                            _return_timings=_bench_mode,
                         )
                     else:
                         from spectral.timeseries_features import extract_timeseries_from_file
-                        ts_results = extract_timeseries_from_file(
+                        _ts_call_result = extract_timeseries_from_file(
                             crop_path,
                             n_steps=n_steps,
                             extract_hpcp=True,
                             extract_timbral=ts_timbral,
                             timbral_n_steps=ts_timbral_steps,
                         )
+                    if _bench_mode and isinstance(_ts_call_result, tuple):
+                        ts_results, _ts_times = _ts_call_result
+                        _bt.update(_ts_times)
+                    else:
+                        ts_results = _ts_call_result
+                    if _bench_mode:
+                        _bt['io.beats_grid'] = 0.0 if _beats_arr is not None else float('nan')
                     _ts_db.put(_crop_key, ts_results)
                     generated.append(f'timeseries({_op})')
                 except Exception as e:
                     logger.warning(f"Time-series failed for {crop_path.name}: {type(e).__name__}: {e}")
 
-        return {'path': crop_path, 'results': results, 'success': True,
+        _ret = {'path': crop_path, 'results': results, 'success': True,
                 'generated': generated}
+        if _bench_mode and _bt:
+            _ret['_bench_timings'] = _bt
+            try:
+                import soundfile as _sf
+                _ret['_bench_audio_s'] = _sf.info(str(crop_path)).duration
+            except Exception:
+                _ret['_bench_audio_s'] = 0.0
+        return _ret
 
     except Exception as e:
         return {'path': crop_path, 'error': str(e), 'success': False}
@@ -601,7 +677,9 @@ class Pipeline:
         if audio_dur > 0:
             self.stats["pass_audio_seconds"] += audio_dur
             elapsed = time.time() - self.stats["pass_start_time"]
-            if elapsed > 0:
+            # Require ≥1 s elapsed before trusting the RTF — avoids a divide-by-
+            # near-zero spike on the first crop or after a stats reset race.
+            if elapsed >= 1.0:
                 self.stats["pass_rtf"] = self.stats["pass_audio_seconds"] / elapsed
             if file_proc_time > 0:
                 self.stats["last_file_rtf"] = audio_dur / file_proc_time
@@ -800,6 +878,52 @@ class Pipeline:
         
         return self.stats["steps_failed"] == 0
         
+    def _make_benchmark_tmpdir(self, all_crops: List[Path]) -> tuple:
+        """
+        Create an isolated temp directory for benchmark runs.
+
+        Symlinks the audio files (crop + stems) for a sample of crops into a
+        fresh directory tree with no .INFO files, so every feature is computed
+        from scratch and production data is never modified.
+
+        Returns (tmp_dir, sampled_crop_paths_in_tmp_dir).
+        """
+        import tempfile
+
+        # Take the first benchmark_n_cpu crops; GPU passes limit themselves further.
+        sample = all_crops[:self.config.benchmark_n_cpu]
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix='mir_bench_'))
+
+        _AUDIO_EXTS = {'.flac', '.wav', '.mp3', '.ogg', '.m4a'}
+        _STEM_NAMES = {'drums', 'bass', 'other', 'vocals',
+                       'drums_stem', 'bass_stem', 'other_stem', 'vocals_stem'}
+
+        tmp_crops: List[Path] = []
+        seen_src_folders: set = set()
+
+        for crop in sample:
+            src_folder = crop.parent
+            tmp_folder = tmp_dir / src_folder.name
+            tmp_folder.mkdir(exist_ok=True)
+
+            # Symlink the crop audio file
+            tmp_crop = tmp_folder / crop.name
+            if not tmp_crop.exists():
+                tmp_crop.symlink_to(crop.resolve())
+            tmp_crops.append(tmp_crop)
+
+            # Symlink stems once per source folder (shared by all crops in folder)
+            if src_folder not in seen_src_folders:
+                seen_src_folders.add(src_folder)
+                for f in src_folder.iterdir():
+                    if f.suffix in _AUDIO_EXTS and f.stem in _STEM_NAMES:
+                        dst = tmp_folder / f.name
+                        if not dst.exists():
+                            dst.symlink_to(f.resolve())
+
+        return tmp_dir, tmp_crops
+
     def run_crops(self) -> bool:
         """Run pipeline in crops mode - process crop files directly."""
         start_time = time.time()
@@ -828,9 +952,22 @@ class Pipeline:
             logger.warning("No crop files found")
             return True
 
+        # Benchmark mode: build an isolated temp dir with symlinked audio files
+        # and no .INFO files so every feature is computed from scratch without
+        # touching production data.
+        _bench_tmp_dir: Optional[Path] = None
+        if self.config.benchmark_mode:
+            _bench_tmp_dir, all_crops = self._make_benchmark_tmpdir(all_crops)
+            logger.info(f"  Benchmark temp dir: {_bench_tmp_dir}  ({len(all_crops)} crops)")
+
         # Use batched processing if enabled (more efficient for GPU models)
         if self.config.batch_feature_extraction:
-            return self._run_crops_batched(all_crops)
+            result = self._run_crops_batched(all_crops)
+            if _bench_tmp_dir is not None:
+                import shutil as _shutil
+                _shutil.rmtree(_bench_tmp_dir, ignore_errors=True)
+                logger.info(f"  Benchmark temp dir removed.")
+            return result
         
         # Otherwise use original sequential processing
         logger.info(f"Found {len(all_crops)} crop files to process (Sequential Mode)")
@@ -1216,6 +1353,7 @@ class Pipeline:
                 'overwrite': self.config.overwrite,
                 'per_feature_overwrite': self.config.per_feature_overwrite,
                 'input_dir': str(self.config.input_dir) if self.config.input_dir else None,
+                'benchmark_mode': self.config.benchmark_mode,
             }
 
             # Coverage keys: ALL keys for each FEATURE_GROUPS label.
@@ -1282,6 +1420,18 @@ class Pipeline:
                 for p in (self.config.flamingo_prompts or {}).keys()
             ] or ['music_flamingo_full']
 
+            # Load TimeseriesDB keys once — the sentinel key (rms_energy_bass_ts) is
+            # stored only in the DB, never in the .INFO sidecar JSON, so we cannot
+            # use existing_keys to check timeseries completion.
+            _ts_in_db: Optional[set] = None
+            if not self.config.skip_timeseries:
+                try:
+                    from core.timeseries_db import TimeseriesDB
+                    _ts_in_db = set(TimeseriesDB.open().all_keys())
+                    logger.info(f"  TimeseriesDB: {len(_ts_in_db):,} crops already have timeseries data")
+                except Exception as _dbe:
+                    logger.warning(f"  Could not load TimeseriesDB keys: {_dbe} — timeseries treated as missing")
+
             tasks = []
             _pass2_to_process: List[Path] = []
             _pass3_to_process: List[Path] = []
@@ -1297,8 +1447,12 @@ class Pipeline:
 
                 # Count coverage while we have existing_keys (no extra I/O).
                 # A group is "covered" only if ALL its keys are present.
+                # Timeseries is special: its data lives in TimeseriesDB, not .INFO.
                 for _lbl, _keys in _COV_KEY_GROUPS.items():
-                    if all(k in existing_keys for k in _keys):
+                    if _lbl == 'Timeseries':
+                        if _ts_in_db is not None and crop_path.stem in _ts_in_db:
+                            _cov_counts[_lbl] += 1
+                    elif all(k in existing_keys for k in _keys):
                         _cov_counts[_lbl] += 1
 
                 # Build PASS 2/3/4 to_process lists — same read, no extra I/O.
@@ -1366,7 +1520,7 @@ class Pipeline:
                         needs_run = True
                     if not needs_run and not self.config.skip_timeseries and (
                             _ow('timeseries') or
-                            'rms_energy_bass_ts' not in existing_keys):
+                            _ts_in_db is None or crop_path.stem not in _ts_in_db):
                         needs_run = True
 
                 if needs_run:
@@ -1384,12 +1538,22 @@ class Pipeline:
 
                 from core.pipeline_workers import init_worker as _init_cpu_worker
 
+                # Benchmark collector for PASS 1 (lives in main process; workers return dicts)
+                _bench_cpu = None
+                if self.config.benchmark_mode:
+                    from core.benchmark import BenchmarkCollector
+                    _bench_cpu = BenchmarkCollector(n_cpu_workers=self.config.feature_workers)
+
                 def _pass1_worker():
                     from concurrent.futures import wait as cf_wait, FIRST_COMPLETED
+                    _n_tasks = len(tasks)
+                    _bench_limit = self.config.benchmark_n_cpu if self.config.benchmark_mode else _n_tasks
+                    _tasks_to_run = tasks[:_bench_limit] if self.config.benchmark_mode else tasks
                     executor = ProcessPoolExecutor(max_workers=self.config.feature_workers,
                                                   initializer=_init_cpu_worker)
                     try:
-                        futures_map = {executor.submit(_safe_analyze_cpu, task): task[0] for task in tasks}
+                        futures_map = {executor.submit(_safe_analyze_cpu, task): task[0]
+                                       for task in _tasks_to_run}
                         pending = set(futures_map)
                         i = 0
                         _last_info = None
@@ -1424,6 +1588,8 @@ class Pipeline:
                                 crop_path = futures_map[future]
                                 try:
                                     result = future.result()
+                                    if _bench_cpu is not None:
+                                        _bench_cpu.ingest_worker_result(result)
                                     if result['success']:
                                         if result['results']:
                                             safe_update(get_crop_info_path(crop_path), result['results'])
@@ -1516,6 +1682,16 @@ class Pipeline:
             stop_shutdown_listener()
             return self.stats["crops_failed"] == 0
 
+        # Benchmark collectors for GPU passes
+        _bench_ab   = None
+        _bench_es   = None
+        _bench_fl   = None
+        if self.config.benchmark_mode:
+            from core.benchmark import BenchmarkCollector
+            _bench_ab = BenchmarkCollector(n_cpu_workers=1)
+            _bench_es = BenchmarkCollector(n_cpu_workers=1)
+            _bench_fl = BenchmarkCollector(n_cpu_workers=1)
+
         if not self.config.skip_audiobox:
             self.stats['active_feature'] = 'AudioBox Aesthetics'
             self.stats['pass_label'] = 'PASS 2 – AudioBox'
@@ -1540,6 +1716,8 @@ class Pipeline:
                         len(all_crops) - len(to_process)) / _n
 
                 if to_process:
+                    if self.config.benchmark_mode:
+                        to_process = to_process[:self.config.benchmark_n_gpu]
                     # Initialize predictor once
                     get_predictor()
 
@@ -1562,13 +1740,22 @@ class Pipeline:
 
                             try:
                                 # Process batch
+                                _ab_t0 = time.time()
                                 batch_results = analyze_audiobox_aesthetics_batch(batch_paths)
+                                _ab_elapsed = time.time() - _ab_t0
 
                                 # Save results and update coverage
                                 for crop_path, results in zip(batch_paths, batch_results):
                                     if results:
                                         safe_update(get_crop_info_path(crop_path), results)
                                         self._update_pass_stats(crop_path)
+                                        if _bench_ab is not None:
+                                            try:
+                                                import soundfile as _sf
+                                                _a_s = _sf.info(str(crop_path)).duration
+                                            except Exception:
+                                                _a_s = 0.0
+                                            _bench_ab.add('audiobox', _ab_elapsed / len(batch_paths), _a_s)
                                         _ab_done += 1
                                     else:
                                         self.stats["crops_failed"] += 1
@@ -1662,6 +1849,8 @@ class Pipeline:
                         len(all_crops) - len(to_process)) / _n
 
                 if to_process:
+                    if self.config.benchmark_mode:
+                        to_process = to_process[:self.config.benchmark_n_gpu]
                     _es_done = len(all_crops) - len(to_process)  # already had the feature
 
                     # Pre-load all TF models into VRAM before processing
@@ -1750,6 +1939,12 @@ class Pipeline:
                     prefetcher.stop()
                     self.stats['active_crops'] = []
 
+                    # Feed Essentia timings into benchmark collector
+                    if _bench_es is not None and timing_acc:
+                        for key, vals in timing_acc.items():
+                            for v in vals:
+                                _bench_es.add(f"essentia.{key}", v)
+
                     # Log per-model timing statistics
                     if timing_acc:
                         logger.info("  Essentia timing statistics (seconds/crop):")
@@ -1827,6 +2022,8 @@ class Pipeline:
                                     f"{skipped_by_sampling} deferred to future runs")
                     
                     if to_process:
+                        if self.config.benchmark_mode:
+                            to_process = to_process[:self.config.benchmark_n_gpu]
                         logger.info(f"  Loading model ({self.config.flamingo_model})...")
                         flamingo = MusicFlamingoGGUF(
                             model=self.config.flamingo_model,
@@ -1859,11 +2056,21 @@ class Pipeline:
                                     if self.config.should_overwrite('flamingo') or key not in existing:
                                         # Interpolate genre hints into prompt
                                         p_text = _interpolate_genres(prompt_text, existing) if self.config.flamingo_prompts else None
+                                        _fl_t0 = time.time()
                                         results[key] = flamingo.analyze(
                                             crop_path,
                                             prompt=p_text,
-                                            prompt_type=prompt_type
+                                            prompt_type=prompt_type,
+                                            shutdown_event=shutdown_requested,
                                         )
+                                        if _bench_fl is not None:
+                                            try:
+                                                import soundfile as _sf
+                                                _a_s = _sf.info(str(crop_path)).duration
+                                            except Exception:
+                                                _a_s = 0.0
+                                            _bench_fl.add(f'flamingo.{prompt_type}',
+                                                          time.time() - _fl_t0, _a_s)
 
                                 if results:
                                     results['music_flamingo_model'] = f'accel_{self.config.flamingo_model}'
@@ -2002,6 +2209,49 @@ class Pipeline:
         self._print_crops_summary()
         if state: state.save()
         stop_shutdown_listener()
+
+        # ---- Benchmark report ----
+        if self.config.benchmark_mode:
+            try:
+                from core.benchmark import build_full_report, BenchmarkCollector
+
+                # Feature order for each pass
+                _cpu_features = [
+                    'io.read_crop', 'io.read_stems',
+                    'loudness', 'spectral', 'multiband_rms', 'saturation',
+                    'chroma', 'hpcp_tiv',
+                    'timbral.hardness', 'timbral.sharpness', 'timbral.booming',
+                    'timbral.warmth', 'timbral.roughness', 'timbral.depth',
+                    'timbral.brightness', 'timbral.reverberation', 'timbral_total',
+                    'ts.rms_bands', 'ts.spectral', 'ts.beat_track',
+                    'ts.beat_act', 'ts.onset', 'ts.hpcp',
+                ]
+                _es_features = [
+                    'essentia.audio_load', 'essentia.danceability', 'essentia.atonality',
+                    'essentia.voice', 'essentia.gender', 'essentia.gmi',
+                ]
+                _fl_features = sorted(
+                    [f for f in (_bench_fl.features() if _bench_fl else [])]
+                )
+                _ab_features = ['audiobox']
+
+                sections = []
+                if _bench_cpu is not None:
+                    sections.append(('PASS 1 – CPU Features', _bench_cpu, _cpu_features, ''))
+                if _bench_ab is not None:
+                    sections.append(('PASS 2 – AudioBox Aesthetics', _bench_ab, _ab_features, ''))
+                if _bench_es is not None:
+                    sections.append(('PASS 3 – Essentia Classification', _bench_es, _es_features, ''))
+                if _bench_fl is not None:
+                    sections.append(('PASS 4 – Music Flamingo', _bench_fl, _fl_features, ''))
+
+                if sections:
+                    project_root = Path(__file__).parent.parent
+                    out = build_full_report(sections, project_root, self.config.feature_workers)
+                    logger.info(f"\nBenchmark report saved: {out}")
+            except Exception as _be:
+                logger.warning(f"Benchmark report failed: {_be}")
+
         return self.stats["crops_failed"] == 0
 
 

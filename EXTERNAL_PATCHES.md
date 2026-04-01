@@ -129,3 +129,93 @@ if is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
 
 **Conclusion**: Regular batching (even batch_size=1) is significantly faster than the legacy "low vram" mode on modern GPUs because it avoids CPU-GPU pipeline stalls.
 
+---
+
+## timbral_models — Timbral_Hardness.py
+
+### Repository Info
+*   **Upstream URL**: `https://github.com/AudioCommons/timbral_models`
+*   **Local Clone**: `/home/kim/Projects/mir/repos/timbral_models`
+*   **File patched**: `timbral_models/Timbral_Hardness.py`
+*   **Patch date**: 2026-03-30
+
+### Applied Patches
+
+#### 1. `hp_ratio=None` — skip expensive HPSS computation
+
+**Purpose:** Allow the caller to supply a pre-computed harmonic-percussive ratio and
+bypass `timbral_util.get_percussive_audio()`, which runs a full STFT, a 2-D median
+filter (HPSS), and two inverse STFTs.
+
+**Changes** — new `hp_ratio` parameter and branch in the HPSS block:
+
+```python
+# [MIR-PATCH] Accept pre-computed HP ratio to skip the expensive HPSS step.
+if hp_ratio is not None:
+    HP_ratio = float(hp_ratio)
+else:
+    HP_ratio = timbral_util.get_percussive_audio(audio_samples, return_ratio=True)
+log_HP_ratio = np.log10(HP_ratio)
+```
+
+**Status:** Parameter wired up but not yet actively supplied by the pipeline. HPSS
+currently runs in its own thread in parallel with other timbral features, so there is
+no single pre-computed value available. Left as a hook for future caching/reuse.
+
+---
+
+#### 2. `precomputed_onsets=None` — skip duplicate mel-spectrogram
+
+**Purpose:** Eliminate a redundant mel-spectrogram computation.
+
+**Root cause:** The original code called `timbral_util.calculate_onsets()`, which
+internally calls `librosa.onset.onset_detect()` and computes a mel-spectrogram.
+Immediately after, `librosa.onset.onset_strength()` was called on the same audio,
+computing a *second* identical mel-spectrogram. By passing pre-computed onset positions
+we skip `calculate_onsets()` entirely while leaving the `onset_strength()` call intact
+(it is needed for per-onset weighting later in the function).
+
+**Zero-padding offset:** `timbral_hardness` zero-pads the audio by `nperseg + 1 = 4097`
+samples before the onset/envelope analysis loop. Positions supplied via
+`precomputed_onsets` are expected in the **original (un-padded) sample frame**; the
+patch shifts each value by `nperseg + 1` internally so they align with the padded array.
+
+**Changes** — new `precomputed_onsets` parameter and branch replacing the
+`calculate_onsets()` call:
+
+```python
+# [MIR-PATCH] Accept pre-computed onset sample positions (in pre-padding audio
+# space) to skip calculate_onsets(), which internally runs onset_detect() and
+# duplicates the mel-spectrogram already computed by onset_strength() below.
+# Positions are shifted here by the zero-pad offset (nperseg+1) to align with
+# the padded audio_samples array used for envelope and bandwidth analysis.
+if precomputed_onsets is not None and len(precomputed_onsets) > 0:
+    pad_offset = nperseg + 1
+    original_onsets = sorted(int(s) + pad_offset for s in precomputed_onsets)
+else:
+    original_onsets = timbral_util.calculate_onsets(audio_samples, envelope, fs, nperseg=nperseg)
+onset_strength = librosa.onset.onset_strength(y=audio_samples, sr=fs)
+```
+
+**Pipeline integration:**
+
+1. `src/pipeline.py` loads the track's `.ONSETS` file (absolute timestamps in seconds),
+   filters to the crop's `[start_time, end_time]` window, and converts to sample
+   offsets relative to the crop start:
+   ```python
+   _onsets_samples = [int((t - _start_t) * crop_sr) for t in _all_onsets[_mask]]
+   ```
+2. `analyze_all_timbral_features(..., onsets_samples=_onsets_samples)` in
+   `src/timbral/audio_commons.py` forwards them to the hardness call via
+   `_hardness_extra['precomputed_onsets']`.
+3. If `.ONSETS` is missing or the crop window contains no onsets, `_onsets_samples`
+   remains `None` and the original `calculate_onsets()` code path runs unchanged.
+
+**Estimated savings:** ~0.15–0.25 s per crop on Ryzen 9 9900X (one mel-spectrogram
+avoided). For a 200k-crop dataset this is roughly 8–14 CPU-hours.
+
+### Backwards compatibility
+
+Both parameters default to `None`. The function signature and all existing call sites
+are fully compatible with no changes required.
+

@@ -298,7 +298,9 @@ def analyze_warmth(audio_path: str | Path) -> float:
 def analyze_all_timbral_features(audio_path: str | Path,
                                   features: Optional[list] = None,
                                   audio: Optional['np.ndarray'] = None,
-                                  sr: Optional[int] = None) -> Dict[str, float]:
+                                  sr: Optional[int] = None,
+                                  onsets_samples: Optional[list] = None,
+                                  _return_timings: bool = False):
     """
     Analyze all (or selected) Audio Commons timbral features.
 
@@ -357,16 +359,31 @@ def analyze_all_timbral_features(audio_path: str | Path,
     parallel_feats = [f for f in features if f in _tm_fns]
     do_reverb      = 'reverberation' in features
 
+    # Extra kwargs for hardness: pass precomputed onset positions to skip the
+    # internal onset_detect() call (which duplicates the mel-spectrogram already
+    # computed by onset_strength()).  hp_ratio is also wired through for callers
+    # that have already run HPSS externally.
+    _hardness_extra: Dict[str, object] = {}
+    if onsets_samples is not None:
+        _hardness_extra['precomputed_onsets'] = onsets_samples
+
     results: Dict[str, float] = {}
+    feat_timings: Dict[str, float] = {}
 
     def _run(name: str):
+        import time as _time
         fn = _tm_fns[name]
+        call_kw = dict(kw)
+        if name == 'hardness' and _hardness_extra:
+            call_kw.update(_hardness_extra)
+        t0 = _time.perf_counter()
         try:
-            raw = fn(arg, **kw)
-            return name, clamp_feature_value(name, float(raw))
+            raw = fn(arg, **call_kw)
+            elapsed = _time.perf_counter() - t0
+            return name, clamp_feature_value(name, float(raw)), elapsed
         except Exception as e:
             logger.warning(f"Could not analyze {name} for {audio_path.name}: {type(e).__name__}: {e}")
-            return name, None
+            return name, None, _time.perf_counter() - t0
 
     if parallel_feats:
         # Run hardness (slow, ~1.9 s) in one thread, everything else in another.
@@ -374,9 +391,10 @@ def analyze_all_timbral_features(audio_path: str | Path,
         with ThreadPoolExecutor(max_workers=2) as pool:
             futs = {pool.submit(_run, f): f for f in parallel_feats}
             for fut in as_completed(futs):
-                name, val = fut.result()
+                name, val, elapsed = fut.result()
                 if val is not None:
                     results[name] = val
+                feat_timings[f"timbral.{name}"] = elapsed
 
     if do_reverb:
         try:
@@ -395,6 +413,8 @@ def analyze_all_timbral_features(audio_path: str | Path,
             logger.warning(f"Could not analyze reverberation for {audio_path.name}: {type(e).__name__}: {e}")
 
     logger.info(f"Extracted {len(results)}/{len(features)} timbral features")
+    if _return_timings:
+        return results, feat_timings
     return results
 
 

@@ -215,6 +215,9 @@ class MasterPipelineConfig:
     flamingo_prompts: Dict[str, str] = field(default_factory=dict)  # Key: prompt_name, Value: prompt_text
     flamingo_revision: Dict[str, Any] = field(default_factory=dict)  # Granite revision config
     flamingo_sample_probability: float = 1.0  # Fraction of unprocessed crops to annotate per run (0-1)
+    benchmark_mode: bool = False  # Time every feature on a reduced set and save benchmark_<date>.md
+    benchmark_n_cpu: int = 200    # max crops for PASS 1 in benchmark mode
+    benchmark_n_gpu: int = 20     # max crops for PASS 2-4 in benchmark mode
 
     def should_overwrite(self, feature: str) -> bool:
         """Check if a specific feature should be overwritten.
@@ -2543,6 +2546,9 @@ class MasterPipeline:
                 flamingo_prompts=self.config.flamingo_prompts,
                 flamingo_revision=self.config.flamingo_revision,
                 flamingo_sample_probability=self.config.flamingo_sample_probability,
+                benchmark_mode=self.config.benchmark_mode,
+                benchmark_n_cpu=self.config.benchmark_n_cpu,
+                benchmark_n_gpu=self.config.benchmark_n_gpu,
                 pipeline_state=self._state,
             )
 
@@ -2816,6 +2822,9 @@ Config file template: config/master_pipeline.yaml
                         help='Number of parallel workers for feature extraction (default: 8)')
     parser.add_argument('--no-ui', action='store_true',
                         help='Disable TUI dashboard — use plain coloured stdout logging instead')
+    parser.add_argument('--benchmark', action='store_true',
+                        help='Run benchmark mode: time every feature on a reduced crop set '
+                             '(200 CPU crops, 20 GPU crops) and save benchmark_<date>.md')
     parser.add_argument('--rebuild-dataset', action='store_true',
                         help='Force rebuild dataset.json from .INFO files before running '
                              '(use when dataset.json may be out of sync)')
@@ -2905,6 +2914,8 @@ Config file template: config/master_pipeline.yaml
         config.verbose = True
     if args.feature_workers is not None:
         config.feature_workers = args.feature_workers
+    if args.benchmark:
+        config.benchmark_mode = True
 
     # Propagate VGGish MIGraphX flag to env var (vggish_onnx reads it at import time)
     os.environ.setdefault('VGGISH_USE_MIGRAPHX', '1' if config.vggish_use_migraphx else '0')

@@ -682,6 +682,11 @@ class PipelineUI:
             pass_rate = crop_stats.get('pass_rate', 0.0)
             pass_rtf = crop_stats.get('pass_rtf', 0.0)
             last_file_rtf = crop_stats.get('last_file_rtf', 0.0)
+            # Use the pipeline's own measured crops/s for ETA — the TUI's
+            # self._progress_rate can be stale (measured from a previous fast
+            # stage like file scanning) and gives wildly wrong ETAs.
+            if pass_rate > 0:
+                prog_rate = pass_rate
 
         # ── Assemble layout ────────────────────────────────────────────────
         layout = Layout()
@@ -932,12 +937,13 @@ class PipelineUI:
             filled = int(pct * 24)
             bar = '█' * filled + '░' * (24 - filled)
             # Show cumulative s/s next to the bar; fall back to items/s before first crop
-            if pass_rtf >= 100:
-                bar_rate = f'  {pass_rtf:,.0f}s/s'
-            elif pass_rtf >= 10:
-                bar_rate = f'  {pass_rtf:.1f}s/s'
-            elif pass_rtf > 0:
-                bar_rate = f'  {pass_rtf:.2f}s/s'
+            _disp_rtf = min(pass_rtf, 9999.0)  # cap absurd spikes before first valid sample
+            if _disp_rtf >= 100:
+                bar_rate = f'  {_disp_rtf:,.0f}s/s'
+            elif _disp_rtf >= 10:
+                bar_rate = f'  {_disp_rtf:.1f}s/s'
+            elif _disp_rtf > 0:
+                bar_rate = f'  {_disp_rtf:.2f}s/s'
             elif rate > 0:
                 bar_rate = f'  {rate:.1f} it/s'
             else:
@@ -965,12 +971,13 @@ class PipelineUI:
                 rtf_t.append('Last  ', style='dim')
                 rtf_t.append(lf_str, style='cyan')
                 if pass_rtf > 0:
-                    if pass_rtf >= 100:
-                        cum_str = f'{pass_rtf:,.0f}s/s'
-                    elif pass_rtf >= 10:
-                        cum_str = f'{pass_rtf:.1f}s/s'
+                    _avg_rtf = min(pass_rtf, 9999.0)
+                    if _avg_rtf >= 100:
+                        cum_str = f'{_avg_rtf:,.0f}s/s'
+                    elif _avg_rtf >= 10:
+                        cum_str = f'{_avg_rtf:.1f}s/s'
                     else:
-                        cum_str = f'{pass_rtf:.2f}s/s'
+                        cum_str = f'{_avg_rtf:.2f}s/s'
                     rtf_t.append('   Avg  ', style='dim')
                     rtf_t.append(cum_str, style='cyan')
                 lines.append(rtf_t)

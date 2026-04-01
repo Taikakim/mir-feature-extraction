@@ -161,6 +161,7 @@ def compute_hpcp_frames(
         weightType='cosine',
         nonLinear=True,
         normalized='unitMax',
+        referenceFrequency=261.63,  # C4 — aligns bin 0 with C, matching chroma_* convention
         sampleRate=sr,
     )
 
