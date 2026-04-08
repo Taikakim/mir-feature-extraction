@@ -786,10 +786,10 @@ def decode_to_wav(npy_path: Path, smart_loop: bool = False, qs: dict = None) -> 
     return buf.getvalue()
 
 
-def _average_track_to_wav(track: str) -> bytes:
-    """Average all full-mix latents for a track, decode once, return WAV bytes.
+def _load_track_mean_latent(track: str) -> np.ndarray:
+    """Average all full-mix latents for a track → [64, T] float32.
 
-    Caller must hold _decode_lock.
+    Pads shorter crops to the length of the longest one before averaging.
     """
     track_dir = _latent_dir / track
     stem_suffixes = {"_bass", "_drums", "_other", "_vocals"}
@@ -798,31 +798,54 @@ def _average_track_to_wav(track: str) -> bytes:
     if not npys:
         raise FileNotFoundError(f"No full-mix latent files for track: {track}")
 
-    arrays = []
-    max_T  = 0
+    arrays, max_T = [], 0
     for npy in npys:
         try:
-            arr = np.load(str(npy)).astype(np.float32)   # [64, T]
+            arr = np.load(str(npy)).astype(np.float32)
             arrays.append(arr)
             max_T = max(max_T, arr.shape[1])
         except Exception:
             pass
-
     if not arrays:
-        raise ValueError("Could not load any latent files")
+        raise ValueError(f"Could not load any latent files for: {track}")
 
     padded = np.zeros((len(arrays), 64, max_T), dtype=np.float32)
     for i, arr in enumerate(arrays):
         padded[i, :, :arr.shape[1]] = arr
-    mean_np = padded.mean(axis=0)   # [64, max_T]
+    return padded.mean(axis=0)   # [64, max_T]
+
+
+def _average_track_to_wav(track: str, track_b: str = None,
+                          mix: float = 0.0, interp: str = "lerp",
+                          qs: dict = None) -> bytes:
+    """Average all full-mix latents for a track, optionally blended with track_b.
+
+    When track_b is supplied the two mean latents are mixed at ratio `mix`
+    (0 = all A, 1 = all B) before decoding.  The shorter mean is zero-padded
+    to the length of the longer one so the blend is always full-length.
+
+    Caller must hold _decode_lock.
+    """
+    mean_a = _load_track_mean_latent(track)   # [64, T_a]
+
+    if track_b and mix > 0.0:
+        mean_b = _load_track_mean_latent(track_b)   # [64, T_b]
+        # Pad to common length
+        T = max(mean_a.shape[1], mean_b.shape[1])
+        if mean_a.shape[1] < T:
+            mean_a = np.pad(mean_a, ((0, 0), (0, T - mean_a.shape[1])))
+        if mean_b.shape[1] < T:
+            mean_b = np.pad(mean_b, ((0, 0), (0, T - mean_b.shape[1])))
+        mean_np = mean_a * (1.0 - mix) + mean_b * mix
+    else:
+        mean_np = mean_a
 
     mean_t = torch.from_numpy(mean_np).unsqueeze(0).to(device=_device, dtype=_dtype)
     with torch.no_grad():
-        audio = _autoencoder.decode(mean_t)   # [1, 2, samples]
+        audio = _autoencoder.decode(apply_manipulations(mean_t, qs))   # [1, 2, samples]
 
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
-    # Peak-normalise to 0.9
     peak = np.abs(audio_np).max()
     if peak > 1e-6:
         audio_np = audio_np * (0.9 / peak)
@@ -949,22 +972,39 @@ def crossfade_fullmix_to_wav(
     mix: float,
     interp: str = 'slerp',
     smart_loop: bool = False,
+    use_avg_a: bool = False,
+    use_avg_b: bool = False,
     qs: dict = None,
 ) -> bytes:
     """Interpolate two full-mix latents in latent space and decode to WAV.
 
     Simpler than the stem crossfader: no stem loading, single decoder call.
     mix=0 → track A, mix=1 → track B.
-    """
-    crops_a = find_crops(_latent_dir / track_a)
-    crops_b = find_crops(_latent_dir / track_b)
-    npy_a, _ = find_best_crop(crops_a, pos_a)
-    npy_b, _ = find_best_crop(crops_b, pos_b)
-    if npy_a is None or npy_b is None:
-        raise ValueError("Full-mix crops not found for one or both tracks")
 
-    z_a = load_latent(npy_a, device=_device, dtype=_dtype)
-    z_b = load_latent(npy_b, device=_device, dtype=_dtype)
+    When use_avg_a/b is True the average latent across all crops of that track
+    is used instead of the crop nearest to pos_a/pos_b.
+    """
+    npy_a = npy_b = None
+
+    if use_avg_a:
+        mean_np = _load_track_mean_latent(track_a)
+        z_a = torch.from_numpy(mean_np).unsqueeze(0).to(device=_device, dtype=_dtype)
+    else:
+        crops_a = find_crops(_latent_dir / track_a)
+        npy_a, _ = find_best_crop(crops_a, pos_a)
+        if npy_a is None:
+            raise ValueError(f"Full-mix crop not found for track A: {track_a}")
+        z_a = load_latent(npy_a, device=_device, dtype=_dtype)
+
+    if use_avg_b:
+        mean_np = _load_track_mean_latent(track_b)
+        z_b = torch.from_numpy(mean_np).unsqueeze(0).to(device=_device, dtype=_dtype)
+    else:
+        crops_b = find_crops(_latent_dir / track_b)
+        npy_b, _ = find_best_crop(crops_b, pos_b)
+        if npy_b is None:
+            raise ValueError(f"Full-mix crop not found for track B: {track_b}")
+        z_b = load_latent(npy_b, device=_device, dtype=_dtype)
 
     T = min(z_a.shape[-1], z_b.shape[-1])
     z_a = z_a[..., :T]
@@ -978,24 +1018,25 @@ def crossfade_fullmix_to_wav(
 
     audio_np = audio.squeeze(0).cpu().float().numpy()   # [2, samples]
 
-    # Trim to content length using crop A's padding_mask
-    companion = {}
-    json_path = npy_a.with_suffix('.json')
-    if json_path.exists():
-        try:
-            companion = json.loads(json_path.read_text())
-        except Exception:
-            pass
-    mask = companion.get('padding_mask', [])
-    if mask:
-        n_content = sum(mask)
-        actual_samples = n_content * _downsampling_ratio
-        if 0 < actual_samples < audio_np.shape[1]:
-            audio_np = audio_np[:, :actual_samples]
+    # Trim to content length using crop A's padding_mask (only when using a specific crop)
+    if npy_a is not None:
+        companion = {}
+        json_path = npy_a.with_suffix('.json')
+        if json_path.exists():
+            try:
+                companion = json.loads(json_path.read_text())
+            except Exception:
+                pass
+        mask = companion.get('padding_mask', [])
+        if mask:
+            n_content = sum(mask)
+            actual_samples = n_content * _downsampling_ratio
+            if 0 < actual_samples < audio_np.shape[1]:
+                audio_np = audio_np[:, :actual_samples]
 
     if smart_loop:
-        bpm_a = _read_bpm(npy_a)
-        bpm_b = _read_bpm(npy_b)
+        bpm_a = _read_bpm(npy_a) if npy_a else None
+        bpm_b = _read_bpm(npy_b) if npy_b else None
         loop_end = audio_np.shape[1]
         for bpm in [bpm_a, bpm_b]:
             if bpm:
@@ -1286,16 +1327,23 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/crossfade":
             self._handle_crossfade(qs)
         elif parsed.path == "/average":
-            track = qs.get("track", [""])[0]
+            track   = qs.get("track",   [""])[0]
+            track_b = qs.get("track_b", [""])[0]
+            mix     = float(qs.get("mix", ["0.0"])[0])
+            interp  = qs.get("interp", ["lerp"])[0]
             if not track:
                 self._error(400, "Missing track parameter")
                 return
             if not (_latent_dir / track).is_dir():
                 self._error(404, f"Track not found: {track}")
                 return
+            if track_b and not (_latent_dir / track_b).is_dir():
+                self._error(404, f"Track B not found: {track_b}")
+                return
             try:
                 with _decode_lock:
-                    wav_bytes = _average_track_to_wav(track)
+                    wav_bytes = _average_track_to_wav(
+                        track, track_b=track_b or None, mix=mix, interp=interp, qs=qs)
             except Exception as e:
                 self._error(500, str(e))
                 return
@@ -1477,10 +1525,13 @@ class Handler(BaseHTTPRequestHandler):
                         wf.writeframes(audio_i16.T.flatten().tobytes())
                     wav_bytes = buf.getvalue()
                 else:
+                    use_avg_a = qs.get("use_avg_a", ["0"])[0] == "1"
+                    use_avg_b = qs.get("use_avg_b", ["0"])[0] == "1"
                     with _decode_lock:
                         wav_bytes = crossfade_fullmix_to_wav(
                             track_a, track_b, pos_a, pos_b,
-                            mix, interp=interp, smart_loop=smart_loop, qs=qs,
+                            mix, interp=interp, smart_loop=smart_loop,
+                            use_avg_a=use_avg_a, use_avg_b=use_avg_b, qs=qs,
                         )
                 stems_found = []
                 source_label = "raw" if raw else "vae"

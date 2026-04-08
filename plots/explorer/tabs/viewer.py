@@ -77,10 +77,17 @@ def layout() -> html.Div:
             html.Div([
                 dcc.Graph(id="v-graph-3d",
                           style={"height": "55vh"},
-                          config={"displayModeBar": True}),
+                          config={"displayModeBar": True},
+                          figure=go.Figure(layout=go.Layout(**_DARK3D))),
                 dcc.Graph(id="v-alignment-bar",
                           style={"height": "80px"},
-                          config={"displayModeBar": False}),
+                          config={"displayModeBar": False},
+                          figure=go.Figure(layout=go.Layout(
+                              template="plotly_dark",
+                              paper_bgcolor="#0d0d1a",
+                              plot_bgcolor="#111125",
+                              margin=dict(l=0, r=0, t=0, b=0),
+                          ))),
             ], style={"flex": "1", "minWidth": 0}),
 
             # Right panel: crossfader + manipulation
@@ -300,14 +307,19 @@ def update_alignment_bar(track_a, crop_a, track_b, crop_b):
 
     shapes = []; annotations = []
 
+    def _iter(tc: dict, key: str):
+        """Yield float timestamps from tc[key]; silently skip non-list values."""
+        val = tc.get(key, [])
+        return val if isinstance(val, (list, tuple)) else []
+
     def _add_markers(tc: dict, y_base: float, y_top: float, prefix: str):
-        for t in tc.get("beats", []):
+        for t in _iter(tc, "beats"):
             shapes.append(dict(type="line", x0=t, x1=t, y0=y_base, y1=y_top,
                                line=dict(color="#4cd137", width=0.8)))
-        for t in tc.get("downbeats", []):
+        for t in _iter(tc, "downbeats"):
             shapes.append(dict(type="line", x0=t, x1=t, y0=y_base, y1=y_top,
                                line=dict(color="#e94560", width=1.5)))
-        for t in tc.get("onsets", [])[:500]:
+        for t in list(_iter(tc, "onsets"))[:500]:
             shapes.append(dict(type="line", x0=t, x1=t, y0=y_base, y1=y_top,
                                line=dict(color="#ffd700", width=0.5, dash="dot")))
         annotations.append(dict(x=0, y=(y_base+y_top)/2, text=prefix,
@@ -373,11 +385,17 @@ def update_crossfader_panel(mode):
                                "color": "#4cd137", "cursor": "pointer"}),
             html.Div(id="v-beat-match-info",
                      style={"fontSize": "10px", "color": "#666", "marginTop": "4px"}),
-            html.Button("▶ Play", id="v-play-xf", n_clicks=0,
-                        style={"marginTop": "8px", "fontSize": "11px",
-                               "padding": "4px 10px",
-                               "background": "#e94560", "border": "none",
-                               "color": "white", "cursor": "pointer"}),
+            html.Div([
+                html.Button("▶ Play", id="v-play-xf", n_clicks=0,
+                            style={"fontSize": "11px", "padding": "4px 10px",
+                                   "background": "#e94560", "border": "none",
+                                   "color": "white", "cursor": "pointer"}),
+                html.Button("■ Stop", id="v-stop-xf", n_clicks=0,
+                            style={"fontSize": "11px", "padding": "4px 10px",
+                                   "background": "#1e2050",
+                                   "border": "1px solid #e94560",
+                                   "color": "#e94560", "cursor": "pointer"}),
+            ], style={"display": "flex", "gap": "6px", "marginTop": "8px"}),
         ])
 
     # Advanced
@@ -428,11 +446,17 @@ def update_crossfader_panel(mode):
                            "color": "#4cd137", "cursor": "pointer"}),
         html.Div(id="v-beat-match-info",
                  style={"fontSize": "10px", "color": "#666", "marginTop": "4px"}),
-        html.Button("▶ Play", id="v-play-xf", n_clicks=0,
-                    style={"marginTop": "8px", "fontSize": "11px",
-                           "padding": "4px 10px",
-                           "background": "#e94560", "border": "none",
-                           "color": "white", "cursor": "pointer"}),
+        html.Div([
+            html.Button("▶ Play", id="v-play-xf", n_clicks=0,
+                        style={"fontSize": "11px", "padding": "4px 10px",
+                               "background": "#e94560", "border": "none",
+                               "color": "white", "cursor": "pointer"}),
+            html.Button("■ Stop", id="v-stop-xf", n_clicks=0,
+                        style={"fontSize": "11px", "padding": "4px 10px",
+                               "background": "#1e2050",
+                               "border": "1px solid #e94560",
+                               "color": "#e94560", "cursor": "pointer"}),
+        ], style={"display": "flex", "gap": "6px", "marginTop": "8px"}),
     ])
 
 
@@ -459,31 +483,54 @@ def toggle_dim_mix_mode(mode):
     State("v-interp",    "value"),
     State("v-smart-loop","value"),
     State("v-avg-crops", "value"),
-    State({"type": "manip-slider", "index": dash.ALL}, "value"),
-    State({"type": "manip-slider", "index": dash.ALL}, "id"),
+    State({"type": "manip-slider",  "index": dash.ALL}, "value"),
+    State({"type": "manip-slider",  "index": dash.ALL}, "id"),
+    State({"type": "cluster-alpha", "index": dash.ALL}, "value"),
     prevent_initial_call=True,
 )
 def viewer_play(n, track_a, crop_a, track_b, crop_b, alpha, interp,
-                smart_loop, avg_crops, manip_values, manip_ids):
+                smart_loop, avg_crops, manip_values, manip_ids, cluster_alphas):
     if not n or not track_a:
         return no_update
     smart = "smart_loop" in (smart_loop or [])
     avg   = "avg" in (avg_crops or [])
+
+    # Resolve effective alpha: simple-mode slider (v-mix-alpha) OR mean of
+    # advanced cluster-alpha sliders if simple slider is absent (returns None).
+    if alpha is None and cluster_alphas:
+        vals = [float(v or 0) for v in cluster_alphas]
+        eff_alpha = sum(vals) / len(vals) if vals else 0.0
+    else:
+        eff_alpha = float(alpha or 0)
+
     manip = {mid["index"]: float(v or 0)
              for mid, v in zip(manip_ids or [], manip_values or [])
              if abs(float(v or 0)) > 1e-6}
     manip_params = {f"manip_{k}": str(v) for k, v in manip.items()} if manip else None
     if avg:
-        url = build_average_url(track_a, track_b or None, float(alpha or 0),
+        url = build_average_url(track_a, track_b or None, eff_alpha,
                                 interp or "slerp", smart)
     elif track_b and crop_b:
         url = build_crossfade_url(track_a, str(crop_a or "0.5"),
                                   track_b, str(crop_b or "0.5"),
-                                  float(alpha or 0), interp or "slerp", smart,
+                                  eff_alpha, interp or "slerp", smart,
                                   manip=manip_params)
     else:
         url = build_decode_url(track_a, "0.5", smart, manip=manip_params)
-    return {"action": "play", "url": url, "loop_start": None, "loop_end": None}
+    ls, le = (0, -1) if smart else (None, None)
+    return {"action": "play", "url": url, "loop_start": ls, "loop_end": le}
+
+
+# ── Crossfader stop button ────────────────────────────────────────────────────
+@callback(
+    Output("player-cmd", "data", allow_duplicate=True),
+    Input("v-stop-xf", "n_clicks"),
+    prevent_initial_call=True,
+)
+def viewer_stop(n):
+    if not n:
+        return no_update
+    return {"action": "stop"}
 
 
 @callback(

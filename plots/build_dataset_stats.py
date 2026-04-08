@@ -184,6 +184,11 @@ UNITS = {
     "syncopation_bass":             "0-1",
     "syncopation_drums":            "0-1",
     "syncopation_other":            "0-1",
+    "tonic":                        "0-11",
+    "tonic_minor":                  "0-1",
+    "tonic_strength":               "0-1",
+    **{f"hpcp_{i}":  "0-1"  for i in range(12)},
+    **{f"tiv_{i}":   "-1-1" for i in range(12)},
     "track_metadata_year":          "year",
     "voice_probability":            "0-1",
     "warmth":                       "0-100",
@@ -273,6 +278,13 @@ DESCS = {
     "syncopation_bass":             "Syncopation of the bass stem",
     "syncopation_drums":            "Syncopation of the drums stem",
     "syncopation_other":            "Syncopation of the 'other' stem",
+    "tonic":                        "Dominant tonic pitch class (0=C, 1=C#, …, 11=B)",
+    "tonic_minor":                  "1 if estimated key is minor, 0 if major",
+    "tonic_strength":               "Confidence of the tonic/key estimate (0-1)",
+    **{f"hpcp_{i}":  f"HPCP chroma pitch class {i} weight (L∞-normalized, 0-1)"
+       for i in range(12)},
+    **{f"tiv_{i}":   f"Tonal Interval Vector component {i} (L2-normalized, -1 to 1)"
+       for i in range(12)},
     "track_metadata_year":          "Year from track metadata tags",
     "voice_probability":            "Probability that the track contains a human voice",
     "warmth":                       "Perceived warmth / low-frequency richness (0-100, from AudioCommons)",
@@ -349,6 +361,11 @@ METHODS = {
     "syncopation_bass":             ["rhythm/per_stem_rhythm.py", "Beat grid on stem"],
     "syncopation_drums":            ["rhythm/per_stem_rhythm.py", "Beat grid on stem"],
     "syncopation_other":            ["rhythm/per_stem_rhythm.py", "Beat grid on stem"],
+    "tonic":                        ["harmonic/hpcp_tiv.py", "Essentia Key detector on HPCP"],
+    "tonic_minor":                  ["harmonic/hpcp_tiv.py", "Essentia Key detector on HPCP"],
+    "tonic_strength":               ["harmonic/hpcp_tiv.py", "Essentia Key detector on HPCP"],
+    **{f"hpcp_{i}":  ["harmonic/hpcp_tiv.py", "Essentia HPCP"]  for i in range(12)},
+    **{f"tiv_{i}":   ["harmonic/hpcp_tiv.py", "Tonal Interval Vector"] for i in range(12)},
     "voice_probability":            ["classification/essentia_features.py", "Essentia voice detector"],
     "warmth":                       ["timbral/audio_commons.py", "timbral_models (AudioCommons)"],
 }
@@ -383,8 +400,11 @@ NUMERIC_FEATURES = [
     "sharpness", "spectral_flatness", "spectral_flux", "spectral_kurtosis", "spectral_skewness",
     "start_sample", "start_time",
     "syncopation", "syncopation_bass", "syncopation_drums", "syncopation_other",
+    "tonic", "tonic_minor", "tonic_strength",
     "track_metadata_year", "voice_probability", "warmth",
-] + [f"chroma_{i}" for i in range(12)]
+] + [f"chroma_{i}" for i in range(12)] \
+  + [f"hpcp_{i}"   for i in range(12)] \
+  + [f"tiv_{i}"    for i in range(12)]
 
 # ---------------------------------------------------------------------------
 # Pure helper functions (all tested in tests/test_build_dataset_stats.py)
@@ -469,6 +489,9 @@ def load_track_data(track_dir: Path) -> dict | None:
         for k, v in data.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool) and v is not None:
                 feature_values[k].append(float(v))
+            elif k == "tonic_scale" and isinstance(v, str):
+                # Encode minor/major as 1/0 so it can be averaged across crops
+                feature_values["tonic_minor"].append(1.0 if v.lower() == "minor" else 0.0)
             elif k in ("spotify_id", "musicbrainz_id", "track_metadata_artist",
                        "track_metadata_title", "music_flamingo_short_genre",
                        "music_flamingo_short_mood", "music_flamingo_short_technical",
@@ -513,6 +536,7 @@ def run_scalar_pass(src: Path, output_dir: Path) -> tuple[list, dict]:
     features_in_data = [f for f in NUMERIC_FEATURES if f in all_keys]
 
     write_data_js(sorted_tracks, tracks_data, features_in_data, output_dir)
+    write_tracks_csv(sorted_tracks, tracks_data, features_in_data, output_dir)
     return sorted_tracks, tracks_data
 
 
@@ -555,6 +579,34 @@ def write_data_js(sorted_tracks: list, tracks_data: dict,
 
     size = out.stat().st_size
     print(f"  Wrote {out.name}: {size:,} bytes  ({len(sorted_tracks)} tracks, {len(features_in_data)} features)")
+
+
+def write_tracks_csv(sorted_tracks: list, tracks_data: dict,
+                     features_in_data: list, output_dir: Path) -> None:
+    """Write tracks.csv for the Dash feature explorer (plots/explorer/).
+
+    One row per track. Columns: 'track' + all numeric features present in data.
+    Also includes string metadata columns: spotify_id, musicbrainz_id, tidal_id,
+    tidal_url, isrc, label, album, artists, genres.
+    """
+    import csv as _csv
+    out = PLOTS_DIR / "tracks.csv"   # always → plots/tracks.csv
+
+    META_COLS = ["spotify_id", "musicbrainz_id", "tidal_id", "tidal_url",
+                 "isrc", "label", "album", "artists", "genres"]
+
+    all_cols = features_in_data + META_COLS
+
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = _csv.writer(f)
+        writer.writerow(["track"] + all_cols)
+        for name in sorted_tracks:
+            td = tracks_data[name]
+            row = [name] + [td.get(col, "") for col in all_cols]
+            writer.writerow(row)
+
+    size = out.stat().st_size
+    print(f"  Wrote {out.name}: {size:,} bytes  ({len(sorted_tracks)} tracks, {len(all_cols)} cols)")
 
 
 # ---------------------------------------------------------------------------

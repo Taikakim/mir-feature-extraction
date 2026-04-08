@@ -49,6 +49,14 @@ _HELP_CLUSTERS = (
     "Click 'Highlight in Dataset' to overlay cluster dims on the scatter."
 )
 
+_DARK_LAYOUT = dict(
+    template="plotly_dark",
+    paper_bgcolor="#0d0d1a",
+    plot_bgcolor="#111125",
+    font=dict(color="#ccc"),
+)
+_DARK_FIG = go.Figure(layout=go.Layout(**_DARK_LAYOUT))
+
 
 def layout() -> html.Div:
     npz = get_analysis()
@@ -112,7 +120,7 @@ def render_analysis_tab(sub: str):
                                value="pearson", inline=True),
             ], style={"display": "flex", "flexWrap": "wrap", "gap": "12px",
                       "alignItems": "center", "marginBottom": "8px"}),
-            dcc.Graph(id="corr-heatmap"),
+            dcc.Graph(id="corr-heatmap", figure=_DARK_FIG),
             html.Div(id="corr-scatter-container"),
         ])
 
@@ -126,7 +134,7 @@ def render_analysis_tab(sub: str):
             dcc.Dropdown(id="poster-feat", options=options,
                          value=feat_names[0] if feat_names else None,
                          clearable=False, style={"width": "300px"}),
-            dcc.Graph(id="poster-graph", style={"marginTop": "12px"}),
+            dcc.Graph(id="poster-graph", style={"marginTop": "12px"}, figure=_DARK_FIG),
         ])
 
     if sub == "pca":
@@ -148,9 +156,9 @@ def render_analysis_tab(sub: str):
                                value="12", inline=True),
             ], style={"display": "flex", "gap": "12px", "alignItems": "center",
                       "marginBottom": "8px"}),
-            dcc.Graph(id="pca-scatter"),
+            dcc.Graph(id="pca-scatter", figure=_DARK_FIG),
             html.H4("Cross-PCA alignment", style={"marginTop": "16px"}),
-            dcc.Graph(id="pca-cross-heatmap"),
+            dcc.Graph(id="pca-cross-heatmap", figure=_DARK_FIG),
         ])
 
     if sub == "temporal":
@@ -171,7 +179,7 @@ def render_analysis_tab(sub: str):
                           style={"width": "180px"}),
             ], style={"display": "flex", "gap": "10px", "alignItems": "center",
                       "marginBottom": "8px"}),
-            dcc.Graph(id="temporal-graph"),
+            dcc.Graph(id="temporal-graph", figure=_DARK_FIG),
         ])
 
     if sub == "xcorr":

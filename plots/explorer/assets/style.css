@@ -1,16 +1,205 @@
-/* plots/explorer/assets/style.css */
-body, .dash-table-container { background: #0d0d1a; color: #ccc; font-family: 'Segoe UI', system-ui, sans-serif; }
+/* plots/explorer/assets/style.css — dark theme for Dash 4.x */
+
+/* ── Override Dash 4 design-system CSS variables ─────────────────────────── */
+:root {
+    --Dash-Fill-Inverse-Strong: #0f1535;
+    --Dash-Fill-Inverse-strong: #0f1535;   /* Dash uses both casings in source */
+    --Dash-Fill-Interactive-Strong: #e94560;
+    --Dash-Fill-Interactive-Weak: rgba(233, 69, 96, 0.08);
+    --Dash-Fill-Primary-Hover: rgba(255, 255, 255, 0.06);
+    --Dash-Fill-Primary-Active: rgba(255, 255, 255, 0.12);
+    --Dash-Fill-Disabled: rgba(255, 255, 255, 0.08);
+    --Dash-Text-Primary: #ccc;
+    --Dash-Text-Strong: #ccc;
+    --Dash-Text-Weak: #888;
+    --Dash-Text-Disabled: #555;
+    --Dash-Stroke-Strong: #2a2a4a;
+    --Dash-Stroke-Weak: #1a1a2e;
+    --Dash-Shading-Strong: rgba(0, 0, 0, 0.5);
+    --Dash-Shading-Weak: rgba(0, 0, 0, 0.3);
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+body, .dash-table-container {
+    background: #0d0d1a;
+    color: #ccc;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+/* ── Layout helpers ──────────────────────────────────────────────────────── */
 .tab-content-wrapper { padding: 10px; }
-.controls-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 10px; background: #111125; border-bottom: 1px solid #2a2a4a; align-items: center; }
-.Select-control, .Select-menu-outer { background: #0f1535 !important; color: #e0e0e0 !important; border-color: #2a2a4a !important; }
-.Select-option { background: #0f1535 !important; color: #ccc !important; }
-.Select-option.is-focused { background: #1e2050 !important; }
+
+.controls-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #111125;
+    border-bottom: 1px solid #2a2a4a;
+    align-items: center;
+}
+
+/* ── Dash 4 Dropdown ─────────────────────────────────────────────────────── */
+.dash-dropdown-wrapper,
+.dash-dropdown {
+    background: #0f1535;
+    color: #ccc;
+    border-color: #2a2a4a;
+}
+
+/* The clickable trigger area */
+.dash-dropdown-grid-container {
+    background: #0f1535 !important;
+    border: 1px solid #2a2a4a !important;
+    color: #ccc !important;
+    border-radius: 4px;
+}
+
+.dash-dropdown-grid-container:hover {
+    border-color: #4a4a7a !important;
+}
+
+.dash-dropdown-value,
+.dash-dropdown-placeholder,
+.dash-dropdown-value-item {
+    color: #ccc !important;
+}
+
+/* Open dropdown panel */
+.dash-dropdown-content {
+    background: #0f1535 !important;
+    border: 1px solid #2a2a4a !important;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
+    z-index: 9999;
+}
+
+.dash-dropdown-options {
+    background: #0f1535 !important;
+}
+
+.dash-dropdown-option {
+    background: #0f1535 !important;
+    color: #ccc !important;
+}
+
+.dash-dropdown-option:hover,
+.dash-dropdown-option.focused {
+    background: #1e2050 !important;
+    color: #fff !important;
+}
+
+.dash-dropdown-search {
+    background: #0a0a20 !important;
+    color: #ccc !important;
+    border-color: #2a2a4a !important;
+}
+
+.dash-dropdown-search input {
+    color: #ccc !important;
+    background: transparent !important;
+}
+
+.dash-dropdown-search-icon svg path {
+    stroke: #666 !important;
+}
+
+.dash-dropdown-clear,
+.dash-dropdown-trigger-icon {
+    color: #888 !important;
+}
+
+.dash-dropdown-trigger-icon svg path,
+.dash-dropdown-trigger-icon svg polyline {
+    stroke: #888 !important;
+}
+
+/* ── Dash 4 RadioItems + Checklist ───────────────────────────────────────── */
+.dash-radioitems,
+.dash-checklist {
+    color: #ccc;
+}
+
+.dash-options-list-option {
+    background: transparent !important;
+    color: #ccc !important;
+}
+
+.dash-options-list-option:hover {
+    color: #fff !important;
+}
+
+.dash-options-list-option-text,
+.dash-options-list-option-wrapper {
+    color: #ccc !important;
+}
+
+/* accent-color tints the radio/checkbox to brand colour */
+.dash-options-list-option-checkbox,
+.dash-options-list-option input[type="radio"],
+.dash-options-list-option input[type="checkbox"] {
+    accent-color: #e94560;
+}
+
+/* ── rc-slider (pos-slider) ──────────────────────────────────────────────── */
 .rc-slider-track { background-color: #e94560; }
 .rc-slider-handle { border-color: #e94560; background: #e94560; }
-#player-strip { position: sticky; bottom: 0; background: #111125; border-top: 1px solid #2a2a4a; padding: 6px 12px; z-index: 999; }
-.player-slot { display: inline-flex; align-items: center; gap: 8px; }
-.sidebar { width: 260px; flex-shrink: 0; border-left: 1px solid #2a2a4a; padding: 8px; overflow-y: auto; height: calc(100vh - 160px); }
-.nn-row { padding: 4px 0; border-bottom: 1px solid #1a1a2e; cursor: pointer; font-size: 11px; }
+.rc-slider-rail { background: #2a2a4a; }
+
+/* ── Player strip ────────────────────────────────────────────────────────── */
+#player-strip {
+    position: sticky;
+    bottom: 0;
+    background: #111125;
+    border-top: 1px solid #2a2a4a;
+    padding: 6px 12px;
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.player-slot {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* ── Sidebar + track list ────────────────────────────────────────────────── */
+.sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    border-left: 1px solid #2a2a4a;
+    padding: 8px;
+    overflow-y: auto;
+    height: calc(100vh - 160px);
+}
+
+.nn-row {
+    padding: 4px 0;
+    border-bottom: 1px solid #1a1a2e;
+    cursor: pointer;
+    font-size: 11px;
+    color: #ccc;
+}
+
 .nn-row:hover { background: #1a1a2e; }
-.tl-item { padding: 3px 6px; cursor: pointer; font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.tl-item {
+    padding: 3px 6px;
+    cursor: pointer;
+    font-size: 11px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #ccc;
+}
+
 .tl-item:hover { background: #1e2050; }
+
+/* ── dcc.Input / dcc.Textarea ────────────────────────────────────────────── */
+.dash-input, .dash-textarea {
+    background: #0f1535 !important;
+    color: #ccc !important;
+    border-color: #2a2a4a !important;
+}

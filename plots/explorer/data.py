@@ -66,6 +66,9 @@ _FORCE_CATEGORICAL = {"has_stems", "musicbrainz_id", "source", "stem_names",
                        "track_metadata_genre", "spotify_id"}
 
 # ── Data structures ───────────────────────────────────────────────────────────
+_META_COLS = ["spotify_id", "musicbrainz_id", "tidal_url", "tidal_id"]
+
+
 @dataclass
 class AppData:
     """Loaded and indexed dataset. Immutable after construction."""
@@ -75,6 +78,7 @@ class AppData:
     class_cols: list[str]               # categorical column names
     _df_num: pd.DataFrame = field(repr=False)
     _df_class: pd.DataFrame = field(repr=False)
+    _df_meta: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
 
     def feat_array(self, col: str) -> np.ndarray:
         """Return float64 array [n_tracks] for numeric column, NaN where missing."""
@@ -83,6 +87,15 @@ class AppData:
     def class_array(self, col: str) -> list[str]:
         """Return list of raw string values for a class column."""
         return self._df_class[col].fillna("").tolist()
+
+    def meta_val(self, col: str, idx: int) -> str:
+        """Return metadata string value (e.g. spotify_id) for a track index, or ''."""
+        if col not in self._df_meta.columns:
+            return ""
+        v = self._df_meta[col].iloc[idx]
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return ""
+        return str(v).strip()
 
     def search(self, query: str) -> list[int]:
         """Return track indices whose name or artist contains query (case-insensitive)."""
@@ -154,6 +167,8 @@ def load_tracks(csv_path: Path = _DEFAULT_CSV) -> AppData:
 
     artists = [_artist_str(a) for a in df.get("artists", pd.Series([""] * len(df)))]
 
+    meta_present = [c for c in _META_COLS if c in df.columns]
+
     return AppData(
         tracks=tracks,
         artists=artists,
@@ -161,6 +176,7 @@ def load_tracks(csv_path: Path = _DEFAULT_CSV) -> AppData:
         class_cols=class_cols,
         _df_num=df[num_cols].copy(),
         _df_class=df[class_cols].copy() if class_cols else pd.DataFrame(),
+        _df_meta=df[meta_present].copy() if meta_present else pd.DataFrame(),
     )
 
 
