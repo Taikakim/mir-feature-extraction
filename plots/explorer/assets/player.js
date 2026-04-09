@@ -25,6 +25,7 @@
     let _lastUrl    = null;
     let _loopStart  = null;
     let _loopEnd    = null;
+    let _playGen    = 0;   // incremented on every new play request; guards async races
 
     // ── Crop tracking (read from response headers) ────────────────────────────
     let _cropIndex  = null;   // 1-based index of currently-playing crop
@@ -258,6 +259,7 @@
 
     /** Play the next crop (used pending buffer if URL matches). */
     async function _playNext(nextUrl, nextIdx) {
+        const gen = ++_playGen;
         stopCurrent();
         _lastUrl = nextUrl;
 
@@ -270,6 +272,7 @@
             if (!decoded) return;
         }
 
+        if (gen !== _playGen) return;  // superseded
         _startBuffer(decoded, _loopStart, _loopEnd);
 
         // Pre-decode the one after next
@@ -306,6 +309,7 @@
     // ── Main playUrl (called by play command) ─────────────────────────────────
     async function playUrl(url, loopStart, loopEnd) {
         if (_lastUrl === url && _sourceNode) return;  // already playing this
+        const gen  = ++_playGen;  // capture; any later call will bump this higher
         _lastUrl   = url;
         _loopStart = loopStart;
         _loopEnd   = loopEnd;
@@ -325,6 +329,7 @@
             if (!decoded) return;
         }
 
+        if (gen !== _playGen) return;  // superseded by a newer play request
         _startBuffer(decoded, loopStart, loopEnd);
 
         // If continue_auto, immediately prefetch the next crop
@@ -353,7 +358,9 @@
 
     // ── Shared helper: play blend clip then loop destination ─────────────────
     async function _playWithFade(blendUrl, destUrl, loopStart, loopEnd) {
+        const gen          = ++_playGen;
         const blendDecoded = await _fetchDecode(blendUrl);
+        if (gen !== _playGen) return;  // superseded
         stopCurrent();
         _lastUrl   = destUrl;
         _loopStart = loopStart;
@@ -363,7 +370,7 @@
             const blendSrc = _sourceNode;
             _prefetchUrl(destUrl, null);
             blendSrc.onended = async function () {
-                if (blendSrc !== _sourceNode) return;
+                if (blendSrc !== _sourceNode || gen !== _playGen) return;
                 await _playNext(destUrl, null);
             };
         } else {
@@ -437,6 +444,7 @@
                 _prefetchUrl(url, null);
 
             } else if (cmd.action === "stop") {
+                ++_playGen;  // invalidate any in-flight fetches
                 stopCurrent();
                 _lastUrl     = null;
                 _pending     = null;
