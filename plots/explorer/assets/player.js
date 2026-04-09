@@ -45,6 +45,11 @@
     let _continueAuto = false;
     let _vaeFade      = false;
 
+    // ── Crossfade in-progress guard ───────────────────────────────────────────
+    // True while a VAE blend clip is being fetched. Hover-triggered play
+    // commands are ignored during this window so they don't abort the fetch.
+    let _fading = false;
+
     // ── Hover ─────────────────────────────────────────────────────────────────
     let _hovX = null;
     let _hovY = null;
@@ -395,7 +400,9 @@
     async function _playWithFade(blendUrl, destUrl, loopStart, loopEnd) {
         const gen          = ++_playGen;
         const signal       = _abortMain();   // cancel any previous main fetch
+        _fading            = true;
         const blendDecoded = await _fetchDecode(blendUrl, signal);
+        _fading            = false;
         if (gen !== _playGen) return;  // superseded
         stopCurrent();
         _lastUrl   = destUrl;
@@ -421,6 +428,9 @@
             if (!cmd || !cmd.action) return window.dash_clientside.no_update;
 
             if (cmd.action === "play") {
+                // Hover-triggered plays must not abort an in-progress VAE crossfade —
+                // the continuous hover events after a click would cancel the blend fetch.
+                if (cmd.from_hover && _fading) return window.dash_clientside.no_update;
                 // Sync option flags
                 _continueAuto = !!cmd.continue_auto;
                 _vaeFade      = !!cmd.vae_fade;
