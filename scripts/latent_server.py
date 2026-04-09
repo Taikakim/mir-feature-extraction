@@ -1441,19 +1441,35 @@ class Handler(BaseHTTPRequestHandler):
         if not track_a or not track_b:
             self._error(400, "Missing track_a or track_b parameter")
             return
-        stem_root = _stem_dir if _stem_dir is not None else _latent_dir
-        dir_a = stem_root / track_a
-        dir_b = stem_root / track_b
-        if not dir_a.is_dir():
-            self._error(404, f"Stem track not found: {track_a}")
-            return
-        if not dir_b.is_dir():
-            self._error(404, f"Stem track not found: {track_b}")
-            return
 
-        mode       = qs.get("mode", ["stems"])[0]   # 'stems' | 'ab' | 'latent'
-        pos_a      = float(qs.get("pos_a",  ["0.5"])[0])
-        pos_b      = float(qs.get("pos_b",  ["0.5"])[0])
+        # Read mode first so we can check the correct directory.
+        # Default is 'ab' (full-mix latent interpolation — no stem data needed).
+        mode = qs.get("mode", ["ab"])[0]   # 'ab' | 'stems' | 'latent'
+        if mode not in ("stems", "ab", "latent"):
+            mode = "ab"
+
+        if mode == "ab":
+            # Full-mix interpolation uses the standard latent directory.
+            if not (_latent_dir / track_a).is_dir():
+                self._error(404, f"Track not found: {track_a}")
+                return
+            if not (_latent_dir / track_b).is_dir():
+                self._error(404, f"Track not found: {track_b}")
+                return
+        else:
+            stem_root = _stem_dir if _stem_dir is not None else _latent_dir
+            dir_a = stem_root / track_a
+            dir_b = stem_root / track_b
+            if not dir_a.is_dir():
+                self._error(404, f"Stem track not found: {track_a}")
+                return
+            if not dir_b.is_dir():
+                self._error(404, f"Stem track not found: {track_b}")
+                return
+
+        # Accept both pos_a/pos_b (canonical) and position_a/position_b (legacy client).
+        pos_a = float((qs.get("pos_a") or qs.get("position_a") or ["0.5"])[0])
+        pos_b = float((qs.get("pos_b") or qs.get("position_b") or ["0.5"])[0])
         beta_a     = float(qs.get("beta_a", ["0.0"])[0])
         beta_b     = float(qs.get("beta_b", ["0.0"])[0])
         interp     = qs.get("interp", ["slerp"])[0]
@@ -1470,8 +1486,6 @@ class Handler(BaseHTTPRequestHandler):
             bm_algo = "pedalboard"
         if interp not in ("slerp", "lerp"):
             interp = "slerp"
-        if mode not in ("stems", "ab", "latent"):
-            mode = "stems"
 
         alphas = {
             "drums":  float(qs.get("drums",  ["0.0"])[0]),

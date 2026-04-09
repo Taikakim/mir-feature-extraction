@@ -1296,9 +1296,11 @@ def autoplay_on_hover(hover_data, autoplay_enabled, pos, opts):
     track = ad.tracks[int(raw)]
     smart_loop = "smart_loop" in (opts or [])
     ls, le = (0, -1) if smart_loop else (None, None)
-    url   = build_decode_url(track, str(pos or 0.5), smart_loop=smart_loop)
+    url           = build_decode_url(track, str(pos or 0.5), smart_loop=smart_loop)
+    continue_auto = "continue_auto" in (opts or [])
+    vae_fade      = "vae_fade"      in (opts or [])
     return {"action": "play", "url": url, "loop_start": ls, "loop_end": le,
-            "from_hover": True}
+            "from_hover": True, "continue_auto": continue_auto, "vae_fade": vae_fade}
 
 
 _SERVICE_URL = {

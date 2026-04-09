@@ -24,13 +24,20 @@ def build_crossfade_url(track_a: str, pos_a: str,
                         mix: float = 0.5,
                         interp: str = "slerp",
                         smart_loop: bool = False,
+                        mode: str = "ab",
                         manip: dict | None = None) -> str:
-    """Build URL for /crossfade endpoint."""
+    """Build URL for /crossfade endpoint.
+
+    mode='ab'    — full-mix latent interpolation (default, no stem data needed)
+    mode='stems' — per-stem latent blend (requires stem latents in stem_dir)
+    mode='latent'— stem latents mixed in latent space
+    """
     params: dict = {
-        "track_a": track_a, "position_a": pos_a,
-        "track_b": track_b, "position_b": pos_b,
+        "track_a": track_a, "pos_a": pos_a,
+        "track_b": track_b, "pos_b": pos_b,
         "mix": f"{float(mix):.3f}",
         "interp": interp,
+        "mode": mode,
     }
     if smart_loop:
         params["smart_loop"] = "1"

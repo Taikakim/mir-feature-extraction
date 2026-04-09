@@ -120,6 +120,7 @@
 
     /**
      * Build a /crossfade URL blending srcUrl@posA → destUrl@posB at mix=0.5.
+     * Uses mode=ab (full-mix latent interpolation — no stem data needed).
      * destUrl defaults to srcUrl (same-track blend when omitted).
      */
     function _blendUrl(srcUrl, posA, posB, destUrl) {
@@ -134,12 +135,13 @@
             if (!trackA) return null;
 
             const xf = new URL(s.origin + "/crossfade");
-            xf.searchParams.set("track_a",    trackA);
-            xf.searchParams.set("position_a", posA.toFixed(4));
-            xf.searchParams.set("track_b",    trackB);
-            xf.searchParams.set("position_b", posB.toFixed(4));
-            xf.searchParams.set("mix",        "0.500");
-            xf.searchParams.set("interp",     interp);
+            xf.searchParams.set("track_a", trackA);
+            xf.searchParams.set("pos_a",   posA.toFixed(4));
+            xf.searchParams.set("track_b", trackB);
+            xf.searchParams.set("pos_b",   posB.toFixed(4));
+            xf.searchParams.set("mix",     "0.500");
+            xf.searchParams.set("interp",  interp);
+            xf.searchParams.set("mode",    "ab");   // full-mix slerp, no stems needed
             if (sl === "1") xf.searchParams.set("smart_loop", "1");
             return xf.toString();
         } catch (_) { return null; }
