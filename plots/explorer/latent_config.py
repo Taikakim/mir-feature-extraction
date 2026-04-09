@@ -5,8 +5,8 @@ the authoritative copy for the explorer's Analysis tab.
 """
 from pathlib import Path
 
-# NPZ data files live in the quarantine (already computed, no need to regenerate)
-DATA_DIR = Path(__file__).parent.parent.parent / "_quarantine" / "plots" / "latent_analysis" / "data"
+# Pre-computed NPZ files (output of the latent analysis scripts)
+DATA_DIR = Path(__file__).parent.parent.parent / "plots" / "latent_analysis" / "data"
 
 # --- Latent geometry ---
 LATENT_DIM   = 64
