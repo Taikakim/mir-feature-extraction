@@ -400,12 +400,27 @@
 
     // ── Shared helper: play blend clip then loop destination ─────────────────
     async function _playWithFade(blendUrl, destUrl, loopStart, loopEnd) {
-        const gen          = ++_playGen;
-        const signal       = _abortMain();   // cancel any previous main fetch
-        _fading            = true;
+        const gen    = ++_playGen;
+        const signal = _abortMain();   // cancel any previous main fetch
+        _fading      = true;
+
+        // Immediately fade out the current source so it doesn't play at full
+        // volume throughout the GPU decode latency.  Gain is restored to 1.0
+        // when the blend clip is ready to start.
+        if (_sourceNode) fadeOut(400);
+
         const blendDecoded = await _fetchDecode(blendUrl, signal);
-        _fading            = false;
+        _fading = false;
         if (gen !== _playGen) return;  // superseded
+
+        // Cancel the pending fade-out and restore gain before starting blend.
+        clearTimeout(_fadeTimer);
+        if (_gainNode) {
+            const ctx = getCtx();
+            _gainNode.gain.cancelScheduledValues(ctx.currentTime);
+            _gainNode.gain.setValueAtTime(1.0, ctx.currentTime);
+        }
+
         stopCurrent();
         _lastUrl   = destUrl;
         _loopStart = loopStart;
