@@ -12,7 +12,7 @@ from dash import dcc, html, Input, Output, State, callback, no_update
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from plots.explorer.data import get_analysis, get_app_data
-from plots.latent_analysis.config import (
+from plots.explorer.latent_config import (
     FEATURE_GROUPS, LATENT_DIM, POSTER_CLAMP,
     TEMPORAL_FEATURE_NAMES,
 )
@@ -247,7 +247,7 @@ def corr_scatter(click_data, metric):
     if fi is None:
         return html.P(f"Feature {feat_name} not found.")
     r_val = d01["r_pearson"][dim, fi]
-    from plots.latent_analysis.config import DATA_DIR
+    from plots.explorer.latent_config import DATA_DIR
     scatter_d_path = DATA_DIR / "scatter_sample.npz"
     if not scatter_d_path.exists():
         return html.P("scatter_sample.npz not found — run script 01.")
@@ -301,7 +301,7 @@ def update_pca_scatter(colour_feat, axes):
     scores = d02["latent_scores"]
     pc1 = int(axes[0]) - 1; pc2 = int(axes[1]) - 1
     colour = None
-    from plots.latent_analysis.config import DATA_DIR
+    from plots.explorer.latent_config import DATA_DIR
     scatter_path = DATA_DIR / "scatter_sample.npz"
     if colour_feat and scatter_path.exists():
         sd = dict(np.load(str(scatter_path), allow_pickle=True))
