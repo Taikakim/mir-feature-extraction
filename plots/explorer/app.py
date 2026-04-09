@@ -290,7 +290,7 @@ def sync_player_options(opts):
     }
 
 
-# ── Fade to new track when continue_auto + vae_fade are both on ───────────────
+# ── Fade to new track whenever vae_fade is on ────────────────────────────────
 @app.callback(
     Output("player-cmd", "data", allow_duplicate=True),
     Input("active-track", "data"),
@@ -299,10 +299,10 @@ def sync_player_options(opts):
     prevent_initial_call=True,
 )
 def fade_on_track_change(active_track, opts, pos):
-    """When a new track is loaded while continue_auto is on, send fade_to.
-    JS will crossfade immediately (if vaeFade+posA known) or queue for next crop boundary."""
+    """When vae_fade is on and a new track is loaded, send fade_to so JS can
+    crossfade immediately from the current playing position."""
     opts = opts or []
-    if "continue_auto" not in opts:
+    if "vae_fade" not in opts:
         return no_update
     track = (active_track or {}).get("track")
     if not track:

@@ -436,35 +436,37 @@
                 _playWithFade(cmd.blend_url, cmd.dest_url, _loopStart, _loopEnd);
 
             } else if (cmd.action === "fade_to") {
-                // Transition to a new track — immediate crossfade if possible,
-                // queue to _pendingNext if not (never switches abruptly mid-crop).
+                // Crossfade to a new track immediately when VAE fade is on.
+                // When VAE fade is off, queue for next crop boundary (continue_auto path).
                 const destUrl  = cmd.url;
                 const loopSt   = cmd.loop_start ?? null;
                 const loopEd   = cmd.loop_end   ?? null;
                 if (!destUrl) return window.dash_clientside.no_update;
 
                 if (!_sourceNode || !_lastUrl) {
-                    // Nothing is playing — start the new track immediately
+                    // Nothing playing — start directly
                     playUrl(destUrl, loopSt, loopEd);
                     return window.dash_clientside.no_update;
                 }
 
-                // Something is playing — try an immediate crossfade
-                const posA = _cropPos ?? (_cropIndex != null && _cropCount
-                              ? _cropIndex / _cropCount : null);
-                const posB = _urlPos(destUrl);
-
-                if (_vaeFade && posA != null) {
-                    const bUrl = _blendUrl(_lastUrl, posA, posB ?? 0.5, destUrl);
+                if (_vaeFade) {
+                    // Best-effort position estimate for posA:
+                    // X-Crop-Position header > cropIndex/cropCount ratio > 0.5 fallback
+                    const posA = _cropPos ?? (_cropIndex != null && _cropCount
+                                  ? _cropIndex / _cropCount : 0.5);
+                    const posB = _urlPos(destUrl) ?? 0.5;
+                    const bUrl = _blendUrl(_lastUrl, posA, posB, destUrl);
                     if (bUrl) {
                         _loopStart = loopSt; _loopEnd = loopEd;
                         _playWithFade(bUrl, destUrl, loopSt, loopEd);
                         return window.dash_clientside.no_update;
                     }
+                    // blend URL failed (track name missing etc) — fall through to direct switch
+                    playUrl(destUrl, loopSt, loopEd);
+                    return window.dash_clientside.no_update;
                 }
 
-                // Can't crossfade (position unknown, or vaeFade off) —
-                // queue for the next crop boundary instead of interrupting.
+                // VAE fade off — queue for next crop boundary (only useful with continue_auto)
                 _pendingNext = { url: destUrl, loopStart: loopSt, loopEnd: loopEd };
 
             } else if (cmd.action === "options") {
