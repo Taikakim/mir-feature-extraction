@@ -1,0 +1,1168 @@
+
+    const CURATED = [
+      'atonality', 'booming', 'bpm', 'brightness',
+      'content_enjoyment', 'content_usefulness', 'danceability', 'depth', 'hardness',
+      'lra', 'lufs', 'lufs_bass', 'lufs_drums', 'lufs_other', 'lufs_vocals',
+      'on_beat_ratio', 'onset_density',
+      'popularity', 'production_complexity', 'production_quality', 'release_year', 'reverberation',
+      'rhythmic_complexity', 'rhythmic_evenness',
+      'rms_energy_air', 'rms_energy_bass', 'rms_energy_body', 'rms_energy_mid',
+      'roughness', 'sharpness', 'spectral_flatness', 'spectral_flux', 'spectral_kurtosis',
+      'spectral_skewness', 'syncopation', 'warmth'
+    ];
+
+    let mode = 'scatter';
+    let logX = false, logY = false;
+    let showCurated = false;
+    let formulaVisible = false;
+
+    // ---- Helpers ---------------------------------------------------------------
+    function mean(arr) {
+      const v = arr.filter(x => x !== null && isFinite(x));
+      return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0;
+    }
+    function std(arr) {
+      const v = arr.filter(x => x !== null && isFinite(x));
+      if (v.length < 2) return 0;
+      const m = mean(v);
+      return Math.sqrt(v.reduce((a, x) => a + (x - m) ** 2, 0) / v.length);
+    }
+    function norm01(arr) {
+      const valid = arr.filter(v => v !== null && isFinite(v));
+      if (!valid.length) return arr.map(() => null);
+      const mn = Math.min(...valid), mx = Math.max(...valid);
+      if (mx - mn < 1e-10) return arr.map(v => v !== null ? 0.5 : null);
+      return arr.map(v => v !== null ? (v - mn) / (mx - mn) : null);
+    }
+    function corrcoef(x, y) {
+      let n = 0, sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0;
+      for (let i = 0; i < x.length; i++) {
+        if (x[i] !== null && y[i] !== null && isFinite(x[i]) && isFinite(y[i])) {
+          n++; sx += x[i]; sy += y[i]; sxy += x[i] * y[i]; sx2 += x[i] * x[i]; sy2 += y[i] * y[i];
+        }
+      }
+      if (n < 3) return 0;
+      const num = n * sxy - sx * sy, den = Math.sqrt((n * sx2 - sx * sx) * (n * sy2 - sy * sy));
+      return den < 1e-10 ? 0 : num / den;
+    }
+    function getDispFeatures() {
+      return showCurated ? CURATED.filter(f => FEATURES.includes(f)) : FEATURES;
+    }
+    function shortLabel(f) {
+      if (f.startsWith('rms_energy_')) return 'rms:' + f.slice(11);
+      if (f.startsWith('spectral_')) return 'sp:' + f.slice(9);
+      if (f.startsWith('lufs_')) return 'lufs:' + f.slice(5);
+      return f.replace(/_/g, ' ');
+    }
+    function searchName(name) {
+      return name.replace(/^\d{1,4}\s+/, '');
+    }
+
+    // ---- Toggle helpers --------------------------------------------------------
+    function toggleLogX() {
+      logX = !logX;
+      document.getElementById('log-x-btn').className = 'log-btn' + (logX ? ' active' : '');
+      updatePlot();
+    }
+    function toggleLogY() {
+      logY = !logY;
+      document.getElementById('log-y-btn').className = 'log-btn' + (logY ? ' active' : '');
+      updatePlot();
+    }
+    function toggleCurated() {
+      showCurated = document.getElementById('chk-curated').checked;
+      populateSelects();
+      updatePlot();
+    }
+    function toggleFormula() {
+      formulaVisible = !formulaVisible;
+      document.getElementById('formula-panel').style.display = formulaVisible ? '' : 'none';
+      document.getElementById('formula-toggle').textContent = formulaVisible ? '\u2716 Close' : '\u{1F9EA} Methods';
+    }
+
+    // ---- Methods panel ---------------------------------------------------------
+    function renderMethodEntry(label, key) {
+      if (!key) return '';
+      const m = METHODS[key] || ['unknown', 'unknown', key];
+      let warn = '';
+      if (PERCEPTUAL.has(key))
+        warn = '<div class="fe-warn">\u26A0 Perceptual AI model \u2014 may not perform optimally with narrowly genre-specific sounds</div>';
+      return '<div class="formula-entry">' +
+        '<div class="fe-name">' + label + ': ' + key + '</div>' +
+        '<div class="fe-src">src/' + m[0] + '</div>' +
+        '<div class="fe-lib">' + m[1] + '</div>' +
+        '<pre>' + m[2] + '</pre>' + warn +
+        '</div>';
+    }
+    function updateHelp() {
+      const box = document.getElementById('help-box');
+      const panel = document.getElementById('formula-panel');
+      let lines = [], entries = [];
+      if (mode === 'scatter') {
+        const kx = document.getElementById('sel-x').value;
+        const ky = document.getElementById('sel-y').value;
+        if (kx) lines.push('<span class="feat">X: ' + kx + '</span> \u2014 <span class="desc">' + (DESCS[kx] || kx) + '</span>');
+        if (ky) lines.push('<span class="feat">Y: ' + ky + '</span> \u2014 <span class="desc">' + (DESCS[ky] || ky) + '</span>');
+        if (kx) entries.push(renderMethodEntry('X', kx));
+        if (ky) entries.push(renderMethodEntry('Y', ky));
+      } else if (mode === 'quadrant') {
+        const kxp = document.getElementById('sel-xp').value;
+        const kxn = document.getElementById('sel-xn').value;
+        const kyp = document.getElementById('sel-yp').value;
+        const kyn = document.getElementById('sel-yn').value;
+        lines.push('<span class="feat">X+ ' + kxp + '</span> \u2014 <span class="desc">' + (DESCS[kxp] || kxp) + '</span> &nbsp;|&nbsp; <span class="feat">X\u2212 ' + kxn + '</span> \u2014 <span class="desc">' + (DESCS[kxn] || kxn) + '</span>');
+        lines.push('<span class="feat">Y+ ' + kyp + '</span> \u2014 <span class="desc">' + (DESCS[kyp] || kyp) + '</span> &nbsp;|&nbsp; <span class="feat">Y\u2212 ' + kyn + '</span> \u2014 <span class="desc">' + (DESCS[kyn] || kyn) + '</span>');
+        entries.push(renderMethodEntry('X+', kxp)); entries.push(renderMethodEntry('X\u2212', kxn));
+        entries.push(renderMethodEntry('Y+', kyp)); entries.push(renderMethodEntry('Y\u2212', kyn));
+      } else if (mode === 'histogram') {
+        const kh = document.getElementById('sel-hist').value;
+        if (kh) {
+          lines.push('<span class="feat">' + kh + '</span> \u2014 <span class="desc">' + (DESCS[kh] || kh) + '</span>');
+          entries.push(renderMethodEntry('Feature', kh));
+        }
+      } else if (mode === 'radar') {
+        const t = document.getElementById('sel-radar-track').value;
+        lines.push('<span class="feat">Radar: ' + t + '</span> \u2014 <span class="desc">Each bar = one curated feature, normalized 0\u20131 across the dataset. <b style="color:#e94560;">Red</b> = above dataset mean, <b style="color:#00d2ff;">Blue</b> = below. Ghost bars show the dataset average. Click bars to select features & find similar tracks.</span>');
+      } else if (mode === 'heatmap') {
+        const n = getDispFeatures().length;
+        lines.push('<span class="feat">Pearson r matrix</span> \u2014 <span class="desc">' + n + ' features. Click a cell to jump to Scatter.</span>');
+      } else if (mode === 'parallel') {
+        lines.push('<span class="feat">Parallel Coordinates</span> \u2014 <span class="desc">31 curated features. Drag axis bands to filter tracks.</span>');
+      } else if (mode === 'similarity') {
+        const ref = document.getElementById('sel-sim-ref').value;
+        const kxp = document.getElementById('sim-xp').value;
+        const kxn = document.getElementById('sim-xn').value;
+        const kyp = document.getElementById('sim-yp').value;
+        const kyn = document.getElementById('sim-yn').value;
+        lines.push('<span class="feat">Reference: ' + ref + '</span> \u2014 placed at origin (0, 0)');
+        lines.push('<span class="feat">X: ' + kxp + ' vs ' + kxn + '</span> &nbsp;|&nbsp; <span class="feat">Y: ' + kyp + ' vs ' + kyn + '</span>');
+        if (kxp) entries.push(renderMethodEntry('X+', kxp));
+        if (kxn) entries.push(renderMethodEntry('X\u2212', kxn));
+        if (kyp) entries.push(renderMethodEntry('Y+', kyp));
+        if (kyn) entries.push(renderMethodEntry('Y\u2212', kyn));
+      } else if (mode === 'classes') {
+        const ck = document.getElementById('cls-by').value || '';
+        lines.push('<span class="feat">Classes: ' + ck.replace(/_/g, ' ') + '</span> \u2014 <span class="desc">Scatter colored by categorical class. Top 20 classes shown (rest grouped as "other"). Click a point to view its Radar.</span>');
+      }
+      box.innerHTML = lines.join('<br>');
+      panel.innerHTML = '<h3>\u{1F9EA} Feature Methods</h3>' + (entries.length ? entries.join('') : '<p style="color:#666;font-size:11px;padding:4px 0;">No per-feature methods for this mode.</p>');
+    }
+
+    // ---- Populate selects ------------------------------------------------------
+    function setOpts(id, opts, preserve, fallback) {
+      // opts: array of {v, t} or just strings
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const prev = sel.value;
+      sel.innerHTML = '';
+      opts.forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = typeof o === 'string' ? o : o.v;
+        opt.textContent = typeof o === 'string' ? o : o.t;
+        sel.appendChild(opt);
+      });
+      const target = (prev && opts.some(o => (typeof o === 'string' ? o : o.v) === prev)) ? prev :
+        (fallback && opts.some(o => (typeof o === 'string' ? o : o.v) === fallback)) ? fallback : null;
+      if (target) sel.value = target;
+    }
+
+    let _firstPop = true;
+    function populateSelects() {
+      const df = getDispFeatures();
+      const cf = CURATED.filter(f => FEATURES.includes(f));
+
+      // Feature selects
+      ['sel-x', 'sel-y', 'sel-xp', 'sel-xn', 'sel-yp', 'sel-yn', 'sel-hist', 'sim-xp', 'sim-xn', 'sim-yp', 'sim-yn']
+        .forEach(id => setOpts(id, df, null, null));
+
+      // Color-mode dropdown
+      const cmSel = document.getElementById('sel-colormode');
+      if (cmSel) {
+        const prev = cmSel.value;
+        cmSel.innerHTML = '<option value="">\u2014 none \u2014</option><option value="__outliers__">\u26a0 Outliers (2\u03c3)</option>';
+        df.forEach(f => { const o = document.createElement('option'); o.value = f; o.textContent = f; cmSel.appendChild(o); });
+        if (prev && [...cmSel.options].some(o => o.value === prev)) cmSel.value = prev;
+      }
+
+      // Track selects
+      ['sel-radar-track', 'sel-sim-ref'].forEach(id => setOpts(id, TRACKS, null, null));
+      if (TRACKS && TRACKS.length > 0 && !globalActiveTrack) {
+        globalActiveTrack = TRACKS[0];
+      }
+      syncTrackSelects();
+
+      // NN feature selects (always curated)
+      const nnDef = ['bpm', 'lufs', 'brightness', 'warmth', 'danceability'];
+      for (let i = 1; i <= 5; i++) setOpts('nn-f' + i, cf, null, nnDef[i - 1]);
+
+      // Class-by dropdown (from CLASSES keys)
+      const cbSel = document.getElementById('cls-by');
+      if (cbSel && typeof CLASSES !== 'undefined') {
+        const prev = cbSel.value;
+        cbSel.innerHTML = '';
+        Object.keys(CLASSES).forEach(k => { const o = document.createElement('option'); o.value = k; o.textContent = k.replace(/_/g, ' '); cbSel.appendChild(o); });
+        if (prev && [...cbSel.options].some(o => o.value === prev)) cbSel.value = prev;
+      }
+
+      if (_firstPop && df.length > 1) {
+        _firstPop = false;
+        document.getElementById('sel-x').value = df.includes('bpm') ? 'bpm' : df[0];
+        document.getElementById('sel-y').value = df.includes('lufs') ? 'lufs' : df[1];
+        document.getElementById('sel-xp').value = df[0];
+        document.getElementById('sel-xn').value = df[Math.min(1, df.length - 1)];
+        document.getElementById('sel-yp').value = df[Math.min(2, df.length - 1)];
+        document.getElementById('sel-yn').value = df[Math.min(3, df.length - 1)];
+        document.getElementById('sel-hist').value = df.includes('bpm') ? 'bpm' : df[0];
+        // Sim defaults
+        const sd = ['danceability', 'atonality', 'brightness', 'warmth'];
+        ['sim-xp', 'sim-xn', 'sim-yp', 'sim-yn'].forEach((id, i) => {
+          if (df.includes(sd[i])) document.getElementById(id).value = sd[i];
+        });
+      }
+    }
+
+    // ---- setMode ---------------------------------------------------------------
+    function setMode(m) {
+      mode = m;
+      ['scatter', 'quadrant', 'histogram', 'radar', 'heatmap', 'parallel', 'similarity', 'classes'].forEach(n => {
+        document.getElementById('btn-' + n).className = 'mode-btn' + (n === m ? ' active' : '');
+      });
+      const V = {
+        'scatter-controls': m === 'scatter' || m === 'classes',
+        'scatter-controls-y': m === 'scatter' || m === 'classes',
+        'colormode-group': m === 'scatter' || m === 'quadrant',
+        'quad-xp': m === 'quadrant',
+        'quad-xn': m === 'quadrant',
+        'quad-yp': m === 'quadrant',
+        'quad-yn': m === 'quadrant',
+        'hist-controls': m === 'histogram',
+        'radar-controls': m === 'radar',
+        'sim-ref-group': m === 'similarity',
+        'sim-xp-group': m === 'similarity',
+        'sim-xn-group': m === 'similarity',
+        'sim-yp-group': m === 'similarity',
+        'sim-yn-group': m === 'similarity',
+        'cls-by-group': m === 'classes',
+        'trend-group': m === 'scatter',
+        'cls-trend-group': m === 'classes',
+      };
+      Object.entries(V).forEach(([id, show]) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = show ? '' : 'none';
+      });
+      const nnP = document.getElementById('sim-nn-panel');
+      if (nnP) nnP.style.display = m === 'similarity' ? 'flex' : 'none';
+      hideSidebar();
+      hideTrackPanel();
+      updateHelp();
+      updatePlot();
+    }
+
+    // ---- Track panel -----------------------------------------------------------
+    function showTrackPanel(idx, featureKeys) {
+      const panel = document.getElementById('track-panel');
+      document.getElementById('tp-name').textContent = TRACKS[idx];
+      const keys = Array.isArray(featureKeys) ? featureKeys : [featureKeys];
+      let fh = '';
+      keys.forEach(f => {
+        if (!f || !DATA[f]) return;
+        const v = DATA[f][idx];
+        const u = UNITS[f] && UNITS[f] !== '-' ? ' ' + UNITS[f] : '';
+        fh += '<div><span style="color:#00d2ff;">' + f + '</span>: ' + (v !== null ? v.toFixed(3) : 'N/A') + u + '</div>';
+      });
+      document.getElementById('tp-features').innerHTML = fh;
+      let lh = '';
+      if (SPOTIFY[idx]) lh += '<a href="https://open.spotify.com/track/' + SPOTIFY[idx] + '" target="_blank" style="color:#1db954;">\uD83C\uDFB5 Spotify</a>';
+      lh += '<a href="https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[idx])) + '" target="_blank" style="color:#00d2ff;">\uD83C\uDF0A Tidal</a>';
+      if (MBIDS[idx]) lh += '<a href="https://musicbrainz.org/recording/' + MBIDS[idx] + '" target="_blank" style="color:#e94560;">\uD83D\uDCC0 MB</a>';
+      document.getElementById('tp-links').innerHTML = lh;
+      panel.style.display = '';
+    }
+    function hideTrackPanel() {
+      document.getElementById('track-panel').style.display = 'none';
+    }
+
+    // ---- Lasso select sidebar --------------------------------------------------
+    function showSidebar(idxs, featureKeys) {
+      const list = document.getElementById('sel-list');
+      const keys = Array.isArray(featureKeys) ? featureKeys : [];
+      list.innerHTML = idxs.map(idx => {
+        const vals = keys.map(k => k + ': ' + (DATA[k] && DATA[k][idx] !== null ? DATA[k][idx].toFixed(3) : '?')).join(', ');
+        return '<div class="track-item" onclick="showTrackPanel(' + idx + ',' + JSON.stringify(keys) + ')">' +
+          '<div style="color:white;">' + TRACKS[idx] + '</div>' +
+          (vals ? '<div style="color:#666;font-size:10px;">' + vals + '</div>' : '') +
+          '</div>';
+      }).join('');
+      const h = document.querySelector('#sel-panel h4');
+      if (h) h.innerHTML = 'Selected (' + idxs.length + ') <button onclick="hideSidebar()" style="float:right;background:none;border:none;color:#888;cursor:pointer;font-size:13px;">&#x2715;</button>';
+      document.getElementById('sel-panel').style.display = '';
+    }
+    function hideSidebar() {
+      document.getElementById('sel-panel').style.display = 'none';
+    }
+
+    // ---- updatePlot dispatcher -------------------------------------------------
+    function updatePlot() {
+      updateHelp();
+      hideTrackPanel();
+      if (mode === 'scatter') updateScatter();
+      else if (mode === 'quadrant') updateQuadrant();
+      else if (mode === 'histogram') updateHistogram();
+      else if (mode === 'radar') updateRadar();
+      else if (mode === 'heatmap') updateHeatmap();
+      else if (mode === 'parallel') updateParallel();
+      else if (mode === 'similarity') updateSimilarity();
+      else if (mode === 'classes') updateClasses();
+    }
+
+    // ---- SCATTER ---------------------------------------------------------------
+    function updateScatter() {
+      const kx = document.getElementById('sel-x').value;
+      const ky = document.getElementById('sel-y').value;
+      const colorMode = document.getElementById('sel-colormode').value;
+      const showTrend = document.getElementById('chk-trend').checked;
+      if (!kx || !ky) return;
+      const dx = DATA[kx], dy = DATA[ky];
+      const x = [], y = [], names = [], trackIdxs = [];
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (dx[i] !== null && dy[i] !== null && isFinite(dx[i]) && isFinite(dy[i])) {
+          x.push(dx[i]); y.push(dy[i]); names.push(TRACKS[i]); trackIdxs.push(i);
+        }
+      }
+      const r = corrcoef(x, y);
+      const ux = UNITS[kx] && UNITS[kx] !== '-' ? ' [' + UNITS[kx] + ']' : '';
+      const uy = UNITS[ky] && UNITS[ky] !== '-' ? ' [' + UNITS[ky] + ']' : '';
+      const hover = names.map((n, j) => {
+        let h = '<b>' + n + '</b><br>' + kx + ': ' + x[j].toFixed(4) + '<br>' + ky + ': ' + y[j].toFixed(4);
+        if (colorMode && colorMode !== '__outliers__' && DATA[colorMode]) {
+          const cv = DATA[colorMode][trackIdxs[j]];
+          h += '<br>' + colorMode + ': ' + (cv !== null && isFinite(cv) ? cv.toFixed(4) : 'N/A');
+        }
+        return h;
+      });
+
+      let traces;
+      if (colorMode === '__outliers__' && x.length > 0) {
+        const mx = mean(x), sx2 = std(x), my = mean(y), sy2 = std(y);
+        const outlier = x.map((xi, i) => Math.abs(xi - mx) > 2 * sx2 || Math.abs(y[i] - my) > 2 * sy2);
+        const nI = [], oI = [];
+        outlier.forEach((o, i) => o ? oI.push(i) : nI.push(i));
+        traces = [
+          {
+            x: nI.map(i => x[i]), y: nI.map(i => y[i]), mode: 'markers', type: 'scattergl',
+            marker: { color: '#e94560', size: 5, opacity: 0.5 },
+            hovertext: nI.map(i => hover[i]), hoverinfo: 'text',
+            name: 'normal (' + nI.length + ')', customdata: nI.map(i => trackIdxs[i])
+          },
+          {
+            x: oI.map(i => x[i]), y: oI.map(i => y[i]), mode: 'markers', type: 'scattergl',
+            marker: { color: '#ffd700', size: 9, opacity: 0.85 },
+            hovertext: oI.map(i => hover[i]), hoverinfo: 'text',
+            name: 'outlier (' + oI.length + ')', customdata: oI.map(i => trackIdxs[i])
+          }
+        ];
+      } else if (colorMode && colorMode !== '__outliers__' && DATA[colorMode]) {
+        const cvals = trackIdxs.map(i => DATA[colorMode][i]);
+        traces = [{
+          x, y, mode: 'markers', type: 'scattergl',
+          marker: {
+            color: cvals, colorscale: 'Viridis', showscale: true,
+            colorbar: { title: colorMode, thickness: 14 }, size: 5, opacity: 0.7
+          },
+          hovertext: hover, hoverinfo: 'text', name: 'tracks', customdata: trackIdxs
+        }];
+      } else {
+        traces = [{
+          x, y, mode: 'markers', type: 'scattergl',
+          marker: { color: '#e94560', size: 5, opacity: 0.5 },
+          hovertext: hover, hoverinfo: 'text', name: 'tracks', customdata: trackIdxs
+        }];
+      }
+      if (showTrend && x.length > 2) {
+        const n = x.length, mx = x.reduce((a, b) => a + b) / n, my = y.reduce((a, b) => a + b) / n;
+        let num = 0, den = 0;
+        for (let i = 0; i < n; i++) { num += (x[i] - mx) * (y[i] - my); den += (x[i] - mx) ** 2; }
+        const s = den > 0 ? num / den : 0, ic = my - s * mx;
+        const xmn = Math.min(...x), xmx = Math.max(...x);
+        traces.push({
+          x: [xmn, xmx], y: [s * xmn + ic, s * xmx + ic], mode: 'lines',
+          line: { color: '#00d2ff', width: 2, dash: 'dash' },
+          name: 'trend (r=' + r.toFixed(3) + ')', hoverinfo: 'skip'
+        });
+      }
+      // Check if log scale is valid (all values must be > 0)
+      const effLogX = logX && x.every(v => v > 0);
+      const effLogY = logY && y.every(v => v > 0);
+      Plotly.react('plot', traces, {
+        title: { text: kx + ' vs ' + ky + '  (r = ' + r.toFixed(3) + ', n = ' + x.length + ')', font: { size: 15 } },
+        xaxis: { title: kx + ux, type: effLogX ? 'log' : 'linear', autorange: true },
+        yaxis: { title: ky + uy, type: effLogY ? 'log' : 'linear', autorange: true },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e',
+        font: { color: '#cccccc' }, hoverlabel: { bgcolor: '#0f3460', font: { size: 12, color: 'white' } },
+        showlegend: true, legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(15,52,96,0.8)' },
+        dragmode: 'lasso', margin: { t: 46, b: 48, l: 58, r: 20 }
+      }, { responsive: true });
+      const pd = document.getElementById('plot');
+      pd.removeAllListeners('plotly_click');
+      pd.removeAllListeners('plotly_selected');
+      pd.removeAllListeners('plotly_deselect');
+      pd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const idx = pt.customdata !== undefined ? pt.customdata : trackIdxs[pt.pointIndex];
+          if (idx !== undefined) {
+            // Navigate to radar for clicked track
+            document.getElementById('sel-radar-track').value = TRACKS[idx];
+            setMode('radar');
+          }
+        }
+      });
+      pd.on('plotly_selected', function (d) {
+        if (d && d.points && d.points.length > 0) {
+          const sel = d.points.map(p => p.customdata !== undefined ? p.customdata : trackIdxs[p.pointIndex]);
+          showSidebar(sel, [kx, ky]);
+          populateTrackList(sel);
+        }
+      });
+      pd.on('plotly_deselect', function () { hideSidebar(); clearTrackList(); });
+      let infoText = kx + ' vs ' + ky + ' | r = ' + r.toFixed(3) + ' | ' + x.length + ' tracks';
+      if (logX && !effLogX) infoText += ' | \u26a0 Log X off: ' + kx + ' has \u22640 values';
+      if (logY && !effLogY) infoText += ' | \u26a0 Log Y off: ' + ky + ' has \u22640 values';
+      document.getElementById('info-bar').textContent = infoText;
+    }
+
+    // ---- QUADRANT --------------------------------------------------------------
+    function updateQuadrant() {
+      const kxp = document.getElementById('sel-xp').value;
+      const kxn = document.getElementById('sel-xn').value;
+      const kyp = document.getElementById('sel-yp').value;
+      const kyn = document.getElementById('sel-yn').value;
+      const dxp = DATA[kxp], dxn = DATA[kxn], dyp = DATA[kyp], dyn = DATA[kyn];
+      const idxs = [];
+      for (let i = 0; i < TRACKS.length; i++)
+        if (dxp[i] !== null && dxn[i] !== null && dyp[i] !== null && dyn[i] !== null) idxs.push(i);
+      const nxp = norm01(idxs.map(i => dxp[i])), nxn = norm01(idxs.map(i => dxn[i]));
+      const nyp = norm01(idxs.map(i => dyp[i])), nyn = norm01(idxs.map(i => dyn[i]));
+      const x = nxp.map((v, i) => v - nxn[i]), y = nyp.map((v, i) => v - nyn[i]);
+      const hover = idxs.map((idx, j) =>
+        '<b>' + TRACKS[idx] + '</b><br>' + kxp + ': ' + dxp[idx].toFixed(3) + ' | ' + kxn + ': ' + dxn[idx].toFixed(3) +
+        '<br>' + kyp + ': ' + dyp[idx].toFixed(3) + ' | ' + kyn + ': ' + dyn[idx].toFixed(3) +
+        '<br>X: ' + x[j].toFixed(3) + ' | Y: ' + y[j].toFixed(3));
+      Plotly.react('plot', [{
+        x, y, mode: 'markers', type: 'scattergl',
+        marker: { color: '#e94560', size: 6, opacity: 0.5 },
+        hovertext: hover, hoverinfo: 'text', name: 'tracks', customdata: idxs
+      }], {
+        title: { text: 'Feature Quadrant (n = ' + idxs.length + ')', font: { size: 15 } },
+        xaxis: { title: '\u2190 ' + kxn + '  |  ' + kxp + ' \u2192', range: [-1.1, 1.1], zeroline: true, zerolinecolor: '#555577', dtick: 0.5 },
+        yaxis: { title: '\u2190 ' + kyn + '  |  ' + kyp + ' \u2192', range: [-1.1, 1.1], zeroline: true, zerolinecolor: '#555577', dtick: 0.5, scaleanchor: 'x' },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e', font: { color: '#cccccc' },
+        hoverlabel: { bgcolor: '#0f3460', font: { size: 12, color: 'white' } }, showlegend: false,
+        annotations: [
+          { x: 1.0, y: 0, text: '<b>' + kxp + '</b>', showarrow: false, font: { size: 12, color: '#00d2ff' }, xanchor: 'right', bgcolor: '#0f3460', bordercolor: '#e94560', borderpad: 4 },
+          { x: -1.0, y: 0, text: '<b>' + kxn + '</b>', showarrow: false, font: { size: 12, color: '#00d2ff' }, xanchor: 'left', bgcolor: '#0f3460', bordercolor: '#e94560', borderpad: 4 },
+          { x: 0, y: 1.0, text: '<b>' + kyp + '</b>', showarrow: false, font: { size: 12, color: '#e94560' }, yanchor: 'bottom', bgcolor: '#0f3460', bordercolor: '#e94560', borderpad: 4 },
+          { x: 0, y: -1.0, text: '<b>' + kyn + '</b>', showarrow: false, font: { size: 12, color: '#e94560' }, yanchor: 'top', bgcolor: '#0f3460', bordercolor: '#e94560', borderpad: 4 }
+        ],
+        shapes: [
+          { type: 'line', x0: -0.5, x1: -0.5, y0: -1.1, y1: 1.1, line: { color: '#333355', width: 0.5, dash: 'dash' } },
+          { type: 'line', x0: 0.5, x1: 0.5, y0: -1.1, y1: 1.1, line: { color: '#333355', width: 0.5, dash: 'dash' } },
+          { type: 'line', y0: -0.5, y1: -0.5, x0: -1.1, x1: 1.1, line: { color: '#333355', width: 0.5, dash: 'dash' } },
+          { type: 'line', y0: 0.5, y1: 0.5, x0: -1.1, x1: 1.1, line: { color: '#333355', width: 0.5, dash: 'dash' } }
+        ],
+        margin: { t: 46, b: 48, l: 58, r: 20 }
+      }, { responsive: true });
+      document.getElementById('plot').on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const idx = pt.customdata !== undefined ? pt.customdata : idxs[pt.pointIndex];
+          if (idx !== undefined) showTrackPanel(idx, [kxp, kxn, kyp, kyn]);
+        }
+      });
+      document.getElementById('info-bar').textContent = 'X: ' + kxp + ' vs ' + kxn + ' | Y: ' + kyp + ' vs ' + kyn + ' | ' + idxs.length + ' tracks';
+    }
+
+    // ---- HISTOGRAM -------------------------------------------------------------
+    function updateHistogram() {
+      const kh = document.getElementById('sel-hist').value;
+      if (!kh) return;
+      const vals = DATA[kh].filter(v => v !== null && isFinite(v));
+      const n = vals.length;
+      if (!n) { document.getElementById('info-bar').textContent = kh + ': no data'; return; }
+      const binsInput = document.getElementById('hist-bins-input');
+      const userBins = binsInput && binsInput.value ? parseInt(binsInput.value) : 0;
+      const nbins = userBins >= 4 && userBins <= 64 ? userBins : Math.min(30, Math.ceil(Math.sqrt(n)));
+      const m = mean(vals), s = std(vals);
+      const u = UNITS[kh] && UNITS[kh] !== '-' ? ' [' + UNITS[kh] + ']' : '';
+      const vMin = Math.min(...vals), vMax = Math.max(...vals);
+      const binSize = (vMax - vMin) / nbins;
+      Plotly.react('plot', [{
+        x: vals, type: 'histogram',
+        xbins: { start: vMin, end: vMax, size: binSize },
+        marker: { color: '#e94560', opacity: 0.75, line: { color: '#c03050', width: 0.5 } }, name: kh
+      }], {
+        title: { text: kh + ' distribution  (n=' + n + ', \u03BC=' + m.toFixed(3) + ', \u03C3=' + s.toFixed(3) + ')', font: { size: 15 } },
+        xaxis: { title: kh + u }, yaxis: { title: 'count' },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e', font: { color: '#cccccc' },
+        shapes: [
+          { type: 'line', x0: m, x1: m, y0: 0, y1: 1, yref: 'paper', line: { color: '#00d2ff', width: 2, dash: 'dash' } },
+          { type: 'line', x0: m - s, x1: m - s, y0: 0, y1: 1, yref: 'paper', line: { color: '#888899', width: 1, dash: 'dot' } },
+          { type: 'line', x0: m + s, x1: m + s, y0: 0, y1: 1, yref: 'paper', line: { color: '#888899', width: 1, dash: 'dot' } }
+        ],
+        annotations: [
+          { x: m, y: 1.01, yref: 'paper', text: '\u03BC', showarrow: false, font: { color: '#00d2ff', size: 12 }, yanchor: 'bottom' },
+          { x: m - s, y: 1.01, yref: 'paper', text: '-\u03C3', showarrow: false, font: { color: '#888', size: 11 }, yanchor: 'bottom' },
+          { x: m + s, y: 1.01, yref: 'paper', text: '+\u03C3', showarrow: false, font: { color: '#888', size: 11 }, yanchor: 'bottom' }
+        ],
+        margin: { t: 46, b: 48, l: 58, r: 20 }
+      }, { responsive: true });
+      const hpd = document.getElementById('plot');
+      hpd.removeAllListeners('plotly_click');
+      hpd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const allVals = DATA[kh];
+          const binSize = (Math.max(...vals) - Math.min(...vals)) / nbins;
+          const pt = d.points[0];
+          const binLow = pt.x - binSize / 2, binHigh = pt.x + binSize / 2;
+          const binIdxs = [];
+          for (let i = 0; i < TRACKS.length; i++) {
+            const v = allVals[i];
+            if (v !== null && isFinite(v) && v >= binLow && v < binHigh) binIdxs.push(i);
+          }
+          populateTrackList(binIdxs);
+        }
+      });
+      document.getElementById('info-bar').textContent = kh + ' | n=' + n + ' | \u03BC=' + m.toFixed(3) + ' | \u03C3=' + s.toFixed(3) + ' | bins=' + nbins;
+    }
+
+    // ---- RADAR -----------------------------------------------------------------
+    let _radarSelections = new Set(); // e.g., 'bpm_0', 'bpm_1'
+
+    function updateRadar() {
+      const tIdx = TRACKS.indexOf(globalActiveTrack);
+      if (tIdx < 0) return;
+      const cf = CURATED.filter(f => FEATURES.includes(f) && DATA[f][tIdx] !== null && isFinite(DATA[f][tIdx]));
+      if (!cf.length) return;
+
+      const rInner = [], rMid = [], rOuter = [];
+      const cInner = [], cMid = [], cOuter = [];
+      const hInner = [], hMid = [], hOuter = [];
+      const lInner = [], lMid = [], lOuter = [];
+      const wInner = [], wMid = [], wOuter = [];
+
+      const labels = cf.map(shortLabel);
+      const filterStrings = [];
+      const filterRanges = {};
+
+      cf.forEach((f, i) => {
+        const valid = DATA[f].filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
+        const mn = valid[Math.floor(valid.length * 0.01)] || Math.min(...valid);
+        const mx = valid[Math.floor(valid.length * 0.99)] || Math.max(...valid);
+
+        const rawM = mean(valid);
+        const rawT = DATA[f][tIdx];
+
+        const clmp = x => Math.max(0, Math.min(1, (x - mn) / (mx - mn)));
+        const normM = clmp(rawM);
+        const normT = clmp(rawT);
+
+        const tGtM = rawT >= rawM;
+        const v1 = Math.min(normT, normM);
+        const v2 = Math.max(normT, normM);
+
+        rInner.push(v1);
+        rMid.push(v2 - v1);
+        rOuter.push(1.0 - v2);
+
+        const u = UNITS[f] && UNITS[f] !== '-' ? UNITS[f] : '';
+        const fmt = x => x.toFixed(2) + (u ? ' ' + u : '');
+
+        const sel0 = _radarSelections.has(f + '_0');
+        const sel1 = _radarSelections.has(f + '_1');
+        const sel2 = _radarSelections.has(f + '_2');
+
+        if (tGtM) {
+          cInner.push('rgba(233, 69, 96, 0.4)');
+          cMid.push('rgba(233, 69, 96, 0.9)');
+          hInner.push(`Below Mean (< ${fmt(rawM)})`);
+          hMid.push(`Above Mean, Below Track (${fmt(rawM)} to ${fmt(rawT)})`);
+        } else {
+          cInner.push('rgba(0, 210, 255, 0.9)');
+          cMid.push('rgba(180, 180, 180, 0.3)');
+          hInner.push(`Below Track (< ${fmt(rawT)})`);
+          hMid.push(`Above Track, Below Mean (${fmt(rawT)} to ${fmt(rawM)})`);
+        }
+        cOuter.push('rgba(255, 255, 255, 0.04)');
+        hOuter.push(`Above ${tGtM ? 'Track' : 'Mean'} (> ${fmt(Math.max(rawT, rawM))})`);
+
+        lInner.push(sel0 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wInner.push(sel0 ? 2 : 0.5);
+        lMid.push(sel1 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wMid.push(sel1 ? 2 : 0.5);
+        lOuter.push(sel2 ? '#ffd700' : 'rgba(0,0,0,0.5)'); wOuter.push(sel2 ? 2 : 0.5);
+
+        if (sel0 || sel1 || sel2) {
+          let low = -Infinity, high = Infinity;
+          const b1 = Math.min(rawT, rawM);
+          const b2 = Math.max(rawT, rawM);
+          if (sel0 && sel1 && sel2) { }
+          else if (sel0 && sel1) { high = b2; }
+          else if (sel1 && sel2) { low = b1; }
+          else if (sel0 && sel2) { }
+          else if (sel0) { high = b1; }
+          else if (sel1) { low = b1; high = b2; }
+          else if (sel2) { low = b2; }
+
+          filterRanges[f] = { low, high, sel0, sel1, sel2, b1, b2 };
+
+          let text = shortLabel(f) + ' ';
+          if (sel0 && !sel1 && !sel2) text += `< ${fmt(b1)}`;
+          else if (!sel0 && sel1 && !sel2) text += `[${fmt(b1)} to ${fmt(b2)}]`;
+          else if (!sel0 && !sel1 && sel2) text += `> ${fmt(b2)}`;
+          else if (sel0 && sel1 && !sel2) text += `< ${fmt(b2)}`;
+          else if (!sel0 && sel1 && sel2) text += `> ${fmt(b1)}`;
+          else if (sel0 && !sel1 && sel2) text += `< ${fmt(b1)} OR > ${fmt(b2)}`;
+
+          filterStrings.push(`<span style="background:rgba(255,215,0,0.2);padding:2px 4px;border-radius:3px;">${text}</span>`);
+        }
+      });
+
+      if (Object.keys(filterRanges).length > 0) {
+        const fd = [];
+        for (let t = 0; t < TRACKS.length; t++) {
+          if (t === tIdx) continue;
+          let match = true;
+          for (const [f, bounds] of Object.entries(filterRanges)) {
+            const v = DATA[f][t];
+            if (v === null || !isFinite(v)) { match = false; break; }
+            if (bounds.sel0 && !bounds.sel1 && bounds.sel2) {
+              if (v >= bounds.b1 && v <= bounds.b2) { match = false; break; }
+            } else {
+              if (v < bounds.low || v > bounds.high) { match = false; break; }
+            }
+          }
+          if (match) fd.push(t);
+        }
+        populateTrackList(fd.slice(0, 150));
+      } else {
+        clearTrackList();
+      }
+
+      Plotly.react('plot', [
+        {
+          type: 'barpolar', r: rInner, theta: labels, name: 'Inner',
+          marker: { color: cInner, line: { color: lInner, width: wInner } }, hovertext: hInner, hoverinfo: 'text'
+        },
+        {
+          type: 'barpolar', r: rMid, theta: labels, name: 'Mid',
+          marker: { color: cMid, line: { color: lMid, width: wMid } }, hovertext: hMid, hoverinfo: 'text'
+        },
+        {
+          type: 'barpolar', r: rOuter, theta: labels, name: 'Outer',
+          marker: { color: cOuter, line: { color: lOuter, width: wOuter } }, hovertext: hOuter, hoverinfo: 'text'
+        },
+      ], {
+        title: { text: 'Feature Radar: ' + globalActiveTrack, font: { size: 14 } },
+        polar: {
+          barmode: 'stack',
+          radialaxis: { visible: true, showticklabels: false, range: [0, 1.0], gridcolor: '#333355' },
+          angularaxis: { tickfont: { size: 10 }, gridcolor: '#333355' }, bgcolor: '#16213e'
+        },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', font: { color: '#cccccc' },
+        showlegend: false,
+        margin: { t: 60, b: 30, l: 30, r: 30 }
+      }, { responsive: true });
+
+      let infoHtml = `Radar: <b>${globalActiveTrack}</b> | Click bars to toggle region filters`;
+      if (filterStrings.length > 0) infoHtml += ` | ` + filterStrings.join(' ');
+      document.getElementById('info-bar').innerHTML = infoHtml;
+
+      handleRadarClick();
+    }
+
+    // ---- HEATMAP ---------------------------------------------------------------
+    function updateHeatmap() {
+      const df = getDispFeatures().slice(0, 40);
+      const n = df.length;
+      const mat = df.map((fi, i) => df.map((fj, j) => {
+        if (i === j) return 1.0;
+        const dx = DATA[fi], dy = DATA[fj];
+        const px = [], py = [];
+        for (let k = 0; k < TRACKS.length; k++)
+          if (dx[k] !== null && dy[k] !== null && isFinite(dx[k]) && isFinite(dy[k])) { px.push(dx[k]); py.push(dy[k]); }
+        return corrcoef(px, py);
+      }));
+      Plotly.react('plot', [{
+        type: 'heatmap', x: df, y: df, z: mat,
+        colorscale: [[0, '#00d2ff'], [0.5, '#1a1a2e'], [1, '#e94560']],
+        zmin: -1, zmax: 1, hoverongaps: false,
+        hovertemplate: '<b>%{y}</b> vs <b>%{x}</b><br>r = %{z:.3f}<extra></extra>'
+      }], {
+        title: { text: 'Pearson r Correlation Matrix (' + n + ' features)', font: { size: 15 } },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e',
+        font: { color: '#cccccc', size: 10 },
+        xaxis: { tickangle: -45, automargin: true }, yaxis: { automargin: true },
+        margin: { t: 46, b: 10, l: 10, r: 10 }
+      }, { responsive: true });
+      document.getElementById('plot').on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          if (pt.x !== pt.y) {
+            const sx = document.getElementById('sel-x'), sy = document.getElementById('sel-y');
+            if (sx && sy) { sx.value = pt.x; sy.value = pt.y; }
+            setMode('scatter');
+          }
+        }
+      });
+      document.getElementById('info-bar').textContent = 'Pearson r | ' + n + ' features | click a cell to scatter';
+    }
+
+    // ---- PARALLEL --------------------------------------------------------------
+    function updateParallel() {
+      const cf = CURATED.filter(f => FEATURES.includes(f));
+      const dims = cf.map(f => ({
+        label: shortLabel(f),
+        values: TRACKS.map((_, i) => DATA[f][i] !== null && isFinite(DATA[f][i]) ? DATA[f][i] : null)
+      }));
+      const colorVals = TRACKS.map((_, i) => DATA[cf[0]] && DATA[cf[0]][i] !== null ? DATA[cf[0]][i] : 0);
+      Plotly.react('plot', [{
+        type: 'parcoords',
+        line: { color: colorVals, colorscale: 'Viridis', showscale: true, colorbar: { title: cf[0], thickness: 12 } },
+        dimensions: dims
+      }], {
+        title: { text: 'Parallel Coordinates \u2014 ' + cf.length + ' curated features', font: { size: 15 } },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', font: { color: '#cccccc', size: 10 },
+        margin: { t: 60, b: 20, l: 30, r: 60 }
+      }, { responsive: true });
+      document.getElementById('info-bar').textContent = 'Parallel coords | ' + cf.length + ' curated features | ' + TRACKS.length + ' tracks | drag bands to filter';
+      document.getElementById('plot').on('plotly_restyle', function () {
+        try {
+          const plotDiv = document.getElementById('plot');
+          const trace = plotDiv.data[0];
+          if (!trace || !trace.dimensions) return;
+          const constraints = trace.dimensions.map(d => d.constraintrange || null);
+          if (constraints.every(c => c === null)) { clearTrackList(); return; }
+          const filteredIdxs = [];
+          for (let i = 0; i < TRACKS.length; i++) {
+            let pass = true;
+            for (let di = 0; di < constraints.length; di++) {
+              if (!constraints[di]) continue;
+              const v = trace.dimensions[di].values[i];
+              if (v === null || !isFinite(v) || v < constraints[di][0] || v > constraints[di][1]) { pass = false; break; }
+            }
+            if (pass) filteredIdxs.push(i);
+          }
+          populateTrackList(filteredIdxs);
+        } catch (e) { }
+      });
+    }
+
+    // ---- SIMILARITY ------------------------------------------------------------
+    function updateSimilarity() {
+      const refName = globalActiveTrack;
+      const refIdx = TRACKS.indexOf(refName);
+      if (refIdx < 0) return;
+      const kxp = document.getElementById('sim-xp').value;
+      const kxn = document.getElementById('sim-xn').value;
+      const kyp = document.getElementById('sim-yp').value;
+      const kyn = document.getElementById('sim-yn').value;
+      if (!kxp || !kxn || !kyp || !kyn) return;
+      const dxp = DATA[kxp], dxn = DATA[kxn], dyp = DATA[kyp], dyn = DATA[kyn];
+      const idxs = [];
+      for (let i = 0; i < TRACKS.length; i++)
+        if (dxp[i] !== null && dxn[i] !== null && dyp[i] !== null && dyn[i] !== null) idxs.push(i);
+      if (!idxs.length) return;
+      const nxp = norm01(idxs.map(i => dxp[i])), nxn = norm01(idxs.map(i => dxn[i]));
+      const nyp = norm01(idxs.map(i => dyp[i])), nyn = norm01(idxs.map(i => dyn[i]));
+      const ax = nxp.map((v, i) => v - nxn[i]), ay = nyp.map((v, i) => v - nyn[i]);
+      const rPos = idxs.indexOf(refIdx);
+      if (rPos < 0) return;
+      const rx = ax[rPos], ry = ay[rPos];
+      const relX = ax.map(v => v - rx), relY = ay.map(v => v - ry);
+      const dists = relX.map((x, i) => Math.sqrt(x * x + relY[i] * relY[i]));
+      const maxD = Math.max(...dists.filter((_, i) => idxs[i] !== refIdx), 0.01);
+      const oX = [], oY = [], oN = [], oD = [], oI = [];
+      idxs.forEach((idx, j) => {
+        if (idx === refIdx) return;
+        oX.push(relX[j]); oY.push(relY[j]); oN.push(TRACKS[idx]);
+        oD.push(dists[j]); oI.push(idx);
+      });
+      const hover = oN.map((n, j) => '<b>' + n + '</b><br>dist: ' + oD[j].toFixed(3));
+      Plotly.react('plot', [
+        {
+          x: oX, y: oY, mode: 'markers', type: 'scattergl',
+          marker: {
+            color: oD, colorscale: [[0, '#e94560'], [0.5, '#552244'], [1, '#111133']],
+            cmin: 0, cmax: maxD, size: 6, opacity: 0.75,
+            colorbar: { title: 'dist', thickness: 12 }
+          },
+          hovertext: hover, hoverinfo: 'text', name: 'tracks', customdata: oI
+        },
+        {
+          x: [0], y: [0], mode: 'markers+text', type: 'scatter',
+          marker: { symbol: 'star', size: 20, color: '#ffd700', line: { color: 'white', width: 1 } },
+          text: [refName], textposition: 'top center', textfont: { color: '#ffd700', size: 11 },
+          name: refName + ' (ref)', hoverinfo: 'text',
+          hovertext: ['<b>' + refName + '</b> (reference)']
+        }
+      ], {
+        title: { text: 'Similarity Map \u2014 ' + refName, font: { size: 14 } },
+        xaxis: { title: '\u2190 ' + kxn + '  |  ' + kxp + ' \u2192', range: [-1.35, 1.35], zeroline: true, zerolinecolor: '#555577' },
+        yaxis: { title: '\u2190 ' + kyn + '  |  ' + kyp + ' \u2192', range: [-1.35, 1.35], zeroline: true, zerolinecolor: '#555577', scaleanchor: 'x' },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e',
+        font: { color: '#cccccc' }, hoverlabel: { bgcolor: '#0f3460', font: { size: 12, color: 'white' } },
+        showlegend: false,
+        shapes: [
+          { type: 'circle', x0: -0.5, y0: -0.5, x1: 0.5, y1: 0.5, line: { color: '#3a3a5a', width: 1, dash: 'dot' } },
+          { type: 'circle', x0: -1.0, y0: -1.0, x1: 1.0, y1: 1.0, line: { color: '#3a3a5a', width: 1, dash: 'dot' } }
+        ],
+        margin: { t: 46, b: 48, l: 58, r: 60 }
+      }, { responsive: true });
+      const spd = document.getElementById('plot');
+      spd.removeAllListeners('plotly_click');
+      spd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          if (pt.customdata !== undefined) {
+            document.getElementById('sel-sim-ref').value = TRACKS[pt.customdata];
+            updatePlot();
+            return;
+          }
+        }
+      });
+      document.getElementById('info-bar').textContent = 'Similarity: ' + refName + ' | ' + idxs.length + ' tracks | click to set reference';
+      updateSimNN();
+    }
+
+    // ---- Most Similar (NN) sidebar ---------------------------------------------
+    function updateSimNN() {
+      const refName = document.getElementById('sel-sim-ref').value;
+      const refIdx = TRACKS.indexOf(refName);
+      if (refIdx < 0) return;
+      const nnFeats = [];
+      for (let i = 1; i <= 5; i++) {
+        const sel = document.getElementById('nn-f' + i);
+        if (sel && sel.value) nnFeats.push(sel.value);
+      }
+      if (!nnFeats.length) return;
+      const refVals = nnFeats.map(f => DATA[f] ? DATA[f][refIdx] : null);
+      const ranges = nnFeats.map(f => {
+        const v = DATA[f].filter(x => x !== null && isFinite(x));
+        return { min: Math.min(...v), max: Math.max(...v) };
+      });
+      const refNorm = nnFeats.map((f, i) => {
+        const v = refVals[i]; if (v === null) return 0.5;
+        const r = ranges[i]; return r.max - r.min < 1e-10 ? 0.5 : (v - r.min) / (r.max - r.min);
+      });
+      // Compute distances
+      const td = [];
+      for (let t = 0; t < TRACKS.length; t++) {
+        if (t === refIdx) continue;
+        let d2 = 0, cnt = 0;
+        for (let fi = 0; fi < nnFeats.length; fi++) {
+          const v = DATA[nnFeats[fi]] ? DATA[nnFeats[fi]][t] : null;
+          if (v !== null && isFinite(v) && refVals[fi] !== null) {
+            const r = ranges[fi];
+            const vn = r.max - r.min < 1e-10 ? 0.5 : (v - r.min) / (r.max - r.min);
+            d2 += (vn - refNorm[fi]) ** 2; cnt++;
+          }
+        }
+        if (cnt > 0) td.push({ idx: t, dist: Math.sqrt(d2 / cnt) });
+      }
+      td.sort((a, b) => a.dist - b.dist);
+      const top = td.slice(0, 20);
+      // Render track list
+      const list = document.getElementById('nn-track-list');
+      if (!list) return;
+      // Render legend
+      const legend = '<div style="font-size:9px;color:#777;padding:4px 0 6px;border-bottom:1px solid #1a2040;margin-bottom:4px;">' +
+        '<span style="display:inline-block;width:12px;height:5px;background:#e94560;border-radius:1px;vertical-align:middle;"></span> track value &nbsp;' +
+        '<span style="display:inline-block;width:1px;height:7px;background:#ffd700;vertical-align:middle;"></span> reference &nbsp;' +
+        '<span style="color:#555;">bg = feature range</span></div>';
+      list.innerHTML = legend + top.map((item, rank) => {
+        const t = item.idx;
+        // External link
+        let linkHtml = '';
+        if (SPOTIFY[t]) linkHtml = '<a href="https://open.spotify.com/track/' + SPOTIFY[t] + '" target="_blank" style="color:#1db954;font-size:10px;text-decoration:none;" title="Spotify">\uD83C\uDFB5</a>';
+        else linkHtml = '<a href="https://tidal.com/search?q=' + encodeURIComponent(searchName(TRACKS[t])) + '" target="_blank" style="color:#00d2ff;font-size:10px;text-decoration:none;" title="Tidal">\uD83C\uDF0A</a>';
+        if (MBIDS[t]) linkHtml += ' <a href="https://musicbrainz.org/recording/' + MBIDS[t] + '" target="_blank" style="color:#e94560;font-size:10px;text-decoration:none;" title="MusicBrainz">\uD83D\uDCC0</a>';
+        let barsHtml = '<div style="display:flex;gap:2px;margin-top:2px;">';
+        nnFeats.forEach((f, fi) => {
+          const v = DATA[f] ? DATA[f][t] : null;
+          const r = ranges[fi];
+          const frac = v !== null && isFinite(v) && r.max - r.min > 1e-10 ? (v - r.min) / (r.max - r.min) : 0.5;
+          const rf = refNorm[fi];
+          barsHtml += '<div title="' + f + ': ' + (v !== null ? v.toFixed(2) : 'N/A') + '" style="position:relative;width:22px;height:6px;background:#0f3460;border-radius:1px;overflow:visible;">' +
+            '<div style="width:' + (frac * 100) + '%;height:6px;background:#e94560;opacity:0.8;border-radius:1px;"></div>' +
+            '<div style="position:absolute;top:-1px;left:' + Math.round(rf * 100) + '%;width:1px;height:8px;background:#ffd700;"></div>' +
+            '</div>';
+        });
+        barsHtml += '</div>';
+        return '<div class="nn-row" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + t + '];setMode(\'radar\')">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:10px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + (rank + 1) + '. ' + TRACKS[t] + '</span><span style="flex-shrink:0;margin-left:4px;">' + linkHtml + '</span></div>' +
+          '<div style="font-size:9px;color:#666;">' + item.dist.toFixed(3) + '</div>' +
+          barsHtml + '</div>';
+      }).join('');
+    }
+
+    // ---- Track List Panel -------------------------------------------------------
+    let _trackListIdxs = [];
+    function populateTrackList(idxs) {
+      _trackListIdxs = idxs;
+      const title = document.getElementById('tl-title');
+      if (title) title.textContent = 'Tracks (' + idxs.length + ')';
+      refreshTrackListLinks();
+    }
+    function refreshTrackListLinks() {
+      const body = document.getElementById('track-list-body');
+      if (!body) return;
+      const svc = document.getElementById('tl-service').value;
+      body.innerHTML = _trackListIdxs.map(idx => {
+        const name = TRACKS[idx];
+        let href = '', hasLink = true;
+        if (svc === 'spotify') { href = SPOTIFY[idx] ? 'https://open.spotify.com/track/' + SPOTIFY[idx] : ''; hasLink = !!SPOTIFY[idx]; }
+        else if (svc === 'tidal') { href = 'https://tidal.com/search?q=' + encodeURIComponent(searchName(name)); }
+        else if (svc === 'musicbrainz') { href = MBIDS[idx] ? 'https://musicbrainz.org/recording/' + MBIDS[idx] : ''; hasLink = !!MBIDS[idx]; }
+        else if (svc === 'beatport') { href = 'https://www.beatport.com/search?q=' + encodeURIComponent(searchName(name)); }
+        const lk = hasLink && href ? '<a class="tl-link" href="' + href + '" target="_blank">\u2197</a>' : '<span class="tl-link" style="opacity:0.3;">\u2014</span>';
+        return '<div class="tl-item" onclick="document.getElementById(\'sel-radar-track\').value=TRACKS[' + idx + '];setMode(\'radar\')">' + '<span class="tl-name" title="' + name + '">' + name + '</span>' + lk + '</div>';
+      }).join('');
+    }
+    function clearTrackList() {
+      _trackListIdxs = [];
+      const t = document.getElementById('tl-title'); if (t) t.textContent = 'Tracks';
+      const b = document.getElementById('track-list-body');
+      if (b) b.innerHTML = '<div style="padding:12px;color:#555;font-size:11px;text-align:center;">Select points, click histogram bars, or drag parallel bands</div>';
+    }
+
+    // ---- Radar multi-select -----------------------------------------------------
+    function handleRadarClick() {
+      const pd = document.getElementById('plot');
+      pd.removeAllListeners('plotly_click');
+      pd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const label = pt.theta;
+          const curveIdx = pt.curveNumber; // 0=Inner, 1=Mid, 2=Outer
+          if (!label || curveIdx > 2) return;
+
+          const tIdx = TRACKS.indexOf(globalActiveTrack);
+          if (tIdx < 0) return;
+          const cf = CURATED.filter(f => FEATURES.includes(f) && DATA[f][tIdx] !== null && isFinite(DATA[f][tIdx]));
+          const fIdx = cf.map(shortLabel).indexOf(label);
+          if (fIdx < 0) return;
+          const feat = cf[fIdx];
+
+          const blockKey = feat + '_' + curveIdx;
+          if (_radarSelections.has(blockKey)) _radarSelections.delete(blockKey);
+          else _radarSelections.add(blockKey);
+
+          updateRadar();
+        }
+      });
+    }
+
+    // ---- CLASSES ---------------------------------------------------------------
+    const CLASS_COLORS = [
+      '#ff4b4b', '#4cd137', '#00d2ff', '#fbc531', '#9c88ff', '#ff79c6', '#ff9f43', '#0097e6', '#bdc581', '#fd7272',
+      '#5f27cd', '#55efc4', '#81ecec', '#ff7675', '#a29bfe', '#e1b12c', '#00cec9', '#e84393', '#badc58', '#c8d6e5'
+    ];
+    function updateClasses() {
+      if (typeof CLASSES === 'undefined') { document.getElementById('info-bar').textContent = 'Classes data not loaded'; return; }
+      const kx = document.getElementById('sel-x').value;
+      const ky = document.getElementById('sel-y').value;
+      const classKey = document.getElementById('cls-by').value;
+      const showTrend = document.getElementById('chk-class-trend').checked;
+      if (!kx || !ky || !classKey) return;
+      const dx = DATA[kx], dy = DATA[ky], labels = CLASSES[classKey];
+      if (!dx || !dy || !labels) return;
+      // Parse class labels (handle stringified dicts/lists)
+      const parseLabel = v => {
+        if (!v || v === '{}' || v === '[]' || v === "['']" || v.trim() === '') return '';
+        // Dict format: pick top key
+        if (v.startsWith('{')) {
+          const m = v.match(/['"]([^'"]+)['"]/); return m ? m[1] : '';
+        }
+        // List format: pick first item
+        if (v.startsWith('[')) {
+          const m = v.match(/['"]([^'"]+)['"]/); return m ? m[1] : '';
+        }
+        return v;
+      };
+      // Build groups
+      const groups = {};
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (dx[i] === null || dy[i] === null || !isFinite(dx[i]) || !isFinite(dy[i])) continue;
+        let lbl = parseLabel(labels[i]);
+        if (!lbl) lbl = '(unknown)';
+        if (!groups[lbl]) groups[lbl] = { x: [], y: [], names: [], idxs: [] };
+        groups[lbl].x.push(dx[i]); groups[lbl].y.push(dy[i]);
+        groups[lbl].names.push(TRACKS[i]); groups[lbl].idxs.push(i);
+      }
+      // Sort by count, keep top 20 + merge rest into 'other'
+      let sorted = Object.entries(groups).sort((a, b) => b[1].x.length - a[1].x.length);
+      if (sorted.length > 20) {
+        const top = sorted.slice(0, 20);
+        const rest = sorted.slice(20);
+        const other = { x: [], y: [], names: [], idxs: [] };
+        rest.forEach(([, g]) => { other.x.push(...g.x); other.y.push(...g.y); other.names.push(...g.names); other.idxs.push(...g.idxs); });
+        top.push(['(other)', other]);
+        sorted = top;
+      }
+      const ux = UNITS[kx] && UNITS[kx] !== '-' ? ' [' + UNITS[kx] + ']' : '';
+      const uy = UNITS[ky] && UNITS[ky] !== '-' ? ' [' + UNITS[ky] + ']' : '';
+      const traces = sorted.map(([lbl, g], ci) => ({
+        x: g.x, y: g.y, mode: 'markers', type: 'scattergl',
+        marker: { color: CLASS_COLORS[ci % CLASS_COLORS.length], size: 5, opacity: 0.7 },
+        hovertext: g.names.map((n, j) => '<b>' + n + '</b><br>' + kx + ': ' + g.x[j].toFixed(3) + '<br>' + ky + ': ' + g.y[j].toFixed(3) + '<br>' + classKey.replace(/_/g, ' ') + ': ' + lbl),
+        hoverinfo: 'text', name: lbl + ' (' + g.x.length + ')',
+        legendgroup: lbl,
+        customdata: g.idxs
+      }));
+
+      if (showTrend) {
+        sorted.forEach(([lbl, g], ci) => {
+          if (g.x.length < 3) return;
+          const n = g.x.length;
+          const mx = g.x.reduce((a, b) => a + b) / n, my = g.y.reduce((a, b) => a + b) / n;
+          let num = 0, den = 0;
+          for (let i = 0; i < n; i++) { num += (g.x[i] - mx) * (g.y[i] - my); den += (g.x[i] - mx) ** 2; }
+          if (den === 0) return;
+          const s = num / den, ic = my - s * mx;
+          const xmn = Math.min(...g.x), xmx = Math.max(...g.x);
+          traces.push({
+            x: [xmn, xmx], y: [s * xmn + ic, s * xmx + ic], mode: 'lines',
+            line: { color: CLASS_COLORS[ci % CLASS_COLORS.length], width: 2, dash: 'dash' },
+            name: lbl + ' (trend)', hoverinfo: 'skip',
+            legendgroup: lbl,
+            showlegend: false
+          });
+        });
+      }
+
+      Plotly.react('plot', traces, {
+        title: { text: kx + ' vs ' + ky + ' by ' + classKey.replace(/_/g, ' '), font: { size: 15 } },
+        xaxis: { title: kx + ux }, yaxis: { title: ky + uy },
+        template: 'plotly_dark', paper_bgcolor: '#1a1a2e', plot_bgcolor: '#16213e',
+        font: { color: '#cccccc' }, hoverlabel: { bgcolor: '#0f3460', font: { size: 12, color: 'white' } },
+        showlegend: true, legend: { x: 1.02, y: 1, bgcolor: 'rgba(15,52,96,0.8)', font: { size: 10 } },
+        margin: { t: 46, b: 48, l: 58, r: 180 }
+      }, { responsive: true });
+      const cpd = document.getElementById('plot');
+      cpd.removeAllListeners('plotly_click');
+      cpd.on('plotly_click', function (d) {
+        if (d.points && d.points.length > 0) {
+          const pt = d.points[0];
+          const idx = pt.customdata;
+          if (idx !== undefined) {
+            document.getElementById('sel-radar-track').value = TRACKS[idx];
+            setMode('radar');
+          }
+        }
+      });
+      const totalTracks = sorted.reduce((s, [, g]) => s + g.x.length, 0);
+      document.getElementById('info-bar').textContent = 'Classes: ' + classKey.replace(/_/g, ' ') + ' | ' + sorted.length + ' groups | ' + totalTracks + ' tracks';
+    }
+
+    // ---- Caption Popup ---------------------------------------------------------
+    let _captionsLoaded = false, _captionsLoading = false;
+    function toggleCaptions() {
+      const on = document.getElementById('chk-captions').checked;
+      if (on && !_captionsLoaded && !_captionsLoading) {
+        _captionsLoading = true;
+        document.getElementById('info-bar').textContent = 'Loading captions (8MB)...';
+        const s = document.createElement('script');
+        s.src = 'feature_explorer_captions.js';
+        s.onload = function () {
+          _captionsLoaded = true; _captionsLoading = false;
+          document.getElementById('info-bar').textContent = 'Captions loaded \u2714';
+          setupCaptionHover();
+        };
+        s.onerror = function () {
+          _captionsLoading = false;
+          document.getElementById('info-bar').textContent = '\u26a0 Failed to load captions';
+          document.getElementById('chk-captions').checked = false;
+        };
+        document.head.appendChild(s);
+      } else if (on && _captionsLoaded) {
+        setupCaptionHover();
+      } else {
+        removeCaptionHover();
+        document.getElementById('caption-popup').style.display = 'none';
+      }
+    }
+    let _capHoverBound = false;
+    function setupCaptionHover() {
+      if (_capHoverBound) return;
+      _capHoverBound = true;
+      const pd = document.getElementById('plot');
+      pd.on('plotly_hover', onCaptionHover);
+      pd.on('plotly_unhover', onCaptionUnhover);
+    }
+    function removeCaptionHover() {
+      _capHoverBound = false;
+      const pd = document.getElementById('plot');
+      pd.removeAllListeners('plotly_hover');
+      pd.removeAllListeners('plotly_unhover');
+    }
+    function onCaptionHover(d) {
+      if (!document.getElementById('chk-captions').checked) return;
+      if (!d.points || !d.points.length) return;
+      const pt = d.points[0];
+      const idx = pt.customdata;
+      if (idx === undefined || typeof CAPTIONS === 'undefined') return;
+      const popup = document.getElementById('caption-popup');
+      let html = '<h4>' + TRACKS[idx] + '</h4>';
+      Object.keys(CAPTIONS).forEach(key => {
+        const val = CAPTIONS[key][idx];
+        if (!val || val.trim() === '') return;
+        const label = key.replace(/^music_flamingo_?/, '').replace(/_/g, ' ') || 'full';
+        html += '<div class="cap-section"><div class="cap-label">' + label + '</div><div class="cap-text">' + val.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div></div>';
+      });
+      popup.innerHTML = html;
+      popup.style.display = 'block';
+    }
+    function onCaptionUnhover() {
+      document.getElementById('caption-popup').style.display = 'none';
+    }
+
+    // ---- Init ------------------------------------------------------------------
+    document.getElementById('sim-search').addEventListener('input', function (e) {
+      const q = e.target.value.toLowerCase();
+      const resDiv = document.getElementById('sim-search-results');
+      if (q.length < 3) {
+        resDiv.style.display = 'none';
+        return;
+      }
+      resDiv.innerHTML = '';
+      let hits = 0;
+      for (let i = 0; i < TRACKS.length; i++) {
+        if (TRACKS[i].toLowerCase().includes(q)) {
+          const div = document.createElement('div');
+          div.className = 'sim-search-item';
+          div.textContent = TRACKS[i];
+          div.onclick = function () {
+            document.getElementById('sim-search').value = TRACKS[i];
+            document.getElementById('sel-sim-ref').value = TRACKS[i];
+            resDiv.style.display = 'none';
+            updatePlot();
+          };
+          resDiv.appendChild(div);
+          if (++hits >= 150) break;
+        }
+      }
+      if (hits === 0) {
+        resDiv.innerHTML = '<div class="sim-search-item" style="color:#888;cursor:default;">No matches</div>';
+      }
+      resDiv.style.display = 'block';
+    });
+    document.getElementById('sim-search').addEventListener('focus', function (e) { e.target.dispatchEvent(new Event('input')); });
+    document.addEventListener('click', function (e) {
+      const c = document.getElementById('sim-search-container');
+      if (c && !c.contains(e.target)) document.getElementById('sim-search-results').style.display = 'none';
+    });
+
+    clearTrackList();
+    populateSelects();
+    updatePlot();
+    window.addEventListener('resize', () => Plotly.Plots.resize('plot'));
+
+  

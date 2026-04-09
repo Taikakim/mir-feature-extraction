@@ -1,0 +1,1443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Latent Shape Explorer</title>
+  <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111; color: #eee;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex; height: 100vh; flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      background: #222; padding: 10px; border-bottom: 1px solid #444;
+      display: flex; gap: 15px; align-items: center;
+      flex-wrap: wrap;
+    }
+    .panel {
+      display: flex; flex-direction: column; gap: 5px;
+      padding-right: 15px; border-right: 1px solid #444;
+    }
+    .panel:last-child { border-right: none; }
+    label { font-size: 11px; text-transform: uppercase; color: #888; }
+    select, button {
+      background: #333; color: #eee; border: 1px solid #555;
+      padding: 5px 8px; border-radius: 4px; font-size: 12px;
+      outline: none; cursor: pointer;
+    }
+    select:hover, button:hover { border-color: #00d2ff; }
+    button.active { background: #00d2ff; color: #000; border-color: #00d2ff; }
+    
+    .loading {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      font-size: 20px; color: #00d2ff; display: none;
+    }
+
+    #main-container {
+      display: flex; flex: 1; min-height: 0; width: 100vw;
+    }
+    
+    #plot-container {
+      flex: 1; height: 100%; position: relative; width: 100%;
+    }
+    #plot { width: 100%; height: 100%; }
+
+    .legend-panel {
+      width: 250px; background: #1a1a1a;
+      border-left: 1px solid #444;
+      padding: 15px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .legend-item {
+      display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px;
+    }
+    .color-box { width: 14px; height: 14px; border-radius: 2px; }
+    
+    .stem-toggles {
+      display: flex; gap: 8px; align-items: center; border-left: 1px solid #444; padding-left: 15px; margin-left: 5px;
+    }
+    .chk-label {
+      display: flex; align-items: center; gap: 4px; font-size: 11px; color: #ccc; cursor: pointer;
+    }
+    .chk-label input { accent-color: #00d2ff; }
+
+    /* Crossfade panel */
+    #xfade-panel {
+      display: flex;
+      background: #181818;
+      border-top: 1px solid #383838;
+      padding: 8px 15px;
+      gap: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .xfade-section {
+      display: flex; gap: 8px; align-items: center;
+      padding-right: 14px; border-right: 1px solid #383838;
+    }
+    .xfade-section:last-child { border-right: none; }
+    .xfade-section label { font-size: 10px; text-transform: uppercase; color: #888; }
+    .stem-alpha {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+    }
+    .stem-alpha span { font-size: 9px; color: #888; }
+    .stem-alpha input[type=range] { width: 64px; accent-color: #ff9900; }
+    .beta-slider {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+    }
+    .beta-slider span { font-size: 9px; color: #aaa; }
+    .beta-slider input[type=range] { width: 60px; accent-color: #cc44ff; }
+    .mode-switch { display: flex; gap: 0; }
+    .mode-switch button {
+      background: #2a2a2a; color: #aaa; border: 1px solid #555;
+      padding: 4px 10px; font-size: 11px; border-radius: 0; cursor: pointer;
+      border-right: none;
+    }
+    .mode-switch button:first-child { border-radius: 4px 0 0 4px; }
+    .mode-switch button:last-child  { border-radius: 0 4px 4px 0; border-right: 1px solid #555; }
+    .mode-switch button.active { background: #ff9900; color: #000; border-color: #ff9900; }
+    #xf_fullmix_row { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    #xf_fullmix_row span { font-size: 9px; color: #888; }
+    #xf_fullmix_row input[type=range] { width: 120px; accent-color: #ff9900; }
+    #btn-xfade-play {
+      width: 110px; font-weight: bold;
+      background: #ff9900; color: #000; border: none;
+      padding: 5px 8px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    }
+    #alignment-bar {
+      width: 100%; height: 80px; display: block;
+      background: #0d0d0d; border-top: 1px solid #2a2a2a; border-bottom: 1px solid #2a2a2a;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="panel">
+    <label>Track A</label>
+    <select id="trackA_sel"></select>
+  </div>
+  <div class="panel">
+    <label>Crop A</label>
+    <select id="cropA_sel"></select>
+  </div>
+  <div class="panel">
+    <label>Track B (Compare)</label>
+    <select id="trackB_sel"><option value="">-- None --</option></select>
+  </div>
+  <div class="panel">
+    <label>Crop B</label>
+    <select id="cropB_sel"><option value="">-- None --</option></select>
+  </div>
+  <div class="panel">
+    <label>Mode</label>
+    <select id="mode_sel">
+      <option value="raw">Raw Trajectories</option>
+      <option value="hybrid">Hybrid 3D (Time = Z)</option>
+      <option value="diff">Difference (Full Mix - Stem)</option>
+      <option value="average">Moving Average (Smoothing)</option>
+    </select>
+  </div>
+  <div class="panel" style="flex-direction: row; align-items: flex-end; padding-bottom: 2px;">
+    <button id="btn_render">Render 3D</button>
+  </div>
+  <div class="stem-toggles">
+      <label class="chk-label"><input type="checkbox" id="chk_fullmix" checked> Full Mix</label>
+      <label class="chk-label"><input type="checkbox" id="chk_drums" checked> Drums</label>
+      <label class="chk-label"><input type="checkbox" id="chk_bass" checked> Bass</label>
+      <label class="chk-label"><input type="checkbox" id="chk_other" checked> Other</label>
+      <label class="chk-label"><input type="checkbox" id="chk_vocals" checked> Vocals</label>
+  </div>
+  <div id="sliders-panel" style="display: flex; gap: 10px; border-left: 1px solid #444; padding-left: 15px; flex-wrap: wrap; align-items: center;">
+      <span style="font-size: 11px; color:#888; text-transform:uppercase;">Manipulate:</span>
+      <!-- Sliders injected here -->
+  </div>
+  <div class="panel" style="flex-direction: row; align-items: flex-end; padding-bottom: 4px;">
+    <label class="chk-label" title="Average all crops of each track instead of using a single crop">
+      <input type="checkbox" id="chk_avg" style="accent-color:#4cd137;">
+      <span style="color:#4cd137;">Avg all crops</span>
+    </label>
+  </div>
+</header>
+
+<!-- Crossfade panel -->
+<div id="xfade-panel">
+  <div class="xfade-section">
+    <label>Crossfade Mode</label>
+    <div class="mode-switch">
+      <button id="xf_mode_ab"     class="active" data-mode="ab">Full-mix</button>
+      <button id="xf_mode_latent" data-mode="latent">Stem latents</button>
+      <button id="xf_mode_stems"  data-mode="stems">Stem audio</button>
+    </div>
+  </div>
+  <div class="xfade-section" id="xf_fullmix_section">
+    <label>A → B (α)</label>
+    <div id="xf_fullmix_row">
+      <input type="range" id="xf_mix" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_mix_val">0.50</span>
+    </div>
+  </div>
+  <div class="xfade-section" id="xf_stem_section">
+    <label>Stem A→B (α)</label>
+    <div class="stem-alpha">
+      <span>Drums</span>
+      <input type="range" id="xf_drums" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_drums_val">0.50</span>
+    </div>
+    <div class="stem-alpha">
+      <span>Bass</span>
+      <input type="range" id="xf_bass" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_bass_val">0.50</span>
+    </div>
+    <div class="stem-alpha">
+      <span>Other</span>
+      <input type="range" id="xf_other" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_other_val">0.50</span>
+    </div>
+    <div class="stem-alpha">
+      <span>Vocals</span>
+      <input type="range" id="xf_vocals" min="0" max="1" step="0.01" value="0.5">
+      <span id="xf_vocals_val">0.50</span>
+    </div>
+  </div>
+  <div class="xfade-section">
+    <label>Color Anchor</label>
+    <div class="beta-slider">
+      <span>β_A (A mix)</span>
+      <input type="range" id="xf_beta_a" min="0" max="1" step="0.01" value="0">
+      <span id="xf_beta_a_val">0.00</span>
+    </div>
+    <div class="beta-slider">
+      <span>β_B (B mix)</span>
+      <input type="range" id="xf_beta_b" min="0" max="1" step="0.01" value="0">
+      <span id="xf_beta_b_val">0.00</span>
+    </div>
+  </div>
+  <div class="xfade-section">
+    <label>Interp</label>
+    <select id="xf_interp" style="background:#222;color:#eee;border:1px solid #555;padding:4px 6px;border-radius:4px;font-size:12px;">
+      <option value="slerp">Slerp (spherical)</option>
+      <option value="lerp">Lerp (linear)</option>
+    </select>
+  </div>
+  <div class="xfade-section" style="border-right:none; align-items:center;">
+    <button id="btn_beatmatch" style="background:#444; color:#eee; border:1px solid #777; padding:4px 8px; border-radius:4px; font-weight:bold; cursor:pointer;" title="Align BPM and Key before crossfading">♫ Beat Match</button>
+    <div id="bm_info" style="font-size:10px; color:#aaa; margin-top:5px; text-align:center; min-height:14px;"></div>
+    <label style="font-size:11px;color:#ccc;display:flex;align-items:center;gap:5px;cursor:pointer;">
+      <input type="checkbox" id="chk_smart_loop" style="accent-color:#00d2ff;">
+      Smart loop
+    </label>
+    <span id="smart_loop_hint" style="font-size:10px;color:#888;display:none;"></span>
+  </div>
+  <div class="xfade-section">
+    <button id="btn_xfade_play">✕ Play Crossfade</button>
+    <span id="xfade_status" style="font-size:11px;color:#888;margin-left:8px;">Not loaded</span>
+  </div>
+</div>
+
+<canvas id="alignment-bar"></canvas>
+
+<div id="main-container">
+  <div id="plot-container">
+    <div id="plot"></div>
+    <div id="loader" class="loading">Loading...</div>
+  </div>
+  <div class="legend-panel" id="legend">
+    <h3 style="margin-bottom: 10px; font-size: 14px; color: #00d2ff;">Controls</h3>
+    <p style="font-size: 12px; color: #888; margin-bottom: 20px;">
+      Lines show the shape of the latent trajectory. Color gradients show time (Dark = Start, Bright = End).
+    </p>
+    <div id="legend_items"></div>
+  </div>
+</div>
+
+<script>
+  let BASE_URL = window.location.origin;
+  if(BASE_URL === "null" || BASE_URL.includes("file://")) {
+    BASE_URL = "http://127.0.0.1:7892";
+  }
+
+  const trackA_sel = document.getElementById("trackA_sel");
+  const cropA_sel = document.getElementById("cropA_sel");
+  const trackB_sel = document.getElementById("trackB_sel");
+  const cropB_sel = document.getElementById("cropB_sel");
+  const mode_sel = document.getElementById("mode_sel");
+  const btn_render = document.getElementById("btn_render");
+  const loader = document.getElementById("loader");
+  const legend_items = document.getElementById("legend_items");
+  // Stem toggles
+  const toggles = {
+      fullmix: document.getElementById("chk_fullmix"),
+      drums: document.getElementById("chk_drums"),
+      bass: document.getElementById("chk_bass"),
+      other: document.getElementById("chk_other"),
+      vocals: document.getElementById("chk_vocals")
+  };
+
+  toggles.fullmix.addEventListener('change', (e) => {
+      if (e.target.checked) {
+          toggles.drums.checked = false;
+          toggles.bass.checked = false;
+          toggles.other.checked = false;
+          toggles.vocals.checked = false;
+      } else {
+          // If they uncheck Full Mix but select nothing else, force it back on so there's always something
+          // Or let it be empty? Letting it be empty is fine, but visually confusing.
+          // We'll leave it as is.
+      }
+      renderPlot();
+  });
+
+  const stemKeys = ["drums", "bass", "other", "vocals"];
+  stemKeys.forEach(k => {
+      toggles[k].addEventListener('change', (e) => {
+          if (e.target.checked) {
+              toggles.fullmix.checked = false;
+          }
+          // If all stems are unchecked, auto-check Full Mix
+          if (!toggles.drums.checked && !toggles.bass.checked && 
+              !toggles.other.checked && !toggles.vocals.checked) {
+              toggles.fullmix.checked = true;
+          }
+          renderPlot();
+      });
+  });
+
+  // Latent Manipulation globals
+  let pcaComponents = null; // shape [3, 64]
+  let correlations = null;
+  const activeSliders = {}; // { featureName: { channels: [], amounts: [], value: 0 } }
+  
+  // Selected features to expose
+  const EXPOSED_FEATURES = {
+      "brightness": "Brightness", 
+      "rms_energy_bass": "Bass Energy", 
+      "danceability": "Danceability", 
+      "hardness": "Hardness",
+      "female_probability": "Female Voice"
+  };
+
+  // ---- Crossfade UI wiring ------------------------------------------------
+  const xfadePanel = document.getElementById("xfade-panel");
+  const btnXfadePlay = document.getElementById("btn_xfade_play");
+  const xfadeStatus = document.getElementById("xfade_status");
+  const btnBeatMatch = document.getElementById("btn_beatmatch");
+  const bmInfo = document.getElementById("bm_info");
+
+  // per-stem alpha sliders
+  const XF_STEMS = ["drums", "bass", "other", "vocals"];
+  const xfStemSliders = {};
+  const xfStemVals = {};
+  XF_STEMS.forEach(s => {
+    xfStemSliders[s] = document.getElementById(`xf_${s}`);
+    xfStemVals[s]   = document.getElementById(`xf_${s}_val`);
+    xfStemSliders[s].addEventListener("input", e => {
+      xfStemVals[s].textContent = parseFloat(e.target.value).toFixed(2);
+      renderGhostTrace();
+    });
+    // Reload audio on mouse-up with new alpha value
+    xfStemSliders[s].addEventListener("change", () => reloadXfadeIfPlaying());
+  });
+
+  const xfBetaA    = document.getElementById("xf_beta_a");
+  const xfBetaAVal = document.getElementById("xf_beta_a_val");
+  const xfBetaB    = document.getElementById("xf_beta_b");
+  const xfBetaBVal = document.getElementById("xf_beta_b_val");
+  const xfInterp   = document.getElementById("xf_interp");
+
+  xfBetaA.addEventListener("input", e => { xfBetaAVal.textContent = parseFloat(e.target.value).toFixed(2); });
+  xfBetaA.addEventListener("change", () => reloadXfadeIfPlaying());
+  xfBetaB.addEventListener("input", e => { xfBetaBVal.textContent = parseFloat(e.target.value).toFixed(2); });
+  xfBetaB.addEventListener("change", () => reloadXfadeIfPlaying());
+  xfInterp.addEventListener("change", () => reloadXfadeIfPlaying());
+
+  // ---- Crossfade audio state (must be declared before setXfMode is called) ---
+  let xfadeAudioCtx    = null;
+  let xfadeBuffer      = null;
+  let xfadeSourceNode  = null;
+  let xfadeAnimFrameId = null;
+  let xfadePlayStart   = 0;
+  let animationFrameId = null;
+
+  // ---- Mode switch --------------------------------------------------------
+  const xfModeButtons = document.querySelectorAll('.mode-switch button');
+  let xfMode = 'ab';  // 'ab' | 'latent' | 'stems'
+
+  function setXfMode(mode) {
+    xfMode = mode;
+    xfModeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    // Full-mix: show single α slider, hide per-stem sliders
+    const isFullMix = mode === 'ab';
+    document.getElementById('xf_fullmix_section').style.display = isFullMix ? '' : 'none';
+    document.getElementById('xf_stem_section').style.display    = isFullMix ? 'none' : '';
+    reloadXfadeIfPlaying();
+  }
+
+  xfModeButtons.forEach(b => b.addEventListener('click', () => setXfMode(b.dataset.mode)));
+  setXfMode('ab');  // initial state
+
+  // Wire the single-α slider
+  const xfMix    = document.getElementById('xf_mix');
+  const xfMixVal = document.getElementById('xf_mix_val');
+  xfMix.addEventListener('input', e => {
+    xfMixVal.textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  xfMix.addEventListener('change', () => reloadXfadeIfPlaying());
+
+  let isBeatMatch = false;
+  btnBeatMatch.addEventListener("click", () => {
+    isBeatMatch = !isBeatMatch;
+    btnBeatMatch.style.background = isBeatMatch ? "#5bc4ff" : "#444";
+    btnBeatMatch.style.color      = isBeatMatch ? "#000" : "#eee";
+    updateBmInfo();
+    updateAlignmentTransform();
+    reloadXfadeIfPlaying();
+  });
+
+  // ---- Alignment bar state ------------------------------------------------
+  const SHAPE_BASE = 'http://localhost:7892';
+  let _tcA = null;  // { beats, downbeats, onsets, duration, bpm } for crop A
+  let _tcB = null;  // same for crop B
+  let _bmTransformB = null;  // { stretch, phase } or null
+
+  const chkSmartLoop = document.getElementById('chk_smart_loop');
+  const smartLoopHint = document.getElementById('smart_loop_hint');
+
+  const _XFADE_N = 128;
+  const _FADE_IN  = new Float32Array(_XFADE_N).map((_, i) => Math.sqrt(i / (_XFADE_N - 1)));
+  const _FADE_OUT = new Float32Array(_XFADE_N).map((_, i) => Math.sqrt(1 - i / (_XFADE_N - 1)));
+
+  let _loopScheduler = null;
+
+  function computeLoopEnd(buf) {
+    const beats  = _tcA ? _tcA.beats  : null;
+    if (!beats || beats.length < 4) return null;
+    const beatsB = (_tcB && _tcB.beats && _tcB.beats.length >= 4) ? _tcB.beats : null;
+    const barsA = Math.floor(beats.length / 4);
+    const barsB = beatsB ? Math.floor(beatsB.length / 4) : barsA;
+    let loopBars = Math.min(barsA, barsB);
+    loopBars = Math.floor(loopBars / 4) * 4;
+    if (loopBars === 0) return null;
+    const beatIdx = loopBars * 4;
+    if (beatIdx < beats.length) return beats[beatIdx];
+    const bpm = _tcA.bpm;
+    if (!bpm) return null;
+    return (loopBars * 4 / bpm) * 60;
+  }
+
+  // ---- Avg all crops checkbox ---------------------------------------------
+  const chkAvg = document.getElementById('chk_avg');
+
+  chkAvg.addEventListener('change', () => {
+    // Dim crop selectors when avg mode is on — crops are ignored
+    const isAvg = chkAvg.checked;
+    [cropA_sel, cropB_sel].forEach(sel => {
+      sel.style.opacity        = isAvg ? '0.35' : '1';
+      sel.style.pointerEvents  = isAvg ? 'none'  : '';
+    });
+    xfadeBuffer = null;
+    xfadeStatus.textContent = 'Not loaded';
+    renderPlot();
+  });
+
+  async function fetchTimecodes(track, crop, slot) {
+    if (!track || !crop) return;
+    try {
+      const r = await fetch(`${SHAPE_BASE}/api/timecodes?track=${encodeURIComponent(track)}&crop=${encodeURIComponent(crop)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (slot === 'A') _tcA = data;
+      else              _tcB = data;
+      drawAlignmentBar();
+    } catch(e) {}
+  }
+
+  function drawAlignmentBar() {
+    const canvas = document.getElementById('alignment-bar');
+    const W = canvas.width  = canvas.offsetWidth;
+    const H = canvas.height = canvas.offsetHeight || 80;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    const LANE_H   = H / 2;
+    const LABEL_W  = 18;
+
+    function drawLane(tc, yOff, label, transform) {
+      if (!tc) return;
+      const dur = tc.duration;
+      if (!dur) return;
+
+      ctx.fillStyle = '#555';
+      ctx.font = '9px monospace';
+      ctx.fillText(label, 2, yOff + LANE_H * 0.6);
+
+      function toX(t) {
+        let tDisplay = t;
+        if (transform) tDisplay = t * transform.stretch + transform.phase;
+        return LABEL_W + (tDisplay / dur) * (W - LABEL_W - 30);
+      }
+
+      function drawTicks(times, color, width) {
+        if (!times || times.length === 0) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth   = width;
+        ctx.beginPath();
+        for (const t of times) {
+          const x = toX(t);
+          if (x < LABEL_W || x > W - 30) continue;
+          ctx.moveTo(x, yOff);
+          ctx.lineTo(x, yOff + LANE_H);
+        }
+        ctx.stroke();
+      }
+
+      drawTicks(tc.onsets,    'rgba(255,220,0,0.6)',   1);
+      drawTicks(tc.beats,     'rgba(80,220,80,0.7)',   1.5);
+      drawTicks(tc.downbeats, 'rgba(220,60,60,0.9)',   2);
+    }
+
+    drawLane(_tcA, 0,      'A', null);
+    drawLane(_tcB, LANE_H, 'B', _bmTransformB);
+
+    ctx.strokeStyle = '#2a2a2a';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, LANE_H); ctx.lineTo(W, LANE_H); ctx.stroke();
+
+    const legendX = W - 28;
+    [['rgba(255,220,0,0.8)', 'O'], ['rgba(80,220,80,0.8)', 'B'], ['rgba(220,60,60,0.9)', 'D']].forEach(([c, lbl], i) => {
+      ctx.fillStyle = c;
+      ctx.fillRect(legendX, 4 + i * 14, 8, 2);
+      ctx.fillStyle = '#666';
+      ctx.font = '8px monospace';
+      ctx.fillText(lbl, legendX + 10, 7 + i * 14);
+    });
+  }
+
+  new ResizeObserver(() => drawAlignmentBar())
+    .observe(document.getElementById('alignment-bar'));
+
+  function getXfadeCtx() {
+    if (!xfadeAudioCtx) xfadeAudioCtx = new AudioContext();
+    if (xfadeAudioCtx.state === 'suspended') xfadeAudioCtx.resume();
+    return xfadeAudioCtx;
+  }
+
+  // Stop crossfade and re-decode with current slider values if it was playing.
+  function reloadXfadeIfPlaying() {
+    const wasPlaying = !!xfadeSourceNode;
+    if (xfadeSourceNode) {
+      try { xfadeSourceNode.stop(); } catch(e) {}
+      xfadeSourceNode = null;
+    }
+    xfadeBuffer = null; // force fresh decode on next play
+    if (wasPlaying) {
+      btnXfadePlay.textContent = "▶ Play Crossfade";
+      xfadeStatus.textContent = "Reloading...";
+      setTimeout(() => fetchXfadeAudio(true), 50);
+    } else {
+      setTimeout(() => fetchXfadeAudio(false), 50);
+    }
+  }
+
+  // Play / stop crossfade
+  btnXfadePlay.addEventListener("click", () => {
+    if (xfadeSourceNode) {
+      try { xfadeSourceNode.stop(); } catch(e) {}
+      xfadeSourceNode = null;
+      if (_loopScheduler) { clearTimeout(_loopScheduler.timer); _loopScheduler = null; }
+      btnXfadePlay.textContent = '▶ Play Crossfade';
+      xfadeStatus.textContent = 'Stopped';
+      return;
+    }
+    if (xfadeBuffer) {
+      startXfadePlayback(0);
+      return;
+    }
+    fetchXfadeAudio(true);
+  });
+
+  // ---- Beat Match Logic --------------------------------------------------
+  const _LP_NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  function _lpChromaVec(trackName) {
+      if (!TRK_META[trackName] || !TRK_META[trackName].chroma) return null;
+      const v = TRK_META[trackName].chroma;
+      const sum = v.reduce((a, b) => a + b, 0);
+      return sum > 0 ? v.map(x => x / sum) : v;
+  }
+
+  function _lpBestChromaShift(cA, cB) {
+      // Find k ∈ [-6,6] maximising dot(cA, rotate_left(cB, k)).
+      let bestK = 0, bestDot = -Infinity;
+      for (let k = -6; k <= 6; k++) {
+          let dot = 0;
+          for (let i = 0; i < 12; i++) dot += cA[i] * cB[((i - k) % 12 + 12) % 12];
+          if (dot > bestDot) { bestDot = dot; bestK = k; }
+      }
+      return bestK;
+  }
+
+  function computeBeatMatch(trackA, trackB) {
+      let shiftA = 0, stretchA = 1.0, shiftB = 0, stretchB = 1.0;
+      const info = {};
+
+      const bpmA_raw = TRK_META[trackA] ? TRK_META[trackA].bpm : 0;
+      const bpmB_raw = TRK_META[trackB] ? TRK_META[trackB].bpm : 0;
+      let bpmA = bpmA_raw, bB = bpmB_raw;
+
+      if (bpmA > 0 && bB > 0) {
+          while (bB < bpmA * 0.75) bB *= 2;
+          while (bB > bpmA * 1.33) bB /= 2;
+          const bpmRatio = Math.abs(bB / bpmA - 1.0);
+          if (bpmRatio > 0.005 && bpmRatio <= 0.10) {
+              const tgt = Math.sqrt(bpmA * bB);
+              stretchA = bpmA / tgt;
+              stretchB = bB   / tgt;
+              info.targetBpm = tgt;
+          }
+          info.bpmA = bpmA; info.bpmBnorm = bB; info.bpmB = bpmB_raw;
+      }
+
+      const cA = _lpChromaVec(trackA);
+      const cB = _lpChromaVec(trackB);
+      if (cA && cB) {
+          const bestK = _lpBestChromaShift(cA, cB);
+          if (bestK !== 0) {
+              shiftB = Math.round(bestK / 2);
+              shiftA = -(bestK - shiftB);
+          }
+          info.keyA = _LP_NOTES[cA.indexOf(Math.max(...cA))];
+          info.keyB = _LP_NOTES[cB.indexOf(Math.max(...cB))];
+          info.bestK = bestK;
+      }
+      info.shiftA = shiftA; info.stretchA = stretchA;
+      info.shiftB = shiftB; info.stretchB = stretchB;
+      return info;
+  }
+
+  function updateBmInfo() {
+      if (!isBeatMatch) { bmInfo.innerHTML = ""; return; }
+      const tA = trackA_sel.value; const tB = trackB_sel.value;
+      if (!tA || !tB) { bmInfo.innerHTML = "Select A and B first"; return; }
+      const bm = computeBeatMatch(tA, tB);
+      
+      const lines = [];
+      if (bm.bpmA) {
+          const sa = bm.stretchA !== 1.0 ? ` ×${bm.stretchA.toFixed(3)}` : '';
+          const sb = bm.stretchB !== 1.0 ? ` ×${bm.stretchB.toFixed(3)}` : '';
+          const tgt = bm.targetBpm ? ` → ${bm.targetBpm.toFixed(1)} BPM` : ' matched';
+          lines.push(`<span style="color:#e94560">A</span> ${bm.bpmA.toFixed(1)}${sa} &nbsp; <span style="color:#5bc4ff">B</span> ${bm.bpmBnorm.toFixed(1)}${sb}${tgt}`);
+      }
+      if (bm.keyA) {
+          const aSign = bm.shiftA > 0 ? `+${bm.shiftA}` : `${bm.shiftA}`;
+          const bSign = bm.shiftB > 0 ? `+${bm.shiftB}` : `${bm.shiftB}`;
+          const aL = bm.shiftA ? `${bm.keyA} ${aSign}st` : bm.keyA;
+          const bL = bm.shiftB ? `${bm.keyB} ${bSign}st` : bm.keyB;
+          const inKey = (bm.bestK || 0) === 0;
+          lines.push(`<span style="color:#e94560">${aL}</span> ↔ <span style="color:#5bc4ff">${bL}</span>` + (inKey?' <span style="color:#4cd137">(in key)</span>':''));
+      }
+      bmInfo.innerHTML = lines.join('<br>') || "No BPM/Chroma data";
+  }
+
+  function updateAlignmentTransform() {
+    if (!isBeatMatch) {
+      _bmTransformB = null;
+    } else {
+      const tA = trackA_sel.value;
+      const tB = trackB_sel.value;
+      if (tA && tB) {
+        const bm = computeBeatMatch(tA, tB);
+        _bmTransformB = (bm && bm.stretchB !== 1.0)
+          ? { stretch: 1.0 / bm.stretchB, phase: 0 }
+          : null;
+      } else {
+        _bmTransformB = null;
+      }
+    }
+    drawAlignmentBar();
+  }
+
+  function buildXfadeURL() {
+    const tA    = trackA_sel.value;
+    const tB    = trackB_sel.value;
+    const isAvg = chkAvg.checked;
+    if (!tA) return null;
+
+    const optA  = cropA_sel.options[cropA_sel.selectedIndex];
+    const optB  = cropB_sel.options[cropB_sel.selectedIndex];
+    const posA  = optA ? (optA.dataset.position || "0.5") : "0.5";
+    const posB  = optB ? (optB.dataset.position || "0.5") : "0.5";
+    const interp = xfInterp.value;
+    const sl    = chkSmartLoop.checked ? '&smart_loop=1' : '';
+
+    const manips = getGlobalManipulationOffsets();
+    let manipQS = "";
+    if (manips.manip_channels.length > 0) {
+      manipQS = `&manip_channels=${manips.manip_channels.join(",")}&manip_amounts=${manips.manip_amounts.map(v => v.toFixed(3)).join(",")}`;
+    }
+
+    // Avg mode: use /average endpoint (lerp of mean latents; all crops counted)
+    if (isAvg) {
+      const mix = tB ? parseFloat(xfMix.value).toFixed(3) : "0.000";
+      const bParam = tB ? `&track_b=${encodeURIComponent(tB)}&mix=${mix}` : '';
+      return `http://localhost:7891/average?track=${encodeURIComponent(tA)}${bParam}&interp=${interp}${sl}${manipQS}`;
+    }
+
+    // Single-track mode: decode crop A directly (all faders at full left)
+    if (!tB) {
+      return `http://localhost:7891/decode?track=${encodeURIComponent(tA)}&position=${posA}${sl}${manipQS}`;
+    }
+
+    // Normal two-track crossfade
+    const bA = parseFloat(xfBetaA.value).toFixed(3);
+    const bB = parseFloat(xfBetaB.value).toFixed(3);
+
+    let stemOrMixParams;
+    if (xfMode === 'ab') {
+      stemOrMixParams = `mix=${parseFloat(xfMix.value).toFixed(3)}`;
+    } else {
+      stemOrMixParams = XF_STEMS.map(s =>
+        `${s}=${parseFloat(xfStemSliders[s].value).toFixed(3)}`
+      ).join("&");
+    }
+
+    let url = `http://localhost:7891/crossfade?mode=${xfMode}&track_a=${encodeURIComponent(tA)}&track_b=${encodeURIComponent(tB)}&pos_a=${posA}&pos_b=${posB}&${stemOrMixParams}&beta_a=${bA}&beta_b=${bB}&interp=${interp}${sl}${manipQS}`;
+
+    if (isBeatMatch) {
+      const bm = computeBeatMatch(tA, tB);
+      if (bm) {
+        url += `&beatmatch=1&shift_a=${bm.shiftA}&stretch_a=${bm.stretchA.toFixed(4)}`;
+        url += `&shift_b=${bm.shiftB}&stretch_b=${bm.stretchB.toFixed(4)}`;
+      }
+    }
+    return url;
+  }
+
+  function fetchXfadeAudio(autoPlay = false) {
+    const url = buildXfadeURL();
+    if (!url) return;
+    if (!autoPlay) {
+        btnXfadePlay.textContent = "⌛ Loading...";
+    }
+    xfadeStatus.textContent = "Fetching crossfade...";
+    fetch(url)
+      .then(r => { 
+          if (!r.ok) throw new Error("HTTP " + r.status); 
+          const metaStr = r.headers.get("X-Crossfade-Meta");
+          if (metaStr) {
+              try { window._xfadeMeta = JSON.parse(metaStr); } catch(e){}
+          }
+          return r.arrayBuffer();
+      })
+      .then(ab => getXfadeCtx().decodeAudioData(ab))
+      .then(buf => {
+        xfadeBuffer = buf;
+        xfadeStatus.textContent = `Ready (${buf.duration.toFixed(1)}s)`;
+        btnXfadePlay.textContent = "▶ Play Crossfade";
+        if (autoPlay) {
+            startXfadePlayback(0);
+        }
+      })
+      .catch(e => {
+        console.error("Crossfade error", e);
+        xfadeStatus.textContent = "Error: " + e.message;
+        btnXfadePlay.textContent = "▶ Play Crossfade";
+      });
+  }
+
+  function startXfadePlayback(offset) {
+    if (!xfadeBuffer) return;
+    const ctx = getXfadeCtx();
+    if (xfadeSourceNode) { try { xfadeSourceNode.stop(); } catch(e){} }
+    xfadeSourceNode = null;
+
+    if (_loopScheduler) {
+      clearTimeout(_loopScheduler.timer);
+      _loopScheduler = null;
+    }
+
+    const XFADE_DUR = 0.010;
+
+    if (chkSmartLoop.checked) {
+      const loopEnd = computeLoopEnd(xfadeBuffer);
+      if (loopEnd === null || loopEnd <= XFADE_DUR * 2) {
+        chkSmartLoop.checked = false;
+        smartLoopHint.textContent = 'Not enough beat data for loop';
+        smartLoopHint.style.display = 'inline';
+        setTimeout(() => { smartLoopHint.style.display = 'none'; }, 3000);
+        startXfadePlayback(offset);
+        return;
+      }
+      smartLoopHint.style.display = 'none';
+
+      function scheduleLoopCycle(startAt, fromOffset, applyFadeIn) {
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = applyFadeIn ? 0.0 : 1.0;
+        gainNode.connect(ctx.destination);
+
+        const src = ctx.createBufferSource();
+        src.buffer = xfadeBuffer;
+        src.connect(gainNode);
+
+        const off = Math.max(0, fromOffset % loopEnd);
+        src.start(startAt, off);
+
+        if (applyFadeIn) {
+          gainNode.gain.setValueCurveAtTime(_FADE_IN, startAt, XFADE_DUR);
+        }
+
+        const crossfadeAt = startAt + (loopEnd - off) - XFADE_DUR;
+        const fireIn = Math.max(0, (crossfadeAt - ctx.currentTime - 0.050) * 1000);
+
+        const timer = setTimeout(() => {
+          if (!chkSmartLoop.checked) return;
+          gainNode.gain.setValueCurveAtTime(_FADE_OUT, crossfadeAt, XFADE_DUR);
+          scheduleLoopCycle(crossfadeAt, 0, true);
+          src.stop(crossfadeAt + XFADE_DUR * 1.5);
+        }, fireIn);
+
+        xfadeSourceNode = src;
+        xfadePlayStart = startAt;
+        _loopScheduler = { timer, gainNode, src };
+      }
+
+      scheduleLoopCycle(ctx.currentTime, offset % loopEnd, false);
+    } else {
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 1;
+      gainNode.connect(ctx.destination);
+      const src = ctx.createBufferSource();
+      src.buffer = xfadeBuffer;
+      src.connect(gainNode);
+      const off = Math.max(0, offset % xfadeBuffer.duration);
+      src.start(0, off);
+      xfadeSourceNode = src;
+      xfadePlayStart = ctx.currentTime - off;
+      src.onended = () => {
+        if (xfadeSourceNode === src) {
+          xfadeSourceNode = null;
+          xfadeBuffer = null;
+          btnXfadePlay.textContent = '▶ Play Crossfade';
+          xfadeStatus.textContent = 'Ended';
+        }
+      };
+    }
+
+    btnXfadePlay.textContent = '⏸ Stop Crossfade';
+    animationFrameId = requestAnimationFrame(updateAnimation);
+  }
+
+  // ---- Ghost trace (morphed A↔B trajectory in 3D) ------------------------
+  // We store the last plotted A/B shapes here so we can re-render ghosts on slider change
+  let _lastShapeA = null;
+  let _lastShapeB = null;
+
+  // Mean alpha across stems (for a single full-mix ghost)
+  function meanAlpha() {
+    const vals = XF_STEMS.map(s => parseFloat(xfStemSliders[s].value));
+    return vals.reduce((a,b) => a+b, 0) / vals.length;
+  }
+
+  function lerpPoints(ptsA, ptsB, t) {
+    if (!ptsA || !ptsB) return null;
+    const len = Math.min(ptsA.length, ptsB.length);
+    const out = [];
+    for (let i=0; i<len; i++) {
+      out.push([
+        ptsA[i][0] * (1-t) + ptsB[i][0] * t,
+        ptsA[i][1] * (1-t) + ptsB[i][1] * t,
+        ptsA[i][2] * (1-t) + ptsB[i][2] * t,
+      ]);
+    }
+    return out;
+  }
+
+  function renderGhostTrace() {
+    if (!_lastShapeA || !_lastShapeB) return;
+    const t = meanAlpha();
+    const GHOST_STEMS = ["fullmix", "drums", "bass", "other", "vocals"];
+    const ghostTraces = [];
+    const mode = mode_sel.value;
+
+    GHOST_STEMS.forEach((key, idx) => {
+      const ptsA = _lastShapeA[key];
+      const ptsB = _lastShapeB[key];
+      if (!ptsA || !ptsB) return;
+      if (!toggles[key] || !toggles[key].checked) return;
+
+      const pts = lerpPoints(ptsA, ptsB, t);
+      const x  = pts.map(p => p[0]);
+      const y  = pts.map(p => p[1]);
+      const z  = mode === 'hybrid'
+        ? pts.map((_, i) => i / pts.length)
+        : pts.map(p => p[2]);
+
+      ghostTraces.push({
+        type: 'scatter3d',
+        mode: 'lines',
+        name: `Ghost ${key} (α=${t.toFixed(2)})`,
+        x, y, z,
+        line: { width: 3, color: '#ff9900', dash: 'dash' },
+        opacity: 0.55,
+        showlegend: false,
+        hoverinfo: 'none'
+      });
+    });
+
+    // Get current trace count so we know which indices to update
+    const plotDiv = document.getElementById('plot');
+    if (!plotDiv.data || plotDiv.data.length === 0) return;
+
+    // Remove old ghost traces then add new ones
+    const existingCount = plotDiv.data.length;
+    const toDelete = plotDiv.data
+      .map((t, i) => (t.name && t.name.startsWith('Ghost')) ? i : -1)
+      .filter(i => i >= 0)
+      .reverse(); // delete from end so indices stay valid
+
+    const deleteOps = toDelete.map(i => ({ type: 'deletetraces', indices: [i] }));
+
+    const doAdd = () => {
+      if (ghostTraces.length > 0) {
+        Plotly.addTraces('plot', ghostTraces).catch(() => {});
+      }
+    };
+
+    if (deleteOps.length > 0) {
+      Plotly.deleteTraces('plot', deleteOps.map(d => d.indices[0])).then(doAdd).catch(doAdd);
+    } else {
+      doAdd();
+    }
+  }
+
+  function removeGhostTrace() {
+    const plotDiv = document.getElementById('plot');
+    if (!plotDiv.data) return;
+    const toDelete = plotDiv.data
+      .map((t, i) => (t.name && t.name.startsWith('Ghost')) ? i : -1)
+      .filter(i => i >= 0);
+    if (toDelete.length > 0) Plotly.deleteTraces('plot', toDelete).catch(() => {});
+  }
+
+  // Load tracks on init (fast, small JSON)
+  let TRK_META = {};
+
+  fetch(`${BASE_URL}/api/tracks`)
+    .then(r => r.json())
+    .then(data => {
+      const fragA = document.createDocumentFragment();
+      const fragB = document.createDocumentFragment();
+      fragB.appendChild(new Option("-- None --", ""));
+      const validTracks = data.tracks.filter(t => /^[a-zA-Z0-9]/.test(t) || t.startsWith("00"));
+      validTracks.forEach(t => {
+        fragA.appendChild(new Option(t, t));
+        fragB.appendChild(new Option(t, t));
+      });
+      trackA_sel.appendChild(fragA);
+      trackB_sel.appendChild(fragB);
+      
+      if(validTracks.length > 0) {
+        setTimeout(() => loadCrops(trackA_sel.value, cropA_sel), 50);
+      }
+    })
+    .catch(e => console.error("Failed to load tracks:", e));
+
+  // Lazy-load metadata CSV in background (large file, don't block dropdowns)
+  setTimeout(() => {
+    fetch(`${BASE_URL}/api/tracks.csv`)
+      .then(r => r.text())
+      .then(csvText => {
+        if (!csvText) return;
+        const lines = csvText.split('\n');
+        const headers = lines[0].split(',');
+        const trackIdx = headers.indexOf('track');
+        const bpmIdx = headers.indexOf('bpm');
+        const chromaIdxs = Array.from({length: 12}, (_, i) => headers.indexOf(`chroma_${i}`));
+
+        for (let i = 1; i < lines.length; i++) {
+            if (!lines[i].trim()) continue;
+            const row = lines[i].split(',');
+            if (row.length < headers.length) continue;
+            const trk = row[trackIdx];
+            if (!trk) continue;
+            const bpm = bpmIdx >= 0 ? parseFloat(row[bpmIdx]) || 0 : 0;
+            const chroma = chromaIdxs.map(idx => idx >= 0 ? parseFloat(row[idx]) || 0 : 0);
+            TRK_META[trk] = { bpm, chroma };
+        }
+        console.log(`Loaded ${Object.keys(TRK_META).length} track metadata entries`);
+      })
+      .catch(e => console.warn("Could not load tracks.csv for beat matching:", e));
+  }, 1500);
+
+  // Load PCA and Correlations
+  Promise.all([
+      fetch(`${BASE_URL}/api/pca`).then(r => r.json()),
+      fetch(`${BASE_URL}/api/correlations`).then(r => r.json())
+  ]).then(([pcaData, corrData]) => {
+      pcaComponents = pcaData.components;
+      correlations = corrData;
+      buildSliders();
+  }).catch(e => console.warn("Could not load PCA/Correlations for manipulation", e));
+
+  function buildSliders() {
+      const panel = document.getElementById("sliders-panel");
+      for (const [key, label] of Object.entries(EXPOSED_FEATURES)) {
+          if (!correlations[key]) continue;
+          
+          const wrapper = document.createElement("div");
+          wrapper.style.display = "flex";
+          wrapper.style.flexDirection = "column";
+          wrapper.style.alignItems = "center";
+          
+          const lbl = document.createElement("label");
+          lbl.textContent = label;
+          lbl.style.fontSize = "9px";
+          
+          const slider = document.createElement("input");
+          slider.type = "range";
+          slider.min = "-3"; // Multiplier
+          slider.max = "3";
+          slider.step = "0.1";
+          slider.value = "0";
+          slider.style.width = "70px";
+          
+          const valDisplay = document.createElement("span");
+          valDisplay.textContent = "0.0";
+          valDisplay.style.fontSize = "9px";
+          valDisplay.style.color = "#aaa";
+
+          slider.addEventListener("input", (e) => {
+              valDisplay.textContent = parseFloat(e.target.value).toFixed(1);
+              updateManipulationState(key, parseFloat(e.target.value));
+              renderPlot(); // Re-render instantly to see structural shift
+          });
+
+          // On slider release: reload crossfade audio with the new manipulation if it was playing
+          slider.addEventListener("change", () => {
+              reloadXfadeIfPlaying();
+          });
+
+          wrapper.appendChild(lbl);
+          wrapper.appendChild(slider);
+          wrapper.appendChild(valDisplay);
+          panel.appendChild(wrapper);
+          
+          activeSliders[key] = { value: 0 };
+      }
+  }
+
+  function updateManipulationState(featureKey, value) {
+      activeSliders[featureKey].value = value;
+  }
+
+  function getGlobalManipulationOffsets() {
+      // Returns { manip_channels: [ch1, ch2...], manip_amounts: [amt1, amt2...] }
+      const chMap = {}; // accumulate offsets per channel
+      for (const key in activeSliders) {
+          const val = activeSliders[key].value;
+          if (val === 0) continue;
+          
+          const corr = correlations[key];
+          // Push the top 5 positive and negative correlated channels
+          // proportionally to their correlation score * the slider value.
+          // Fall back to unit weights if scores were not computed (all zero).
+          for (let i=0; i < corr.top_positive_channels.length; i++) {
+              let ch = corr.top_positive_channels[i];
+              let score = corr.top_positive_scores[i] || 1.0;  // fallback: unit weight
+              chMap[ch] = (chMap[ch] || 0) + (score * val);
+          }
+          for (let i=0; i < corr.top_negative_channels.length; i++) {
+              let ch = corr.top_negative_channels[i];
+              // score is already negative; multiplying by val gives a negative delta
+              let score = corr.top_negative_scores[i] || -1.0;  // fallback: unit weight
+              chMap[ch] = (chMap[ch] || 0) + (score * val);
+          }
+      }
+      
+      const manip_channels = [];
+      const manip_amounts = [];
+      for (const ch in chMap) {
+          manip_channels.push(ch);
+          manip_amounts.push(chMap[ch]);
+      }
+      return { manip_channels, manip_amounts };
+  }
+
+  trackA_sel.addEventListener('change', () => {
+    loadCrops(trackA_sel.value, cropA_sel);
+    updateAlignmentTransform();
+  });
+  trackB_sel.addEventListener('change', () => {
+    if(trackB_sel.value) loadCrops(trackB_sel.value, cropB_sel, true);
+    else cropB_sel.innerHTML = '<option value="">-- None --</option>';
+    updateAlignmentTransform();
+  });
+  
+  cropA_sel.addEventListener('change', () => {
+      reloadXfadeIfPlaying();
+      fetchTimecodes(trackA_sel.value, cropA_sel.value, 'A');
+  });
+  cropB_sel.addEventListener('change', () => {
+      reloadXfadeIfPlaying();
+      fetchTimecodes(trackB_sel.value, cropB_sel.value, 'B');
+  });
+
+  function loadCrops(track, selectEl, allowNull=false) {
+    if(!track) return;
+    fetch(`${BASE_URL}/api/crops?track=${encodeURIComponent(track)}`)
+      .then(r => r.json())
+      .then(data => {
+        selectEl.innerHTML = "";
+        if(allowNull) selectEl.appendChild(new Option("-- None --", ""));
+        data.crops.forEach(c => {
+          let opt = new Option(`Crop ${c.id} (pos ${c.position.toFixed(2)})`, c.id);
+          opt.dataset.position = c.position;
+          selectEl.appendChild(opt);
+        });
+        
+        // Auto-reload on track change after crops populate
+        if (selectEl === cropA_sel) {
+           renderPlot();
+           const firstOpt = cropA_sel.options[cropA_sel.selectedIndex];
+           if (firstOpt) fetchTimecodes(track, firstOpt.value, 'A');
+        } else if (selectEl === cropB_sel) {
+           fetchXfadeAudio(false);
+           const firstOpt = cropB_sel.options[cropB_sel.selectedIndex];
+           if (firstOpt) fetchTimecodes(track, firstOpt.value, 'B');
+        }
+      });
+  }
+
+  cropA_sel.addEventListener('change', () => {
+      renderPlot();
+  });
+
+  cropB_sel.addEventListener('change', () => {
+      fetchXfadeAudio(false);
+  });
+
+  mode_sel.addEventListener('change', renderPlot);
+
+  btn_render.style.display = "none";
+  btn_render.addEventListener('click', renderPlot);
+
+  async function fetchShape(track, crop) {
+    if (chkAvg.checked) {
+      const res = await fetch(`${BASE_URL}/api/average-shape?track=${encodeURIComponent(track)}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      // average-shape returns {points:[...]}; normalise to same shape as /api/shape
+      return { fullmix: data.points };
+    }
+    const res = await fetch(`${BASE_URL}/api/shape?track=${encodeURIComponent(track)}&crop=${encodeURIComponent(crop)}`);
+    if(!res.ok) throw new Error(await res.text());
+    return await res.json();
+  }
+
+  const COLORS = {
+    fullmix: ['#000033', '#00d2ff'],
+    drums: ['#330000', '#ff3333'],
+    bass: ['#003300', '#33ff33'],
+    other: ['#333300', '#ffff33'],
+    vocals: ['#330033', '#ff33ff']
+  };
+
+  const NAMES = {
+    fullmix: "Full Mix", drums: "Drums", bass: "Bass", other: "Other", vocals: "Vocals"
+  };
+
+  async function renderPlot() {
+    loader.style.display = "block";
+    legend_items.innerHTML = "";
+    try {
+      const mode = mode_sel.value;
+      const tA = trackA_sel.value;
+      const cA = cropA_sel.value;
+      const tB = trackB_sel.value;
+      const cB = cropB_sel.value;
+
+      const needCrop = !chkAvg.checked;
+      if(!tA || (needCrop && !cA)) { alert("Select Track A" + (needCrop ? " and Crop A" : "")); return; }
+      const shapeA = await fetchShape(tA, cA);
+
+      let shapeB = null;
+      if(tB && (cB || chkAvg.checked)) shapeB = await fetchShape(tB, cB);
+
+      // Cache for ghost trace re-rendering
+      _lastShapeA = shapeA;
+      _lastShapeB = shapeB;
+
+      // Invalidate crossfade audio buffer when tracks change
+      if (xfadeSourceNode) { try { xfadeSourceNode.stop(); } catch(e){} xfadeSourceNode = null; }
+      xfadeBuffer = null;
+      xfadeStatus.textContent = "Not loaded";
+      btnXfadePlay.textContent = "✕ Play Crossfade";
+
+      let gXMin = Infinity, gXMax = -Infinity;
+      let gYMin = Infinity, gYMax = -Infinity;
+      let gZMin = Infinity, gZMax = -Infinity;
+      
+      window.plottedTrajectories = [];
+      const traces = [];
+
+      const manips = getGlobalManipulationOffsets();
+      
+      // Calculate PCA offset vector [dx, dy, dz] from the channel amounts
+      let dx = 0, dy = 0, dz = 0;
+      if (pcaComponents && manips.manip_channels.length > 0) {
+          for (let i=0; i<manips.manip_channels.length; i++) {
+              let ch = parseInt(manips.manip_channels[i]);
+              let amt = manips.manip_amounts[i];
+              // PCA is [3, 64]. So component 0 is X axis weights.
+              dx += pcaComponents[0][ch] * amt;
+              dy += pcaComponents[1][ch] * amt;
+              dz += (pcaComponents[2] ? pcaComponents[2][ch] * amt : 0);
+          }
+      }
+
+      function addTrace(name, points, colorScale, isB=false) {
+        if(!points || points.length === 0) return;
+        
+        let x = points.map(p => p[0] + dx);
+        let y = points.map(p => p[1] + dy);
+        
+        let z;
+        if (mode === "hybrid") {
+            z = points.map((_, i) => i / points.length); // Explicit time mapping
+        } else {
+            z = points.map(p => p[2] + dz);
+        }
+        
+        const t = points.map((_, i) => i / points.length);
+
+        x.forEach(v => { gXMin = Math.min(gXMin, v); gXMax = Math.max(gXMax, v); });
+        y.forEach(v => { gYMin = Math.min(gYMin, v); gYMax = Math.max(gYMax, v); });
+        z.forEach(v => { gZMin = Math.min(gZMin, v); gZMax = Math.max(gZMax, v); });
+
+        const suffix = isB ? " (B)" : " (A)";
+        const labelName = name + suffix;
+
+        traces.push({
+          type: 'scatter3d',
+          mode: 'lines',
+          name: labelName,
+          x: x, y: y, z: z,
+          line: { width: 1.5, color: t, colorscale: colorScale },
+          opacity: 0.15,
+          hoverinfo: 'none'
+        });
+
+        const activeTraceIndex = traces.length;
+
+        // Active highlighted comet trail — gradient: transparent tail → bright head
+        const brightColor = colorScale[1][1];
+        traces.push({
+          type: 'scatter3d',
+          mode: 'lines',
+          name: labelName + " (Active)",
+          x: [null], y: [null], z: [null],
+          line: {
+            width: 5,
+            color: [0, 1],
+            colorscale: [[0, 'rgba(0,0,0,0)'], [1, brightColor]],
+            cauto: false, cmin: 0, cmax: 1
+          },
+          showlegend: false,
+          hoverinfo: 'none'
+        });
+
+        window.plottedTrajectories.push({
+            traceIndex: activeTraceIndex,
+            x: x, y: y, z: z,
+            brightColor: brightColor
+        });
+
+        // Add to legend
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        div.innerHTML = `<div class="color-box" style="background: linear-gradient(to right, ${colorScale[0][1]}, ${colorScale[1][1]})"></div><span>${labelName}</span>`;
+        if(isB) div.style.paddingLeft = "10px";
+        legend_items.appendChild(div);
+      }
+
+      if (mode === "raw" || mode === "hybrid") {
+        for(let key in shapeA) {
+          if(!toggles[key].checked) continue;
+          if(COLORS[key]) addTrace(NAMES[key], shapeA[key], [[0, COLORS[key][0]], [1, COLORS[key][1]]], false);
+        }
+        if (shapeB) {
+          for(let key in shapeB) {
+            if(!toggles[key].checked) continue;
+            const cb = COLORS[key];
+            addTrace(NAMES[key], shapeB[key], [[0, '#222'], [1, cb[1]]], true);
+          }
+        }
+      } 
+      else if (mode === "diff") {
+        if(!shapeA.fullmix) throw new Error("Full mix missing for A");
+        for(let key in shapeA) {
+          if(key === 'fullmix' || !toggles[key].checked) continue;
+          const fm = shapeA.fullmix;
+          const st = shapeA[key];
+          const len = Math.min(fm.length, st.length);
+          const diff = [];
+          for(let i=0; i<len; i++) {
+            diff.push([ fm[i][0]-st[i][0], fm[i][1]-st[i][1], fm[i][2]-st[i][2] ]);
+          }
+          addTrace(`Diff (${NAMES[key]})`, diff, [[0, COLORS[key][0]], [1, COLORS[key][1]]], false);
+        }
+        if (shapeB && shapeB.fullmix) {
+          for(let key in shapeB) {
+            if(key === 'fullmix' || !toggles[key].checked) continue;
+            const fm = shapeB.fullmix;
+            const st = shapeB[key];
+            const len = Math.min(fm.length, st.length);
+            const diff = [];
+            for(let i=0; i<len; i++) {
+              diff.push([ fm[i][0]-st[i][0], fm[i][1]-st[i][1], fm[i][2]-st[i][2] ]);
+            }
+            addTrace(`Diff (${NAMES[key]})`, diff, [[0, '#222'], [1, COLORS[key][1]]], true);
+          }
+        }
+      }
+      else if (mode === "average") {
+        const W = 10;
+        function smooth(pts) {
+          const res = [];
+          for(let i=0; i<pts.length; i++) {
+            let start = Math.max(0, i - Math.floor(W/2));
+            let end = Math.min(pts.length - 1, i + Math.floor(W/2));
+            let sX=0, sY=0, sZ=0;
+            for(let j=start; j<=end; j++) { sX+=pts[j][0]; sY+=pts[j][1]; sZ+=pts[j][2]; }
+            let c = end - start + 1;
+            res.push([sX/c, sY/c, sZ/c]);
+          }
+          return res;
+        }
+
+        for(let key in shapeA) {
+          if(!toggles[key].checked) continue;
+          if(COLORS[key]) addTrace(NAMES[key], smooth(shapeA[key]), [[0, COLORS[key][0]], [1, COLORS[key][1]]], false);
+        }
+        if(shapeB) {
+          for(let key in shapeB) {
+            if(!toggles[key].checked) continue;
+            addTrace(NAMES[key], smooth(shapeB[key]), [[0, '#222'], [1, COLORS[key][1]]], true);
+          }
+        }
+      }
+
+      const xRange = Math.max(gXMax - gXMin, 0.01);
+      const yRange = Math.max(gYMax - gYMin, 0.01);
+      const zRange = Math.max(gZMax - gZMin, 0.01);
+      const maxRange = Math.max(xRange, yRange, zRange);
+      const xPad = xRange * 0.05;
+      const yPad = yRange * 0.05;
+      const zPad = zRange * 0.05;
+
+      const layout = {
+        scene: {
+          xaxis: { title: '', range: [gXMin - xPad, gXMax + xPad], gridcolor: '#444', zerolinecolor: '#666', showbackground: false, showticklabels: false },
+          yaxis: { title: '', range: [gYMin - yPad, gYMax + yPad], gridcolor: '#444', zerolinecolor: '#666', showbackground: false, showticklabels: false },
+          zaxis: { title: mode === 'hybrid' ? 'T' : '', range: [gZMin - zPad, gZMax + zPad], gridcolor: '#444', zerolinecolor: '#666', showbackground: false, showticklabels: false },
+          bgcolor: '#111',
+          aspectmode: 'manual',
+          aspectratio: {
+            x: xRange / maxRange,
+            y: yRange / maxRange,
+            z: zRange / maxRange
+          },
+          camera: (() => {
+            const plotDiv = document.getElementById('plot');
+            try {
+              const existing = plotDiv._fullLayout && plotDiv._fullLayout.scene
+                               && plotDiv._fullLayout.scene.camera;
+              if (existing && existing.eye) return existing;
+            } catch(e) {}
+            return { eye: { x: 1.05, y: 1.05, z: 1.05 }, center: { x: 0, y: 0, z: 0 } };
+          })(),
+          domain: { x: [0, 1], y: [0, 1] }
+        },
+        paper_bgcolor: '#111',
+        plot_bgcolor: '#111',
+        margin: { l: 0, r: 0, b: 0, t: 0 },
+        height: document.getElementById('plot-container').clientHeight || window.innerHeight - 100,
+        // uirevision: constant string tells Plotly to preserve all user UI interactions
+        // (camera position, zoom) across react() calls — e.g. when sliders re-render the plot
+        uirevision: 'latent-shape',
+        showlegend: false,
+        autosize: true
+      };
+
+      await Plotly.react('plot', traces, layout);
+
+      // Re-inject ghost trace if both shapes available
+      if (_lastShapeA && _lastShapeB) {
+        renderGhostTrace();
+      }
+
+    } catch (e) {
+      alert("Error: " + e.message);
+      console.error(e);
+    } finally {
+      loader.style.display = "none";
+    }
+  }
+  
+  // Animation syncing
+  function updateAnimation() {
+      if (!xfadeSourceNode || !xfadeBuffer || !window.plottedTrajectories || window.plottedTrajectories.length === 0) return;
+
+      const currentTime = xfadeAudioCtx.currentTime - xfadePlayStart;
+      const duration = xfadeBuffer.duration;
+      const progress = currentTime / duration;
+      
+      const targetData = [];
+      const targetTraces = [];
+      
+      window.plottedTrajectories.forEach(traj => {
+          const tIndex = Math.floor(progress * (traj.x.length - 1));
+          if (tIndex >= 0 && tIndex < traj.x.length) {
+              const startIndex = Math.max(0, tIndex - 20); // 20 frames historical tail
+              const px = traj.x.slice(startIndex, tIndex + 1);
+              const py = traj.y.slice(startIndex, tIndex + 1);
+              const pz = traj.z.slice(startIndex, tIndex + 1);
+              
+              targetData.push({ x: px, y: py, z: pz });
+              targetTraces.push(traj.traceIndex);
+          }
+      });
+      
+      if (targetData.length > 0) {
+          try {
+              // Restyle only data arrays — camera/layout untouched (uirevision handles camera persistence).
+              // Gradient color: 0=transparent tail, 1=bright head for the tracer effect.
+              const xArr    = targetData.map(d => d.x);
+              const yArr    = targetData.map(d => d.y);
+              const zArr    = targetData.map(d => d.z);
+              const colArr  = targetData.map(d => {
+                  const n = d.x.length;
+                  return Array.from({length: n}, (_, i) => i / Math.max(n - 1, 1));
+              });
+              const csArr   = targetData.map((d, i) => {
+                  const col = window.plottedTrajectories[i] ? window.plottedTrajectories[i].brightColor : '#ffffff';
+                  return [[0, 'rgba(0,0,0,0)'], [0.35, col.replace(')', ',0.25)').replace('rgb(', 'rgba(')], [1, col]];
+              });
+              Plotly.restyle('plot',
+                  { x: xArr, y: yArr, z: zArr, 'line.color': colArr, 'line.colorscale': csArr },
+                  targetTraces
+              );
+          } catch(e) {}
+      }
+      
+      animationFrameId = requestAnimationFrame(updateAnimation);
+  }
+
+</script>
+</body>
+</html>

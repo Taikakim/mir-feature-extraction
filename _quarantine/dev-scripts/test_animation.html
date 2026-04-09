@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+</head>
+<body>
+<div id="plot" style="width: 100vw; height: 100vh;"></div>
+<script>
+  let x = [0], y = [0], z = [0];
+  Plotly.react('plot', [{
+    type: 'scatter3d',
+    mode: 'markers',
+    name: 'PlaybackHead',
+    x: x, y: y, z: z,
+    marker: { size: 12, color: 'blue', symbol: 'diamond' }
+  }], { scene: { xaxis: {range: [-1,1]}, yaxis: {range: [-1,1]}, zaxis: {range: [-1,1]} } });
+
+  let frames = 0;
+  function animate() {
+    frames++;
+    let t = frames * 0.05;
+    Plotly.animate('plot', {
+        data: [{ x: [Math.sin(t)], y: [Math.cos(t)], z: [Math.sin(t*2)*0.5] }]
+    }, {
+        transition: { duration: 0 },
+        frame: { duration: 0, redraw: false },
+        traces: [0]
+    });
+    if (frames < 100) requestAnimationFrame(animate);
+    else document.body.style.background = 'green';
+  }
+  setTimeout(animate, 1000);
+</script>
+</body>
+</html>
