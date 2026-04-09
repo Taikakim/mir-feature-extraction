@@ -49,6 +49,31 @@
     let _hovX = null;
     let _hovY = null;
 
+    // ── Fetch abort controllers — cancel in-flight server requests immediately ─
+    // Key insight: each /decode or /crossfade runs a VAE forward pass on the GPU.
+    // Concurrent requests can exhaust VRAM and crash the browser's GPU process.
+    // AbortControllers let us cancel the HTTP request the moment it's superseded,
+    // so the server never receives more than one active decode at a time.
+    let _mainAbort    = null;  // controls the current play/playWithFade fetch
+    let _prefetchAbort = null; // controls the background prefetch fetch
+    let _blendAbort    = null; // controls the background blend prefetch fetch
+
+    function _abortMain() {
+        if (_mainAbort) { try { _mainAbort.abort(); } catch (_) {} }
+        _mainAbort = new AbortController();
+        return _mainAbort.signal;
+    }
+    function _abortPrefetch() {
+        if (_prefetchAbort) { try { _prefetchAbort.abort(); } catch (_) {} }
+        _prefetchAbort = new AbortController();
+        return _prefetchAbort.signal;
+    }
+    function _abortBlend() {
+        if (_blendAbort) { try { _blendAbort.abort(); } catch (_) {} }
+        _blendAbort = new AbortController();
+        return _blendAbort.signal;
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     function getCtx() {
         if (!_ctx) {
@@ -131,20 +156,27 @@
         return isNaN(v) ? null : v;
     }
 
-    /** Fetch a URL, return {buffer, cropIndex, cropCount, cropPos} or null on error. */
-    async function _fetchDecode(url) {
+    /** Fetch a URL, return {buffer, cropIndex, cropCount, cropPos} or null on error/abort. */
+    async function _fetchDecode(url, signal) {
         const ctx = getCtx();
         let resp;
         try {
-            resp = await fetch(url);
+            resp = await fetch(url, signal ? { signal } : {});
             if (!resp.ok) { console.warn("player.js: fetch failed", resp.status, url); return null; }
-        } catch (e) { console.warn("player.js: fetch error", e); return null; }
+        } catch (e) {
+            if (e.name === "AbortError") return null;  // cancelled — not an error
+            console.warn("player.js: fetch error", e);
+            return null;
+        }
 
         const cropIndex = _hdrInt(resp, "X-Crop-Index");
         const cropCount = _hdrInt(resp, "X-Crop-Count");
         const cropPos   = _hdr(resp,    "X-Crop-Position");
 
-        const raw = await resp.arrayBuffer();
+        let raw;
+        try { raw = await resp.arrayBuffer(); }
+        catch (e) { if (e.name !== "AbortError") console.warn("player.js: arrayBuffer error", e); return null; }
+
         let buffer;
         try { buffer = await ctx.decodeAudioData(raw); }
         catch (e) { console.warn("player.js: decode error", e); return null; }
@@ -259,7 +291,8 @@
 
     /** Play the next crop (used pending buffer if URL matches). */
     async function _playNext(nextUrl, nextIdx) {
-        const gen = ++_playGen;
+        const gen    = ++_playGen;
+        const signal = _abortMain();
         stopCurrent();
         _lastUrl = nextUrl;
 
@@ -268,7 +301,7 @@
             decoded  = _pending;
             _pending = null;
         } else {
-            decoded = await _fetchDecode(nextUrl);
+            decoded = await _fetchDecode(nextUrl, signal);
             if (!decoded) return;
         }
 
@@ -288,11 +321,11 @@
     /** Background prefetch a decode URL into _pending. */
     async function _prefetchUrl(url, expectedIdx) {
         if (!url || (_pending && _pending.url === url)) return;
-        _pending = null;  // clear stale pending
-        const decoded = await _fetchDecode(url);
+        _pending = null;
+        const signal  = _abortPrefetch();   // cancel previous background prefetch
+        const decoded = await _fetchDecode(url, signal);
         if (!decoded) return;
-        // Only store if nothing else took over meanwhile
-        _pending = decoded;
+        _pending     = decoded;
         _pending.url = url;
     }
 
@@ -301,7 +334,8 @@
         const url = _blendUrl(baseUrl, posA, posB);
         if (!url || (_blend && _blend.url === url)) return;
         _blend = null;
-        const decoded = await _fetchDecode(url);
+        const signal  = _abortBlend();      // cancel previous blend prefetch
+        const decoded = await _fetchDecode(url, signal);
         if (!decoded) return;
         _blend = { url, buffer: decoded.buffer };
     }
@@ -309,7 +343,8 @@
     // ── Main playUrl (called by play command) ─────────────────────────────────
     async function playUrl(url, loopStart, loopEnd) {
         if (_lastUrl === url && _sourceNode) return;  // already playing this
-        const gen  = ++_playGen;  // capture; any later call will bump this higher
+        const gen    = ++_playGen;
+        const signal = _abortMain();   // cancel any previous main fetch immediately
         _lastUrl   = url;
         _loopStart = loopStart;
         _loopEnd   = loopEnd;
@@ -325,7 +360,7 @@
             decoded  = _pending;
             _pending = null;
         } else {
-            decoded = await _fetchDecode(url);
+            decoded = await _fetchDecode(url, signal);
             if (!decoded) return;
         }
 
@@ -359,7 +394,8 @@
     // ── Shared helper: play blend clip then loop destination ─────────────────
     async function _playWithFade(blendUrl, destUrl, loopStart, loopEnd) {
         const gen          = ++_playGen;
-        const blendDecoded = await _fetchDecode(blendUrl);
+        const signal       = _abortMain();   // cancel any previous main fetch
+        const blendDecoded = await _fetchDecode(blendUrl, signal);
         if (gen !== _playGen) return;  // superseded
         stopCurrent();
         _lastUrl   = destUrl;
@@ -444,7 +480,8 @@
                 _prefetchUrl(url, null);
 
             } else if (cmd.action === "stop") {
-                ++_playGen;  // invalidate any in-flight fetches
+                ++_playGen;
+                _abortMain(); _abortPrefetch(); _abortBlend();  // cancel all server requests
                 stopCurrent();
                 _lastUrl     = null;
                 _pending     = null;
