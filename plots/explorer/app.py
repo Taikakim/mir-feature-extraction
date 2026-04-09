@@ -264,15 +264,28 @@ def player_play_stop(play_clicks, stop_clicks, state, pos, xfade, opts):
     prevent_initial_call=True,
 )
 def prefetch_on_slider(pos, state, opts):
-    """When the position slider is released, start decoding the new position
-    in the background so Play is instant when the user clicks it."""
+    """On slider release: if something is playing, seek to the new position
+    (with VAE crossfade if that option is on); otherwise just prefetch so
+    the next Play click is instant."""
     st      = state or {}
     track_a = st.get("track")
     if not track_a or pos is None:
         return no_update
-    smart_loop = "smart_loop" in (opts or [])
-    url = build_decode_url(track_a, str(pos), smart_loop=smart_loop)
-    return {"action": "prefetch", "url": url}
+    opts       = opts or []
+    smart_loop = "smart_loop" in opts
+    vae_fade   = "vae_fade"   in opts
+    url        = build_decode_url(track_a, str(pos), smart_loop=smart_loop)
+    ls, le     = (0, -1) if smart_loop else (None, None)
+
+    if vae_fade:
+        # Let JS decide: if something is playing it crossfades, else starts directly.
+        return {"action": "fade_to", "url": url, "loop_start": ls, "loop_end": le}
+
+    # Non-fade: restart from new position if playing, or prefetch if not.
+    # Sending "play" is safe — playUrl() no-ops if URL+source are unchanged.
+    continue_auto = "continue_auto" in opts
+    return {"action": "play", "url": url, "loop_start": ls, "loop_end": le,
+            "continue_auto": continue_auto, "vae_fade": False}
 
 
 # ── Sync continue_auto / vae_fade flags immediately when checkbox changes ─────
