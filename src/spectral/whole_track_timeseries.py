@@ -302,7 +302,31 @@ _WORKER_DOWNBEAT = None
 _WORKER_CFG: Dict = {}
 
 
-def _worker_init(frame_rate: int, do_hpcp: bool) -> None:
+def _apply_rocm_env(yaml_path: str, profile: str) -> None:
+    """Apply ROCm/MIOpen env from the SAT rocm_env.yaml before any torch import.
+
+    Inert for the current CPU-only features (madmom/librosa/essentia), but in
+    place for future GPU-backed timeseries features. profile 'none' skips.
+    Uses setdefault, so shell exports still win.
+    """
+    if not profile or profile == "none":
+        return
+    p = Path(yaml_path)
+    if not p.exists():
+        logger.warning(f"ROCm env yaml not found: {p}; skipping --rocm-profile {profile}")
+        return
+    import yaml
+    cfg = yaml.safe_load(p.read_text()) or {}
+    root = str(cfg.get("tunings_root", ""))
+    env = dict(cfg.get("common", {}))
+    env.update(cfg.get("profiles", {}).get(profile, {}))
+    for k, v in env.items():
+        os.environ.setdefault(k, str(v).replace("${tunings_root}", root))
+
+
+def _worker_init(frame_rate: int, do_hpcp: bool,
+                 rocm_yaml: str = "", rocm_profile: str = "none") -> None:
+    _apply_rocm_env(rocm_yaml, rocm_profile)   # before any (future) torch import
     global _WORKER_BEAT, _WORKER_DOWNBEAT, _WORKER_CFG
     _WORKER_BEAT, _WORKER_DOWNBEAT = make_madmom_processors()
     _WORKER_CFG = {"frame_rate": frame_rate, "do_hpcp": do_hpcp}
@@ -349,6 +373,14 @@ def main():
                         help="Recycle each worker after N tracks to release leaked RSS "
                              "(essentia/madmom C-extensions don't free memory between tracks). "
                              "Lower = tighter memory ceiling, slightly more respawn overhead.")
+    parser.add_argument("--rocm-profile", choices=["none", "inference", "training"],
+                        default="training",
+                        help="Apply ROCm/MIOpen env (MIOPEN_FIND_MODE etc.) from "
+                             "--rocm-env-yaml before torch import. No-op for the current "
+                             "CPU-only features; in place for future GPU-backed ones. "
+                             "'none' to skip.")
+    parser.add_argument("--rocm-env-yaml",
+                        default="/home/kim/Projects/SAO/stable-audio-tools/rocm_env.yaml")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -381,17 +413,23 @@ def main():
             print(f"[{processed}/{len(jobs)}] {name}: FAILED — {info}")
 
     if args.workers <= 1:
-        _worker_init(args.frame_rate, not args.no_hpcp)
+        # Single process: apply the full rocm profile (incl. OMP_NUM_THREADS=8).
+        _worker_init(args.frame_rate, not args.no_hpcp,
+                     args.rocm_env_yaml, args.rocm_profile)
         for job in jobs:
             _report(*_process_one(job))
     else:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
         from concurrent.futures.process import BrokenProcessPool
-        # Pin BLAS so N workers don't oversubscribe the CPU (spawn children inherit env).
+        # Pin BLAS HARD so N workers don't oversubscribe the CPU (spawn children
+        # inherit env). Hard-set (not setdefault) to override rocm_env.yaml's
+        # OMP_NUM_THREADS=8, which is for single-process GPU training, not the
+        # 12-way CPU pool; workers re-apply the rocm profile via setdefault, so
+        # this 1 wins for the BLAS vars while MIOPEN_FIND_MODE=6 etc. still apply.
         for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                   "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-            os.environ.setdefault(v, "1")
+            os.environ[v] = "1"
         # spawn (not fork): essentia pulls in TensorFlow, which deadlocks under fork.
         ctx = mp.get_context("spawn")
 
@@ -411,7 +449,8 @@ def main():
                 with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
                                          max_tasks_per_child=args.max_tasks_per_child,
                                          initializer=_worker_init,
-                                         initargs=(args.frame_rate, not args.no_hpcp)) as ex:
+                                         initargs=(args.frame_rate, not args.no_hpcp,
+                                                   args.rocm_env_yaml, args.rocm_profile)) as ex:
                     futs = [ex.submit(_process_one, j) for j in remaining]
                     for fut in as_completed(futs):
                         _report(*fut.result())
