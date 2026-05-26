@@ -377,10 +377,15 @@ def main():
     parser.add_argument("--workers", type=int, default=1,
                         help="Parallel worker processes (default 1). Each builds its own "
                              "madmom + essentia stack; BLAS threads are pinned to 1 per worker.")
-    parser.add_argument("--max-tasks-per-child", type=int, default=8,
-                        help="Recycle each worker after N tracks to release leaked RSS "
-                             "(essentia/madmom C-extensions don't free memory between tracks). "
-                             "Lower = tighter memory ceiling, slightly more respawn overhead.")
+    parser.add_argument("--chunk-size", type=int, default=48,
+                        help="Tracks per fresh pool. The pool is torn down and rebuilt "
+                             "each chunk to release the essentia/madmom RSS leak without "
+                             "in-pool worker recycling (which deadlocked). Smaller = "
+                             "tighter memory ceiling, more pool-respawn overhead (~25s each).")
+    parser.add_argument("--chunk-timeout", type=float, default=2400.0,
+                        help="Seconds before a stuck chunk's workers are force-killed and "
+                             "the run continues (skip-existing resumes). Generous vs the "
+                             "~chunk_size/workers * 80s expected chunk time.")
     parser.add_argument("--rocm-profile", choices=["none", "inference", "training"],
                         default="training",
                         help="Apply ROCm/MIOpen env (MIOPEN_FIND_MODE etc.) from "
@@ -429,12 +434,13 @@ def main():
     else:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import TimeoutError as FTimeout
         from concurrent.futures.process import BrokenProcessPool
         # Pin BLAS HARD so N workers don't oversubscribe the CPU (spawn children
         # inherit env). Hard-set (not setdefault) to override rocm_env.yaml's
         # OMP_NUM_THREADS=8, which is for single-process GPU training, not the
-        # 12-way CPU pool; workers re-apply the rocm profile via setdefault, so
-        # this 1 wins for the BLAS vars while MIOPEN_FIND_MODE=6 etc. still apply.
+        # CPU pool; workers re-apply the rocm profile via setdefault, so this 1
+        # wins for the BLAS vars while MIOPEN_FIND_MODE=6 etc. still apply.
         for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                   "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             os.environ[v] = "1"
@@ -445,40 +451,46 @@ def main():
             # A job is done once its output npz exists (unless overwriting).
             return [j for j in js if j[2] or not Path(j[1]).exists()]
 
-        # A single worker dying (native crash in madmom/essentia, transient drive
-        # I/O) raises BrokenProcessPool and kills the whole pool. Restart on a fresh
-        # pool with only the still-missing jobs; if a restart makes zero progress the
-        # head job is poison, so skip it to stay unattended.
-        remaining = _pending(jobs)
-        prev_remaining = None
-        restart = 0
-        while remaining:
+        # Chunked FRESH pools instead of one long-lived pool with
+        # max_tasks_per_child: in-pool worker recycling wedged (all N workers hit
+        # the recycle boundary together and the TF/essentia re-import deadlocked).
+        # A fresh pool per chunk bounds memory (full teardown releases the
+        # essentia/madmom leak) with no in-pool respawn to hang. A per-chunk
+        # as_completed timeout force-kills workers if any single track hangs, and
+        # skip-existing makes every chunk independently resumable.
+        pending = _pending(jobs)
+        while pending:
+            batch = pending[:args.chunk_size]
+            ex = ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
+                                     initializer=_worker_init,
+                                     initargs=(args.frame_rate, not args.no_hpcp,
+                                               args.rocm_env_yaml, args.rocm_profile))
             try:
-                with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
-                                         max_tasks_per_child=args.max_tasks_per_child,
-                                         initializer=_worker_init,
-                                         initargs=(args.frame_rate, not args.no_hpcp,
-                                                   args.rocm_env_yaml, args.rocm_profile)) as ex:
-                    futs = [ex.submit(_process_one, j) for j in remaining]
-                    for fut in as_completed(futs):
-                        _report(*fut.result())
-                break
+                futs = [ex.submit(_process_one, j) for j in batch]
+                for fut in as_completed(futs, timeout=args.chunk_timeout):
+                    _report(*fut.result())
+            except FTimeout:
+                print(f"\n[chunk timeout >{args.chunk_timeout}s] a task hung — "
+                      f"killing workers, continuing (skip-existing resumes)", flush=True)
+                for p in list(getattr(ex, "_processes", {}).values()):
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
             except BrokenProcessPool:
-                restart += 1
-                new_remaining = _pending(remaining)
-                print(f"\n[pool restart {restart}] worker died abruptly — "
-                      f"{len(remaining) - len(new_remaining)} done this round, "
-                      f"{len(new_remaining)} remaining", flush=True)
-                if new_remaining and new_remaining == prev_remaining:
-                    poison = Path(new_remaining[0][0]).name
-                    print(f"  No progress since last restart; quarantining: {poison}", flush=True)
-                    failed += 1
-                    new_remaining = new_remaining[1:]
-                prev_remaining = list(new_remaining)
-                remaining = new_remaining
-                if restart > 100:
-                    print("  Too many restarts; aborting.", flush=True)
-                    break
+                print("\n[pool broke] worker died — continuing (skip-existing resumes)",
+                      flush=True)
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+
+            new_pending = _pending(pending)
+            if new_pending and len(new_pending) == len(pending):
+                # Zero progress this chunk → head job is poison; skip to stay unattended.
+                print(f"  No progress this chunk; quarantining: "
+                      f"{Path(new_pending[0][0]).name}", flush=True)
+                failed += 1
+                new_pending = new_pending[1:]
+            pending = new_pending
 
     print(f"\nDone: {done} written, {skipped} skipped, {failed} failed")
 
