@@ -38,7 +38,9 @@ downstream over coarse windows if needed.
 
 import json
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -294,9 +296,39 @@ def _iter_track_dirs(root: Path):
             yield child
 
 
+# Per-worker state (set by _worker_init in each process).
+_WORKER_BEAT = None
+_WORKER_DOWNBEAT = None
+_WORKER_CFG: Dict = {}
+
+
+def _worker_init(frame_rate: int, do_hpcp: bool) -> None:
+    global _WORKER_BEAT, _WORKER_DOWNBEAT, _WORKER_CFG
+    _WORKER_BEAT, _WORKER_DOWNBEAT = make_madmom_processors()
+    _WORKER_CFG = {"frame_rate": frame_rate, "do_hpcp": do_hpcp}
+
+
+def _process_one(job: Tuple[str, str, bool]) -> Tuple[str, str, object]:
+    """Extract + save one track. Returns (name, status, info). Picklable for pools."""
+    track_dir, out_path, overwrite = job
+    name = Path(track_dir).name
+    if Path(out_path).exists() and not overwrite:
+        return name, "skip", None
+    t0 = time.time()
+    try:
+        data, meta = extract_whole_track(
+            Path(track_dir), frame_rate=_WORKER_CFG["frame_rate"],
+            beat_proc=_WORKER_BEAT, downbeat_proc=_WORKER_DOWNBEAT,
+            do_hpcp=_WORKER_CFG["do_hpcp"])
+        save_timeseries_npz(Path(out_path), data, meta)
+        return name, "ok", {"n_frames": meta["n_frames"], "n_fields": len(data),
+                            "stems": meta["stems_present"], "elapsed": time.time() - t0}
+    except Exception as e:
+        return name, "fail", str(e)
+
+
 def main():
     import argparse
-    import time
 
     parser = argparse.ArgumentParser(
         description="Extract whole-track 100 Hz time-series sidecars (.TIMESERIES.npz).")
@@ -307,40 +339,58 @@ def main():
     parser.add_argument("--no-hpcp", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N tracks")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel worker processes (default 1). Each builds its own "
+                             "madmom + essentia stack; BLAS threads are pinned to 1 per worker.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(message)s")
 
-    beat_proc, downbeat_proc = make_madmom_processors()
-
     track_dirs = list(_iter_track_dirs(args.root))
     if args.limit:
         track_dirs = track_dirs[:args.limit]
-    print(f"Found {len(track_dirs)} track folders under {args.root}")
-
-    done = skipped = failed = 0
-    for i, td in enumerate(track_dirs, 1):
+    jobs: List[Tuple[str, str, bool]] = []
+    for td in track_dirs:
         out = (args.output_dir / f"{td.name}.TIMESERIES.npz") if args.output_dir \
             else (td / f"{td.name}.TIMESERIES.npz")
-        if out.exists() and not args.overwrite:
+        jobs.append((str(td), str(out), args.overwrite))
+    print(f"Found {len(jobs)} track folders under {args.root}; {args.workers} worker(s)")
+
+    done = skipped = failed = 0
+
+    def _report(i: int, name: str, status: str, info) -> None:
+        nonlocal done, skipped, failed
+        if status == "skip":
             skipped += 1
-            continue
-        t0 = time.time()
-        try:
-            data, meta = extract_whole_track(
-                td, frame_rate=args.frame_rate,
-                beat_proc=beat_proc, downbeat_proc=downbeat_proc,
-                do_hpcp=not args.no_hpcp)
-            save_timeseries_npz(out, data, meta)
+        elif status == "ok":
             done += 1
-            print(f"[{i}/{len(track_dirs)}] {td.name}: "
-                  f"{meta['n_frames']} frames, {len(data)} fields, "
-                  f"stems={meta['stems_present']} ({time.time()-t0:.1f}s)")
-        except Exception as e:
+            print(f"[{i}/{len(jobs)}] {name}: {info['n_frames']} frames, "
+                  f"{info['n_fields']} fields, stems={info['stems']} ({info['elapsed']:.1f}s)")
+        else:
             failed += 1
-            print(f"[{i}/{len(track_dirs)}] {td.name}: FAILED — {e}")
+            print(f"[{i}/{len(jobs)}] {name}: FAILED — {info}")
+
+    if args.workers <= 1:
+        _worker_init(args.frame_rate, not args.no_hpcp)
+        for i, job in enumerate(jobs, 1):
+            _report(i, *_process_one(job))
+    else:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        # Pin BLAS so N workers don't oversubscribe the CPU (spawn children inherit env).
+        for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                  "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            os.environ.setdefault(v, "1")
+        # spawn (not fork): essentia pulls in TensorFlow, which deadlocks under fork.
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
+                                 initializer=_worker_init,
+                                 initargs=(args.frame_rate, not args.no_hpcp)) as ex:
+            futs = [ex.submit(_process_one, job) for job in jobs]
+            for i, fut in enumerate(as_completed(futs), 1):
+                _report(i, *fut.result())
 
     print(f"\nDone: {done} written, {skipped} skipped, {failed} failed")
 
