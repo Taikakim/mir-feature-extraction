@@ -325,6 +325,9 @@ def _process_one(job: Tuple[str, str, bool]) -> Tuple[str, str, object]:
                             "stems": meta["stems_present"], "elapsed": time.time() - t0}
     except Exception as e:
         return name, "fail", str(e)
+    finally:
+        import gc
+        gc.collect()
 
 
 def main():
@@ -342,6 +345,10 @@ def main():
     parser.add_argument("--workers", type=int, default=1,
                         help="Parallel worker processes (default 1). Each builds its own "
                              "madmom + essentia stack; BLAS threads are pinned to 1 per worker.")
+    parser.add_argument("--max-tasks-per-child", type=int, default=8,
+                        help="Recycle each worker after N tracks to release leaked RSS "
+                             "(essentia/madmom C-extensions don't free memory between tracks). "
+                             "Lower = tighter memory ceiling, slightly more respawn overhead.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -402,6 +409,7 @@ def main():
         while remaining:
             try:
                 with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
+                                         max_tasks_per_child=args.max_tasks_per_child,
                                          initializer=_worker_init,
                                          initargs=(args.frame_rate, not args.no_hpcp)) as ex:
                     futs = [ex.submit(_process_one, j) for j in remaining]
