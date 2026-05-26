@@ -46,6 +46,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+# essentia-tensorflow drags in TensorFlow, which probes for NVIDIA CUDA on this
+# AMD/ROCm box and spams "Could not load libcudart / failed call to cuInit". We
+# only use essentia's CPU HPCP, never TF — silence its logs and skip the GPU
+# probe. Must be set before essentia is imported (below, transitively). Does NOT
+# affect ROCm/HIP (which uses HIP_VISIBLE_DEVICES), so future GPU features are fine.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.file_utils import read_audio
