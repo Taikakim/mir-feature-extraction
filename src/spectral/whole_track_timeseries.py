@@ -358,39 +358,72 @@ def main():
         jobs.append((str(td), str(out), args.overwrite))
     print(f"Found {len(jobs)} track folders under {args.root}; {args.workers} worker(s)")
 
-    done = skipped = failed = 0
+    done = skipped = failed = processed = 0
 
-    def _report(i: int, name: str, status: str, info) -> None:
-        nonlocal done, skipped, failed
+    def _report(name: str, status: str, info) -> None:
+        nonlocal done, skipped, failed, processed
+        processed += 1
         if status == "skip":
             skipped += 1
         elif status == "ok":
             done += 1
-            print(f"[{i}/{len(jobs)}] {name}: {info['n_frames']} frames, "
+            print(f"[{processed}/{len(jobs)}] {name}: {info['n_frames']} frames, "
                   f"{info['n_fields']} fields, stems={info['stems']} ({info['elapsed']:.1f}s)")
         else:
             failed += 1
-            print(f"[{i}/{len(jobs)}] {name}: FAILED — {info}")
+            print(f"[{processed}/{len(jobs)}] {name}: FAILED — {info}")
 
     if args.workers <= 1:
         _worker_init(args.frame_rate, not args.no_hpcp)
-        for i, job in enumerate(jobs, 1):
-            _report(i, *_process_one(job))
+        for job in jobs:
+            _report(*_process_one(job))
     else:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool
         # Pin BLAS so N workers don't oversubscribe the CPU (spawn children inherit env).
         for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                   "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             os.environ.setdefault(v, "1")
         # spawn (not fork): essentia pulls in TensorFlow, which deadlocks under fork.
         ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
-                                 initializer=_worker_init,
-                                 initargs=(args.frame_rate, not args.no_hpcp)) as ex:
-            futs = [ex.submit(_process_one, job) for job in jobs]
-            for i, fut in enumerate(as_completed(futs), 1):
-                _report(i, *fut.result())
+
+        def _pending(js):
+            # A job is done once its output npz exists (unless overwriting).
+            return [j for j in js if j[2] or not Path(j[1]).exists()]
+
+        # A single worker dying (native crash in madmom/essentia, transient drive
+        # I/O) raises BrokenProcessPool and kills the whole pool. Restart on a fresh
+        # pool with only the still-missing jobs; if a restart makes zero progress the
+        # head job is poison, so skip it to stay unattended.
+        remaining = _pending(jobs)
+        prev_remaining = None
+        restart = 0
+        while remaining:
+            try:
+                with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
+                                         initializer=_worker_init,
+                                         initargs=(args.frame_rate, not args.no_hpcp)) as ex:
+                    futs = [ex.submit(_process_one, j) for j in remaining]
+                    for fut in as_completed(futs):
+                        _report(*fut.result())
+                break
+            except BrokenProcessPool:
+                restart += 1
+                new_remaining = _pending(remaining)
+                print(f"\n[pool restart {restart}] worker died abruptly — "
+                      f"{len(remaining) - len(new_remaining)} done this round, "
+                      f"{len(new_remaining)} remaining", flush=True)
+                if new_remaining and new_remaining == prev_remaining:
+                    poison = Path(new_remaining[0][0]).name
+                    print(f"  No progress since last restart; quarantining: {poison}", flush=True)
+                    failed += 1
+                    new_remaining = new_remaining[1:]
+                prev_remaining = list(new_remaining)
+                remaining = new_remaining
+                if restart > 100:
+                    print("  Too many restarts; aborting.", flush=True)
+                    break
 
     print(f"\nDone: {done} written, {skipped} skipped, {failed} failed")
 
