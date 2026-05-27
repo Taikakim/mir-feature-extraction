@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 FRAME_RATE_DEFAULT = 100
 STEMS = ["drums", "bass", "other", "vocals"]
-_STEM_EXTS = (".flac", ".wav", ".mp3")
+_STEM_EXTS = (".flac", ".wav", ".mp3", ".ogg", ".m4a", ".aiff")
 
 try:
     import essentia.standard as es
