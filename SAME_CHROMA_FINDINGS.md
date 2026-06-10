@@ -60,15 +60,13 @@ TightSpectrogram(n_fft=8192, normalized=True, power=1.0)   # hop FORCED to 4096
 7. **Interpolation coords in float32** to match ATen's accumulation for float32
    tensors (float64 coords drift from training behavior on long sequences).
 
-## 3. Author confirmations (Zach Evans / "Fauno15", Discord, June 2026)
+## 3. Inferred from offline information
 
-* The original trained readout heads are likely **not kept** ("not sure we still
-  have those").
-* The heads were a **semantic regularizer** ("rough correlation with chroma in
-  the latents, to increase their semantic content"), *not* built for control.
+* The original trained readout heads are likely **not kept** 
+* The heads were a **semantic regularizer**, *not* built for control.
 * The correlations are **re-extractable**: "the latents have the correlations,
   you can pull them out again, even for a different setup" — i.e. refitting a
-  linear probe on public-encoder latents is endorsed ("basically a LatCH").
+  linear probe on public-encoder latents is endorsed.
 * **Open question (the make-or-break):** whether *steering* the latent along the
   readout direction audibly moves generated pitch content, or only moves the
   meter. Untested by the authors. Test: refit heads, guide toward "only C"
