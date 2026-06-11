@@ -6,6 +6,22 @@ run on the dev laptop. Ordered by dependency: each gate decides what comes next.
 
 ---
 
+## Checkpoint selection (release provides three families)
+
+| Key | Family | Use here for |
+|---|---|---|
+| small-music / small-sfx / medium | Post-trained (APT, few-step) | final generation only |
+| small-music-base / small-sfx-base / medium-base | Base (pre-APT flow matching) | **steering experiments, ZeroSep inversion, LoRA training** |
+| same-s / same-l | SAME autoencoder standalone | **readout refit (encode-only, no DiT)** |
+
+Rules: run the steering gate (#2) and ZeroSep (#5) on **-base** checkpoints —
+clean continuous velocity field (faithful inversion, live cfg knob, room for
+selective TFG's first-20%-of-steps window, which on a 4-8-step APT model is
+~1 step). Only after steering is proven, test whether it survives on the
+post-trained checkpoint. CHECK ONCE: which autoencoder each diffusion
+checkpoint pairs with (same-l vs same-s) — the refit readout must be fit on
+latents from the SAME encoder the steered model actually uses.
+
 ## 0. Environment sanity (5 min)
 
 - [ ] `python src/harmonic/same_chroma.py --selftest` — should pass 9/9 (numpy/scipy only).
@@ -123,14 +139,13 @@ reconstructs the mixture, omega>1 generates new content). Validated on
 mel-VAE backbones (AudioLDM-class); their "does not apply to SAO" footnote
 scopes the mel+vocoder pipeline, not the method. Adaptations for SA3:
 
-- [ ] Inversion: SA3 is flow matching -> reverse-ODE inversion is natural,
-      BUT released checkpoints are adversarially post-trained few-step models
-      (distilled velocity fields invert poorly). Check the repo for pre-APT
-      flow-matching weights; otherwise use DDPM-style (edit-friendly)
-      inversion — per-step noise recording makes reconstruction exact by
-      construction even on imperfect models.
-- [ ] Verify cfg_scale is a free knob in the released inference code (APT
-      models sometimes bake guidance in); ZeroSep needs omega = 1 exactly.
+- [ ] Inversion: SA3 is flow matching -> reverse-ODE inversion is natural.
+      RESOLVED RISK: pre-APT flow-matching weights ARE released (the -base
+      checkpoints) — use those; DDPM-style (edit-friendly) inversion remains
+      the more robust default mode regardless.
+- [ ] Verify cfg_scale is a free knob (near-certain on -base checkpoints;
+      still check the post-trained ones if ever used here). ZeroSep needs
+      omega = 1 exactly.
 - [ ] Honest unknown: ZeroSep's evidence is from near-linear mel-VAE latents;
       SAME's 4096x semantic latent does not superpose sources linearly.
       Untested either way — run "the bassline" / "drums only" on a few known
@@ -171,8 +186,11 @@ Tango/AudioLDM/AudioLDM2 (code/models.py). Port = one StableAudio3Wrapper:
   frames (4096x). Decide one rate per pipeline; `interpolate_linear(c, 256)`
   bridges if needed.
 - Whether the SAME release includes the trained semantic-regressor weights
-  (probably not — Zach: "not sure we still have those"); check the checkpoint
-  keys once, before refitting from scratch.
+  (probably not — Zach: "not sure we still have those"); check the same-s /
+  same-l checkpoint keys once, before refitting from scratch.
+- Which autoencoder (same-l vs same-s) each diffusion checkpoint pairs with —
+  determines which encoder the readout refit must use (see Checkpoint
+  selection table at top).
 
 ## References
 
