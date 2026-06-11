@@ -54,8 +54,15 @@ SAME frames vs 256 SAO frames — a clean 2x `interpolate_linear(c, 256)`.
 - DiT: depth 24 (same as SAO, where TADA's bottleneck was {12,13}), embed
   1536, differential attention, 64 memory tokens. ARC discriminator taps DiT
   hidden layer 18 — Stability's own pointer to semantically rich depth.
-- `diffusion_objective: "rf_denoiser"` + ot_coupling — rectified flow
-  confirmed; target for the ZeroSep scheduler-math port.
+- Objectives differ by checkpoint (both configs inspected): **-base =
+  "rectified_flow"** (pure RF velocity — the target for inversion/steering
+  math; predicted-clean is z0|t = z_t - t*v), post-trained = "rf_denoiser".
+- Base demo settings confirm the regime: demo_steps 50 + demo_cfg_scales
+  [2,4,7] (vs 8 steps + cfg [1] post-trained) — many-step sampling and a
+  live, working unconditional branch on -base. Selective TFG's first-20%
+  window = ~10 steps of room at 50 steps.
+- Conditioning topology is IDENTICAL across base/post-trained (why LoRA
+  transfer works; the local_add_cond chroma template applies to both).
 - Encoder mask_noise 0.001 at inference (decoder 0.1), softnorm bottleneck
   with noise_regularize — tiny latent noise floor; the refit readout sees it.
 - sample_size 2^24 = ~380 s max; latent length capped at 4096 frames.
