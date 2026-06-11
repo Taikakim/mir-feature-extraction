@@ -1,5 +1,25 @@
 # Production-Box Migration: Pending Tests & Findings
 
+**Scripts are WRITTEN and waiting in `scripts/`** (verified against the local
+stable-audio-3 source; the GPU paths could not be executed on the dev laptop):
+
+| Runbook step | Script | Run |
+|---|---|---|
+| #0 sanity | `scripts/sa3_refit_readout.py --sanity` | 2 min |
+| #1 refit | `scripts/sa3_refit_readout.py --audio_dir <crops> --model same-l` | ~min |
+| #2 steering gate | `scripts/sa3_steer_chroma.py --heads chroma_heads.npz --test only-c` then `--test goa-e` | listen! |
+| #5 ZeroSep-lite | `scripts/sa3_zerosep_lite.py -i mix.wav` | 10 min |
+| #4 prototypes | `scripts/build_chroma_prototypes.py --audio_dir <crops>` (numpy-only; selftest passes on laptop, purity 1.000) | ~min |
+
+Implementation notes baked into the scripts: closed-form cosine gradient
+through the affine head (generate() runs under @torch.inference_mode(), so no
+autograd — and it's faster); guidance via a monkey-patched
+sample_discrete_euler clone (verified: model.py imports only sample_diffusion,
+which resolves the euler fn from module globals at call time; generate() pops
+sampler_type so passing it is supported); per-band gains act as LOSS WEIGHTS
+(cosine is scale-invariant); --mu-schedule const|alpha (TFG's mu*s_t is
+near-inert in the early window — const with RMS-normalized grads is default).
+
 *Companion to `SAME_CHROMA_FINDINGS.md`. Everything here needs the production
 desktop (ROCm GPU, venvs, audio dataset, SAME/SA3 checkpoints) — none of it can
 run on the dev laptop. Ordered by dependency: each gate decides what comes next.*
