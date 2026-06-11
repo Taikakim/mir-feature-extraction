@@ -140,6 +140,26 @@ scopes the mel+vocoder pipeline, not the method. Adaptations for SA3:
   to build empirical band-0 chroma templates; and the inversion plumbing
   doubles for Plan-B activation harvesting (TADA) and audio-to-audio editing.
 
+**Port plan (repo reviewed locally at py/ZeroSep, 2026-06-11):** the codebase
+is cleanly abstracted — all separation logic (code/ddm_inversion/, ~21 KB) is
+model-agnostic behind a PipelineWrapper base class; existing wrappers are
+Tango/AudioLDM/AudioLDM2 (code/models.py). Port = one StableAudio3Wrapper:
+- Trivial: vae_encode/decode (SAME), encode_text (T5 + SA3's required timing
+  conditioning via the setup_extra_inputs hook), unet_forward + CFG.
+- Small surgery: the interface assumes mel-STFT front-end (get_fn_STFT,
+  decode_to_mel, load_audio stft=True) — SA3 is waveform-native; identity
+  STFT + branch load_audio + drop vocoder path.
+- The real work: six DDPM-parameterized scheduler methods
+  (sample_xts_from_x0, get_zs_from_xts, reverse_step_with_custom_noise,
+  get_variance, get_alpha_prod_t_prev, get_sigma) need rectified-flow
+  equivalents (alpha_t = 1-t, sigma_t = t; RF-Inversion / FlowEdit math).
+- Code facts: omega=1 is the shipped default for BOTH guidance scales;
+  DDPM-inversion is the default mode (the APT-friendly one); tstart < steps
+  gives partial inversion (fidelity/separation dial); 50-step default.
+- Estimate: 1-2 focused days; run the two go/no-go checks (cfg knob, a quick
+  semantic-latent separation listen) in the first hour before writing the
+  full wrapper.
+
 ## 6. Open / unresolved
 
 - The Gaussian-blur-for-pitch-steering paper is still unidentified (it is NOT
