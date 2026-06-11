@@ -46,6 +46,27 @@ the readout direction audibly move generated pitch — or only move the meter?
       air_gain 0.3. Listen: static E bass, melody constrained to scale?
 - [ ] Try coarse-to-fine: Gaussian-blur the target (time sigma 2-4 frames,
       chroma sigma 2-3 bins) at high-noise steps, sharpen toward the end.
+
+**LatCH paper recipe (arXiv 2603.04366 — Novack + the SAME/SA3 team; this IS
+the published LatCH method, and the fork already has its scripts per
+LATCH_CONTROL.md):**
+- Their working TFG hyperparameters on SAO: rho = mu = 0.03, gamma = 0.3,
+  **selective guidance on only the FIRST ~20% of sampling steps**, N_iter = 4,
+  N_recur = 1, 100-step DDIM, CFG 7, variance-preserving form. Start there.
+- Apply the clean-latent refit head via MEAN guidance on the predicted-clean
+  z0|t (their Readouts baseline lost precisely because it cannot do mean
+  guidance; heads on z0|t can).
+- CAUTION, and why we may still win: they tried 12-bin chroma + CREPE pitch
+  guidance on SAO with "mixed results" — but (a) SAO's latent was never
+  chroma-regularized, SAME's is (linear decodability was a training
+  objective); (b) their failure mode was rapid note-contours with sparse
+  one-hot targets, ours is near-static soft palette targets (their
+  "gradual/low-frequency controls work well" regime); (c) their own
+  hypothesis favors dense/smooth targets — SAME's 3x128 soft chroma is that.
+- Upgrade path if clean-head guidance underwhelms: small noise-conditioned
+  head trained LatCH-B-style (on generated-trajectory intermediates — their
+  best variant), NOT a paradigm change.
+
 - [ ] GATE: pitches move cleanly -> build the GUI on guidance alone (no
       training). Meter moves but audio doesn't / artifacts dominate ->
       Plan B (below) + trained conditioner path.
@@ -93,7 +114,33 @@ no pitch concepts, no temporal control. Three things transfer:
 - [ ] Also: measure one genre-typical bass patch per root -> empirical
       band-0 template (replaces theoretical BASS_PROFILES weights).
 
-## 5. Open / unresolved
+## 5. ZeroSep on SA3: open-set text-queried separation (optional)
+
+ZeroSep (NeurIPS 2025, OpenReview IIjiNTR1cV): zero-training separation =
+invert the mixture's latent to noise, re-denoise with the TARGET source's
+text description at CFG **omega = 1** (drops the unconditional term; omega=0
+reconstructs the mixture, omega>1 generates new content). Validated on
+mel-VAE backbones (AudioLDM-class); their "does not apply to SAO" footnote
+scopes the mel+vocoder pipeline, not the method. Adaptations for SA3:
+
+- [ ] Inversion: SA3 is flow matching -> reverse-ODE inversion is natural,
+      BUT released checkpoints are adversarially post-trained few-step models
+      (distilled velocity fields invert poorly). Check the repo for pre-APT
+      flow-matching weights; otherwise use DDPM-style (edit-friendly)
+      inversion — per-step noise recording makes reconstruction exact by
+      construction even on imperfect models.
+- [ ] Verify cfg_scale is a free knob in the released inference code (APT
+      models sometimes bake guidance in); ZeroSep needs omega = 1 exactly.
+- [ ] Honest unknown: ZeroSep's evidence is from near-linear mel-VAE latents;
+      SAME's 4096x semantic latent does not superpose sources linearly.
+      Untested either way — run "the bassline" / "drums only" on a few known
+      crops and listen before investing further.
+- Use cases if it works: open-set stem queries beyond Demucs's taxonomy
+  ("the acid line", "the 909 hats") for dataset curation; isolating basslines
+  to build empirical band-0 chroma templates; and the inversion plumbing
+  doubles for Plan-B activation harvesting (TADA) and audio-to-audio editing.
+
+## 6. Open / unresolved
 
 - The Gaussian-blur-for-pitch-steering paper is still unidentified (it is NOT
   TADA). Mechanism is sound regardless (gradient basin, over-constraint relief,
@@ -112,4 +159,7 @@ no pitch concepts, no temporal control. Three things transfer:
 - `SAME_CHROMA_FINDINGS.md` — full decoded recipe + verification log.
 - SAME: arXiv 2605.18613. SA3 report: arXiv 2605.17991.
 - TADA: arXiv 2602.11910 (v2, May 2026).
+- LatCH: arXiv 2603.04366 — "Low-Resource Guidance for Controllable Latent
+  Audio Diffusion" (Novack et al., Stability AI; selective TFG + LatCH heads).
+- ZeroSep: OpenReview IIjiNTR1cV (NeurIPS 2025).
 - stable-audio-tools @ 3241adb: training/autoencoders.py:567-597.
