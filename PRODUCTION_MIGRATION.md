@@ -34,16 +34,31 @@ docs/workflows/inference.md, docs/workflows/autoencoder.md):
   multi-region masks. scripts/pre_encode_dataset.py pre-encodes a dataset to
   .npy latents — the refit data prep is a stock script.
 
-**LATENT-RATE DISCREPANCY (settle first, 30 s):** the papers say 4096x per
-channel (10 s -> 108 frames, 10.766 Hz; patch 256 x stride 16); the repo docs
-say 10 s -> **216** frames (21.53 Hz, i.e. 2048/channel, "4096x" counting
-stereo). Code computes ceil(per_channel_samples / downsampling_ratio) with
-the ratio from the checkpoint config (not in repo). TEST: encode a 10 s clip
-with same-l, look at latent_time. If 216: (a) fix same_chroma.n_latent_frames
-to samples//2048-style; (b) chroma targets (hop 4096) were trained at HALF
-the latent rate and upsampled via F.interpolate — extraction unchanged, only
-alignment count changes; (c) BONUS: 21.53 Hz = the SAO rate, so the existing
-LATCH_CONTROL.md 256-frames-per-crop format aligns natively (524288/2048).
+**LATENT RATE — RESOLVED from the HF medium checkpoint's model_config.json:**
+`downsampling_ratio: 4096` (patch_size 256 x strides [16]) — the papers were
+right; the repo doc's "216 frames per 10 s" is a documentation bug (stereo
+samples counted). 10 s -> 108 frames at 10.766 Hz; chroma hop 4096 is
+natively 1:1 with latents; `same_chroma.n_latent_frames` = ceil(T/4096) is
+CORRECT as implemented. LATCH SAO-format bridge: a 524288-sample crop = 128
+SAME frames vs 256 SAO frames — a clean 2x `interpolate_linear(c, 256)`.
+
+**More facts from model_config.json (stable-audio-3-medium):**
+- `cfg_dropout_prob: 0.1` — the unconditional branch was trained; the
+  cfg_scale/omega knob is real in the released weights.
+- Conditioning topology: prompt (T5Gemma) + seconds_total via CROSS-ATTENTION;
+  seconds_total also global adaLN; inpainting via **local_add_cond**
+  (frame-aligned additive, dim 257 = 256 latent + 1 mask). For the LoRA
+  conditioner path: time-aligned chroma fits the local_add_cond pattern
+  exactly (project 3x128 -> add channels) — reuse the mechanism the model
+  already knows for time-aligned signals, do not invent a new one.
+- DiT: depth 24 (same as SAO, where TADA's bottleneck was {12,13}), embed
+  1536, differential attention, 64 memory tokens. ARC discriminator taps DiT
+  hidden layer 18 — Stability's own pointer to semantically rich depth.
+- `diffusion_objective: "rf_denoiser"` + ot_coupling — rectified flow
+  confirmed; target for the ZeroSep scheduler-math port.
+- Encoder mask_noise 0.001 at inference (decoder 0.1), softnorm bottleneck
+  with noise_regularize — tiny latent noise floor; the refit readout sees it.
+- sample_size 2^24 = ~380 s max; latent length capped at 4096 frames.
 
 ## 0. Environment sanity (5 min)
 
@@ -211,10 +226,9 @@ Tango/AudioLDM/AudioLDM2 (code/models.py). Port = one StableAudio3Wrapper:
   TADA). Mechanism is sound regardless (gradient basin, over-constraint relief,
   coarse-to-fine) — find the citation for the exact blur schedule, or just
   sweep sigma in experiment #2.
-- SAO-era LatCH rate mismatch: MAY BE MOOT — if the latent-rate check (top of
-  this doc) confirms 21.53 Hz, SAME latents match the SAO rate and the
-  existing LATCH 256-frames-per-crop format aligns natively. If instead
-  10.766 Hz, bridge with `interpolate_linear(c, 256)`.
+- SAO-era LatCH rate mismatch: CONFIRMED real (SAME 10.766 Hz vs SAO/LATCH
+  21.533 Hz) but trivial — exactly 2x; bridge with `interpolate_linear(c, 256)`
+  per 524288-sample crop.
 - Whether the SAME release includes the trained semantic-regressor weights
   (probably not — Zach: "not sure we still have those"); check the same-s /
   same-l checkpoint keys once, before refitting from scratch.
