@@ -15,12 +15,35 @@ run on the dev laptop. Ordered by dependency: each gate decides what comes next.
 | same-s / same-l | SAME autoencoder standalone | **readout refit (encode-only, no DiT)** |
 
 Rules: run the steering gate (#2) and ZeroSep (#5) on **-base** checkpoints —
-clean continuous velocity field (faithful inversion, live cfg knob, room for
-selective TFG's first-20%-of-steps window, which on a 4-8-step APT model is
-~1 step). Only after steering is proven, test whether it survives on the
-post-trained checkpoint. CHECK ONCE: which autoencoder each diffusion
-checkpoint pairs with (same-l vs same-s) — the refit readout must be fit on
-latents from the SAME encoder the steered model actually uses.
+clean continuous velocity field (faithful inversion, room for selective TFG's
+first-20%-of-steps window, which on a 4-8-step APT model is ~1 step). Only
+after steering is proven, test whether it survives on the post-trained
+checkpoint.
+
+RESOLVED from the local stable-audio-3 repo (docs/guides/model-overview.md,
+docs/workflows/inference.md, docs/workflows/autoencoder.md):
+- Encoder pairing: small-music/small-sfx -> **SAME-S**; medium (and large) ->
+  **SAME-L**. Refit readouts on same-l latents to steer medium-base.
+- cfg_scale: free knob **on -base checkpoints only** ("no effect on
+  post-trained checkpoints"); default is 1.0 — ZeroSep's exact omega.
+  negative_prompt likewise base-only. All control experiments => -base.
+- LoRA: trained on -base, "can be applied to the post-trained model and will
+  work as expected" — a trained chroma conditioner deploys on the fast model.
+- `model.generate(init_audio=..., init_noise_level=...)` is built-in
+  audio-to-audio (SDEdit-style noise-then-denoise), and inpainting supports
+  multi-region masks. scripts/pre_encode_dataset.py pre-encodes a dataset to
+  .npy latents — the refit data prep is a stock script.
+
+**LATENT-RATE DISCREPANCY (settle first, 30 s):** the papers say 4096x per
+channel (10 s -> 108 frames, 10.766 Hz; patch 256 x stride 16); the repo docs
+say 10 s -> **216** frames (21.53 Hz, i.e. 2048/channel, "4096x" counting
+stereo). Code computes ceil(per_channel_samples / downsampling_ratio) with
+the ratio from the checkpoint config (not in repo). TEST: encode a 10 s clip
+with same-l, look at latent_time. If 216: (a) fix same_chroma.n_latent_frames
+to samples//2048-style; (b) chroma targets (hop 4096) were trained at HALF
+the latent rate and upsampled via F.interpolate — extraction unchanged, only
+alignment count changes; (c) BONUS: 21.53 Hz = the SAO rate, so the existing
+LATCH_CONTROL.md 256-frames-per-crop format aligns natively (524288/2048).
 
 ## 0. Environment sanity (5 min)
 
@@ -150,6 +173,13 @@ scopes the mel+vocoder pipeline, not the method. Adaptations for SA3:
       SAME's 4096x semantic latent does not superpose sources linearly.
       Untested either way — run "the bassline" / "drums only" on a few known
       crops and listen before investing further.
+- [ ] **ZeroSep-lite, ZERO porting (run this FIRST):** SA3's built-in
+      audio-to-audio is the SDEdit approximation of the same idea:
+      `model.generate(init_audio=mixture, init_noise_level~0.5-0.7,
+      prompt="the bassline", cfg_scale=1)` on medium-base. Not exact
+      inversion (loses some mixture fidelity), but answers the
+      semantic-latent separability question in 10 minutes with the stock
+      repo. Only if promising, build the full DDPM-inversion wrapper.
 - Use cases if it works: open-set stem queries beyond Demucs's taxonomy
   ("the acid line", "the 909 hats") for dataset curation; isolating basslines
   to build empirical band-0 chroma templates; and the inversion plumbing
@@ -181,16 +211,15 @@ Tango/AudioLDM/AudioLDM2 (code/models.py). Port = one StableAudio3Wrapper:
   TADA). Mechanism is sound regardless (gradient basin, over-constraint relief,
   coarse-to-fine) — find the citation for the exact blur schedule, or just
   sweep sigma in experiment #2.
-- SAO-era LatCH rate mismatch: existing LATCH_CONTROL.md pipeline expects
-  21.533 Hz / 256 frames per crop (SAO, 2048x); SAME/SA3 is 10.766 Hz / 128
-  frames (4096x). Decide one rate per pipeline; `interpolate_linear(c, 256)`
-  bridges if needed.
+- SAO-era LatCH rate mismatch: MAY BE MOOT — if the latent-rate check (top of
+  this doc) confirms 21.53 Hz, SAME latents match the SAO rate and the
+  existing LATCH 256-frames-per-crop format aligns natively. If instead
+  10.766 Hz, bridge with `interpolate_linear(c, 256)`.
 - Whether the SAME release includes the trained semantic-regressor weights
   (probably not — Zach: "not sure we still have those"); check the same-s /
   same-l checkpoint keys once, before refitting from scratch.
-- Which autoencoder (same-l vs same-s) each diffusion checkpoint pairs with —
-  determines which encoder the readout refit must use (see Checkpoint
-  selection table at top).
+- ~~Which autoencoder pairs with which diffusion checkpoint~~ RESOLVED:
+  small -> SAME-S, medium/large -> SAME-L (model-overview.md).
 
 ## References
 
