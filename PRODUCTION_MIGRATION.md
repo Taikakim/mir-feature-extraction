@@ -84,8 +84,8 @@ transfer between sizes.
 ## 1. Readout refit (the LatCH probe)
 
 Goal: reconstruct the (lost) linear chroma readout heads from public SAME latents.
-Zach Evans confirmed this is the intended route ("the latents have the
-correlations, you can pull them out again").
+Offline information confirms this is the intended route (the correlations
+are re-extractable from the latents, even for a different setup).
 
 - [ ] Encode a few hours of varied audio (use the crop dataset) with the public
       SAME encoder -> latents (B, 256, T) at ~10.766 Hz.
@@ -93,8 +93,8 @@ correlations, you can pull them out again").
       frame-aligned (hop 4096 = latent hop).
 - [ ] Per band: least-squares fit `latent -> 128 bins` WITH bias (the original
       heads were Conv1d k=1 bias=True). Minutes on CPU; no training loop needed.
-- [ ] GATE: held-out R^2 / correlation per band. Rough is expected (Zach: "rough
-      correlation") — bass band likely strongest. If near-zero, check frame
+- [ ] GATE: held-out R^2 / correlation per band. A rough correlation is
+      expected — bass band likely strongest. If near-zero, check frame
       alignment first (off-by-one), not the method.
 
 ## 2. The steering experiment (decides the whole architecture)
@@ -241,8 +241,8 @@ Tango/AudioLDM/AudioLDM2 (code/models.py). Port = one StableAudio3Wrapper:
   21.533 Hz) but trivial — exactly 2x; bridge with `interpolate_linear(c, 256)`
   per 524288-sample crop.
 - Whether the SAME release includes the trained semantic-regressor weights
-  (probably not — Zach: "not sure we still have those"); check the same-s /
-  same-l checkpoint keys once, before refitting from scratch.
+  (probably not, per offline information); check the same-s / same-l
+  checkpoint keys once, before refitting from scratch.
 - ~~Which autoencoder pairs with which diffusion checkpoint~~ RESOLVED:
   small -> SAME-S, medium/large -> SAME-L (model-overview.md).
 
