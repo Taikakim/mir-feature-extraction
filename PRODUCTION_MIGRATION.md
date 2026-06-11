@@ -34,13 +34,17 @@ docs/workflows/inference.md, docs/workflows/autoencoder.md):
   multi-region masks. scripts/pre_encode_dataset.py pre-encodes a dataset to
   .npy latents — the refit data prep is a stock script.
 
-**LATENT RATE — RESOLVED from the HF medium checkpoint's model_config.json:**
-`downsampling_ratio: 4096` (patch_size 256 x strides [16]) — the papers were
-right; the repo doc's "216 frames per 10 s" is a documentation bug (stereo
-samples counted). 10 s -> 108 frames at 10.766 Hz; chroma hop 4096 is
-natively 1:1 with latents; `same_chroma.n_latent_frames` = ceil(T/4096) is
-CORRECT as implemented. LATCH SAO-format bridge: a 524288-sample crop = 128
-SAME frames vs 256 SAO frames — a clean 2x `interpolate_linear(c, 256)`.
+**LATENT RATE — RESOLVED from the HF checkpoint configs (ALL varieties):**
+`downsampling_ratio: 4096` (patch_size 256 x strides [16]) verified in
+medium, medium-base, AND small-music-base (i.e. both SAME-L and SAME-S) —
+the papers were right; the repo doc's "216 frames per 10 s" is a
+documentation bug for every model. 10 s -> 108 frames at 10.766 Hz; chroma
+hop 4096 is natively 1:1 with latents; `same_chroma.n_latent_frames` =
+ceil(T/4096) is CORRECT as implemented for any checkpoint. LATCH SAO-format
+bridge: a 524288-sample crop = 128 SAME frames vs 256 SAO frames — a clean
+2x `interpolate_linear(c, 256)`. Note for TADA localization: small DiT is
+depth 20 / embed 1024 (medium: 24 / 1536) — bottleneck indices will not
+transfer between sizes.
 
 **More facts from model_config.json (stable-audio-3-medium):**
 - `cfg_dropout_prob: 0.1` — the unconditional branch was trained; the
