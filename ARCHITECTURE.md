@@ -111,6 +111,14 @@ plots/
 
 The Explorer's Analysis tab reads the pre-computed NPZ files from `plots/latent_analysis/data/`. Regenerate them by re-running scripts 01–04 against the current dataset.
 
+**Running the viewer = two processes, two venvs (start the backend first).** The Explorer is a thin Dash *client*; all decode/crossfade work happens in `scripts/latent_server.py`. They run under different interpreters:
+- **Backend:** `stable-audio-tools/sat-venv/bin/python scripts/latent_server.py` (port 7891) — imports `stable_audio_tools` and loads the SAO‑Small VAE; the file's shebang pins this interpreter. Must be up before the UI can decode.
+- **UI:** `mir/bin/python plots/explorer/app.py [--port 7895]` — Dash, talks to 7891 over HTTP. Use `mir/bin/python`, **not** `.venv`.
+
+Data paths come from `latent_player.ini` (latents on Lehto, source audio + `.DOWNBEATS` on Mantu); a decode/crossfade 404 usually means a removable drive is unmounted, not a code bug.
+
+**Steering (Viewer tab).** `plots/explorer/latch.py` applies training-free ridge steering `z += strength·σ·β` using `models/latch/steer_directions.npz`, precomputed by `mir/bin/python plots/explorer/compute_steer_directions.py`. The planned recipe-picker ties to the recipes catalog at `stable-audio-tools/avp_sa3/recipes/inference_recipes.yaml`.
+
 ---
 
 ## Output schema (per track)
