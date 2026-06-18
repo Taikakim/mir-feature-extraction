@@ -6,6 +6,7 @@ import dash
 from dash import dcc, html
 from .sidecar_index import scan_index
 from . import viewer_tab, dataset_tab, analysis_tab
+from .callbacks import register
 
 _INI = Path(__file__).parent.parent.parent / "latent_player_sa3.ini"
 
@@ -33,7 +34,7 @@ app = dash.Dash(__name__)
 def main():
     index = scan_index(_latent_dir())
     app.layout = build_layout(index)
-    # Callbacks are registered in app_callbacks (wired in Task 9).
+    register(app, index, _latent_dir())
     app.run(debug=False, port=8051)
 
 
