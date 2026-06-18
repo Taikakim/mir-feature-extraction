@@ -10,19 +10,19 @@ FRAME_RATE_HZ = 44100 / 4096   # 10.7666 Hz
 
 def load_latent(latent_dir: Path, crop_id: str) -> np.ndarray:
     """Load NNNNNN.npy as float32 [256, T]. Squeezes a leading batch dim."""
-    arr = np.load(Path(latent_dir) / f"{crop_id}.npy").astype(np.float32)
+    arr = np.load(Path(latent_dir) / f"{crop_id}.npy")
     if arr.ndim == 3 and arr.shape[0] == 1:
         arr = arr[0]
     if arr.ndim != 2 or arr.shape[0] != LATENT_DIM:
         raise ValueError(
             f"{crop_id}: expected [{LATENT_DIM}, T], got {arr.shape}")
-    return arr
+    return arr.astype(np.float32)
 
 
 def content_frames(meta: dict) -> int:
     """Number of non-padding frames from padding_mask; full T if absent."""
     mask = meta.get("padding_mask")
-    if not mask:
+    if mask is None:
         return N_FRAMES
     return int(sum(mask))
 

@@ -43,3 +43,7 @@ def test_load_timeseries(tmp_path):
 
 def test_frame_rate():
     assert abs(FRAME_RATE_HZ - 10.7666) < 1e-3
+
+
+def test_content_frames_empty_mask_is_zero():
+    assert content_frames({"padding_mask": []}) == 0
