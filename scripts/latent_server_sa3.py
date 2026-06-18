@@ -100,6 +100,54 @@ def _mix(crop_a: str, crop_b: str, t: float, interp: str) -> bytes:
     return wav_bytes(audio.squeeze(0).cpu().float().numpy(), _sr)
 
 
+_heads: dict = {}
+
+
+def _available_heads() -> list[str]:
+    d = Path(_cfg["latch_weights_dir"])
+    feats = []
+    for p in sorted(d.glob("latch_sa3_*_best.pt")):
+        feats.append(p.stem[len("latch_sa3_"):-len("_best")])
+    return feats
+
+
+def _load_head(feature: str):
+    if feature in _heads:
+        return _heads[feature]
+    import torch
+    from stable_audio_3.models.latch import LatCH
+    ckpt_path = Path(_cfg["latch_weights_dir"]) / f"latch_sa3_{feature}_best.pt"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(feature)
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    head = LatCH(in_channels=256, out_channels=ckpt["out_channels"],
+                 dim=256, depth=6, num_heads=8)
+    head.load_state_dict(ckpt["state_dict"])
+    head.eval().requires_grad_(False).to(_ae_device())
+    _heads[feature] = head
+    return head
+
+
+def _steer(crop_id: str, feature: str, gain: float) -> bytes:
+    import torch
+    arr = np.load(_latent_dir / f"{crop_id}.npy").astype(np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    head = _load_head(feature)
+    z = torch.from_numpy(arr).unsqueeze(0).float().to(_ae_device())
+    z.requires_grad_(True)
+    t = torch.tensor([0.001], dtype=torch.float32, device=z.device)
+    pred = head(z, t)              # [1, out_channels, T]
+    pred.mean().backward()
+    grad = z.grad
+    z_edit = (z.detach() + gain * grad).to(_ae_device())
+    with torch.no_grad():
+        audio = _ae.decode(z_edit, chunked=True,
+                           chunk_size=int(_cfg["chunk_size"]),
+                           overlap=int(_cfg["overlap"]))
+    return wav_bytes(audio.squeeze(0).cpu().float().numpy(), _sr)
+
+
 def _ae_device():
     import torch
     return torch.device(_cfg.get("device", "cuda")
@@ -129,7 +177,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/status":
                 return self._json({"ok": True, "model": _cfg.get("model"),
                                    "sample_rate": _sr,
-                                   "latent_dir": str(_latent_dir)})
+                                   "latent_dir": str(_latent_dir),
+                                   "heads": _available_heads()})
             if u.path == "/crops":
                 ids = sorted(p.stem for p in _latent_dir.glob("*.npy"))
                 return self._json(ids)
@@ -145,9 +194,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._wav(_mix(q["crop_a"], q["crop_b"],
                                           float(q.get("t", 0.5)),
                                           q.get("interp", "slerp")))
+            if u.path == "/steer":
+                with _lock:
+                    return self._wav(_steer(q["crop"], q["head"],
+                                            float(q.get("gain", 48.0))))
             return self._json({"error": "unknown endpoint"}, 404)
         except FileNotFoundError:
-            return self._json({"error": "crop not found"}, 404)
+            return self._json({"error": "unknown crop or head",
+                               "heads": _available_heads()}, 404)
         except Exception as e:
             return self._json({"error": str(e)}, 500)
 
