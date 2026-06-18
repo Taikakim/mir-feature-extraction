@@ -21,3 +21,12 @@ def test_scalar_options():
     opts = scalar_options()
     assert {o["value"] for o in opts} == {"bpm", "lufs", "rel_pos"}
     assert all("label" in o and "value" in o for o in opts)
+
+
+def test_oned_feature_names_excludes_2d():
+    import numpy as np
+    from plots.explorer_sa3.callbacks import oned_feature_names
+    ts = {"rms_energy_bass_ts": np.zeros(4096, np.float32),
+          "hpcp_ts": np.zeros((4096, 12), np.float32),
+          "beat_activation_ts": np.zeros(4096, np.float32)}
+    assert set(oned_feature_names(ts)) == {"rms_energy_bass_ts", "beat_activation_ts"}

@@ -11,6 +11,11 @@ from .sidecar_index import CropMeta
 SCALAR_FIELDS = ["bpm", "lufs", "rel_pos"]
 
 
+def oned_feature_names(ts: dict) -> list[str]:
+    """TIMESERIES field names that are 1-D per-frame features (excludes 2-D like hpcp_ts)."""
+    return [k for k, v in ts.items() if getattr(v, "ndim", 0) == 1]
+
+
 def scalar_options() -> list[dict]:
     """Dropdown options for the numeric CropMeta scalars usable on the scatter."""
     return [{"label": f, "value": f} for f in SCALAR_FIELDS]
@@ -65,6 +70,40 @@ def register(app, index: list[CropMeta], latent_dir: Path):
         ids = sample_ids(index, 400)
         lats = [latents.load_latent(latent_dir, i) for i in ids]
         return analysis_tab.xcorr_figure(analysis.dim_xcorr(lats))
+
+    @app.callback(Output("sa3-feat-dd", "options"),
+                  Output("sa3-feat-dd", "value"),
+                  Input("sa3-analysis-go", "n_clicks"))
+    def _feat_dd_fill(n):
+        if not n:
+            return no_update, no_update
+        ids = sample_ids(index, 400)
+        ts = latents.load_timeseries(latent_dir, ids[0])
+        names = oned_feature_names(ts)
+        opts = [{"label": k, "value": k} for k in names]
+        default = names[0] if names else None
+        return opts, default
+
+    @app.callback(Output("sa3-featcorr-graph", "figure"),
+                  Input("sa3-feat-dd", "value"))
+    def _featcorr(feat):
+        if not feat:
+            return no_update
+        ids = sample_ids(index, 400)
+        lats, feats = [], []
+        for cid in ids:
+            ts = latents.load_timeseries(latent_dir, cid)
+            if feat not in ts:
+                continue
+            f = ts[feat]
+            if getattr(f, "ndim", 0) != 1:
+                continue
+            lats.append(latents.load_latent(latent_dir, cid))
+            feats.append(f)
+        if not lats:
+            return no_update
+        corr = analysis.dim_feature_corr(lats, feats)
+        return analysis_tab.feature_corr_figure(corr, feat)
 
     @app.callback(Output("sa3-ds-x", "options"), Output("sa3-ds-x", "value"),
                   Output("sa3-ds-y", "options"), Output("sa3-ds-y", "value"),

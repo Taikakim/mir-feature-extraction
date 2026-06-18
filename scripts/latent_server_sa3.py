@@ -5,7 +5,7 @@ Runs under the SA3 venv (py3.13). Endpoints: /status /crops /meta /decode
 /source. /mix and /steer are added in later tasks.
 """
 from __future__ import annotations
-import argparse, configparser, io, json, threading, wave
+import argparse, configparser, io, json, sys, threading, wave
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 DEFAULT_INI = Path(__file__).parent.parent / "latent_player_sa3.ini"
+sys.path.insert(0, str(Path(__file__).parent))
 
 # Globals set in main(); read-only afterwards.
 _ae = None
@@ -74,8 +75,6 @@ def _source_slice(crop_id: str) -> bytes:
 
 def _interp_np(a: np.ndarray, b: np.ndarray, t: float, interp: str) -> np.ndarray:
     """Interpolate two [256, T] latents (T aligned to min). lerp or slerp."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent))
     import torch
     from latent_crossfader import slerp, lerp
     T = min(a.shape[1], b.shape[1])
@@ -119,7 +118,7 @@ def _load_head(feature: str):
     ckpt_path = Path(_cfg["latch_weights_dir"]) / f"latch_sa3_{feature}_best.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(feature)
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     head = LatCH(in_channels=256, out_channels=ckpt["out_channels"],
                  dim=256, depth=6, num_heads=8)
     head.load_state_dict(ckpt["state_dict"])
