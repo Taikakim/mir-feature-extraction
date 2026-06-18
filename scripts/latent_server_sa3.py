@@ -72,6 +72,34 @@ def _source_slice(crop_id: str) -> bytes:
     return wav_bytes(audio, sr)
 
 
+def _interp_np(a: np.ndarray, b: np.ndarray, t: float, interp: str) -> np.ndarray:
+    """Interpolate two [256, T] latents (T aligned to min). lerp or slerp."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    import torch
+    from latent_crossfader import slerp, lerp
+    T = min(a.shape[1], b.shape[1])
+    za = torch.from_numpy(a[:, :T]).unsqueeze(0).float()
+    zb = torch.from_numpy(b[:, :T]).unsqueeze(0).float()
+    fn = slerp if interp == "slerp" else lerp
+    return fn(za, zb, float(t)).squeeze(0).numpy()
+
+
+def _mix(crop_a: str, crop_b: str, t: float, interp: str) -> bytes:
+    import torch
+    a = np.load(_latent_dir / f"{crop_a}.npy").astype(np.float32)
+    b = np.load(_latent_dir / f"{crop_b}.npy").astype(np.float32)
+    if a.ndim == 3: a = a[0]
+    if b.ndim == 3: b = b[0]
+    z = _interp_np(a, b, t, interp)
+    zt = torch.from_numpy(z).unsqueeze(0).to(_ae_device())
+    with torch.no_grad():
+        audio = _ae.decode(zt, chunked=True,
+                           chunk_size=int(_cfg["chunk_size"]),
+                           overlap=int(_cfg["overlap"]))
+    return wav_bytes(audio.squeeze(0).cpu().float().numpy(), _sr)
+
+
 def _ae_device():
     import torch
     return torch.device(_cfg.get("device", "cuda")
@@ -112,6 +140,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._wav(_decode_latent(q["crop"]))
             if u.path == "/source":
                 return self._wav(_source_slice(q["crop"]))
+            if u.path == "/mix":
+                with _lock:
+                    return self._wav(_mix(q["crop_a"], q["crop_b"],
+                                          float(q.get("t", 0.5)),
+                                          q.get("interp", "slerp")))
             return self._json({"error": "unknown endpoint"}, 404)
         except FileNotFoundError:
             return self._json({"error": "crop not found"}, 404)
