@@ -8,6 +8,14 @@ from . import player_client as pc
 from .sidecar_index import CropMeta
 
 
+SCALAR_FIELDS = ["bpm", "lufs", "rel_pos"]
+
+
+def scalar_options() -> list[dict]:
+    """Dropdown options for the numeric CropMeta scalars usable on the scatter."""
+    return [{"label": f, "value": f} for f in SCALAR_FIELDS]
+
+
 def sample_ids(index: list[CropMeta], n: int, seed: int = 0) -> list[str]:
     ids = [c.id for c in index]
     if len(ids) <= n:
@@ -57,3 +65,23 @@ def register(app, index: list[CropMeta], latent_dir: Path):
         ids = sample_ids(index, 400)
         lats = [latents.load_latent(latent_dir, i) for i in ids]
         return analysis_tab.xcorr_figure(analysis.dim_xcorr(lats))
+
+    @app.callback(Output("sa3-ds-x", "options"), Output("sa3-ds-x", "value"),
+                  Output("sa3-ds-y", "options"), Output("sa3-ds-y", "value"),
+                  Input("sa3-ds-x", "id"))
+    def _ds_fill(_):
+        opts = scalar_options()
+        return opts, "bpm", opts, "lufs"
+
+    @app.callback(Output("sa3-ds-graph", "figure"),
+                  Input("sa3-ds-x", "value"), Input("sa3-ds-y", "value"))
+    def _ds_scatter(xf, yf):
+        if not xf or not yf:
+            return no_update
+        xs, ys, txt = [], [], []
+        for c in index:
+            xv, yv = getattr(c, xf), getattr(c, yf)
+            if xv is None or yv is None:
+                continue
+            xs.append(xv); ys.append(yv); txt.append(f"{c.artist} — {c.title}")
+        return dataset_tab.scatter_figure(xs, ys, xlabel=xf, ylabel=yf, text=txt)

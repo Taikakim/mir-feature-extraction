@@ -32,9 +32,10 @@ app = dash.Dash(__name__)
 
 
 def main():
-    index = scan_index(_latent_dir())
+    ld = _latent_dir()
+    index = scan_index(ld)
     app.layout = build_layout(index)
-    register(app, index, _latent_dir())
+    register(app, index, ld)
     app.run(debug=False, port=8051)
 
 

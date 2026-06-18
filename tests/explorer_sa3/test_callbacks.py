@@ -14,3 +14,10 @@ def test_sample_ids_caps_and_is_deterministic():
     b = sample_ids(idx, 400, seed=0)
     assert len(a) == 400 and a == b
     assert len(sample_ids(_idx(10), 400)) == 10  # fewer than cap → all
+
+
+def test_scalar_options():
+    from plots.explorer_sa3.callbacks import scalar_options
+    opts = scalar_options()
+    assert {o["value"] for o in opts} == {"bpm", "lufs", "rel_pos"}
+    assert all("label" in o and "value" in o for o in opts)
