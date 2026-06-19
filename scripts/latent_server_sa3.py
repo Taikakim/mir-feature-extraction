@@ -113,16 +113,16 @@ def _available_heads() -> list[str]:
 def _load_head(feature: str):
     if feature in _heads:
         return _heads[feature]
-    import torch
-    from stable_audio_3.models.latch import LatCH
+    from stable_audio_3.models.latch import load_latch_from_checkpoint
     ckpt_path = Path(_cfg["latch_weights_dir"]) / f"latch_sa3_{feature}_best.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(feature)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    head = LatCH(in_channels=256, out_channels=ckpt["out_channels"],
-                 dim=256, depth=6, num_heads=8)
-    head.load_state_dict(ckpt["state_dict"])
-    head.eval().requires_grad_(False).to(_ae_device())
+    # load_latch_from_checkpoint auto-detects in/out channels, dim, depth,
+    # num_heads, and t_injection from the saved state dict (handles both the
+    # concat and adaln_zero head families), and attaches ckpt metadata
+    # (incl. std_mean/std_std) as head.metadata.
+    head = load_latch_from_checkpoint(str(ckpt_path), device=str(_ae_device()))
+    head.eval().requires_grad_(False)
     _heads[feature] = head
     return head
 
