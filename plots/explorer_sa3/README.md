@@ -36,7 +36,9 @@ feature source, no DB**:
 
 ## Running it
 
-**Player** (SA3 venv, loads the model — needs ~5 GB VRAM, chunked decode):
+There are two interchangeable players (same HTTP shape). Pick one:
+
+**A) Torch player** (SA3 venv, full incl. `/steer` — needs ~5 GB VRAM):
 
 ```bash
 cd ~/Projects/mir
@@ -44,14 +46,31 @@ cd ~/Projects/mir
 # serves http://localhost:7892   (config: latent_player_sa3.ini)
 ```
 
-**Viewer** (mir venv):
+**B) Low-VRAM ONNX player** (mir venv, ONNX decoder on MIGraphX — ~2 GB GPU, runs
+alongside a training job; no `/steer`):
 
 ```bash
-/home/kim/Projects/mir/mir/bin/python -m plots.explorer_sa3.app
-# serves http://localhost:8051
+/home/kim/Projects/mir/mir/bin/python scripts/latent_server_onnx.py \
+    --onnx /home/kim/Projects/SAO/stable-audio-3/same_decoder_L128.onnx \
+    --chunk-latents 128 --overlap 16 --provider migraphx --port 7893
+# compiles the ONNX once at boot (~min, MIGraphX AOT), then RTF ~39x.
+# /status /crops /meta /decode /mix /source  (/steer -> 501, use player A)
 ```
 
-The viewer works without the player (data + plots need no model); the audio
+Export the `.onnx` first with `stable-audio-3/scripts/export_same_onnx.py`; see
+`stable-audio-3/docs/onnx-amd-inference.md`. Needs `onnxruntime_migraphx` (in the
+mir venv); the SA3 venv's onnxruntime is CPU-only.
+
+**Viewer** (mir venv) — defaults to player A (7892); point it at the ONNX player
+with `SA3_PLAYER_PORT`:
+
+```bash
+/home/kim/Projects/mir/mir/bin/python -m plots.explorer_sa3.app                 # -> :7892
+SA3_PLAYER_PORT=7893 /home/kim/Projects/mir/mir/bin/python -m plots.explorer_sa3.app  # -> ONNX
+# viewer serves http://localhost:8051
+```
+
+The viewer works without any player (data + plots need no model); the audio
 panel shows the launch command when the player is offline.
 
 ## Player endpoints (port 7892)

@@ -1,8 +1,17 @@
-"""URL builders + reachability check for latent_server_sa3.py (port 7892)."""
+"""URL builders + reachability check for the SAME decode player.
+
+Targets the torch player `latent_server_sa3.py` (port 7892, full incl. /steer) by
+default. Set `SA3_PLAYER_PORT` (e.g. 7893) to point at the low-VRAM ONNX server
+`latent_server_onnx.py` instead — same /status /crops /meta /decode /mix /source
+shape (it has no /steer). `SA3_PLAYER_BASE` overrides the whole base URL.
+"""
 from __future__ import annotations
+import os
 from urllib.parse import urlencode
 
-BASE = "http://localhost:7892"
+BASE = os.environ.get(
+    "SA3_PLAYER_BASE",
+    f"http://localhost:{os.environ.get('SA3_PLAYER_PORT', '7892')}")
 
 
 def decode_url(crop_id: str) -> str:
