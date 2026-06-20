@@ -4,6 +4,18 @@ Comprehensive music feature extraction pipeline for conditioning **Stable Audio 
 
 **Status:** Work-in-progress but functional. Core analysis scripts are tested; pipeline glue may lag behind. Scripts have built-in `--help`.
 
+## The pipeline — related repositories
+
+This repository is one of three that together form a small pipeline for **controllable** AI music generation. It sits at the head of it: the features extracted here are the **control targets** everything downstream steers toward.
+
+| Repository | Role |
+|---|---|
+| **mir-feature-extraction** *(this repo)* | Extracts musical features from audio — rhythm/beat, loudness, spectral, harmonic, timbral, aesthetic — as whole-track timeseries and labels. The analysis backbone and the source of **control targets**. Also hosts a latent-space explorer/player for auditioning. |
+| **[audio-tools-avp](https://github.com/Taikakim/audio-tools-avp)** | Trains the **control** layer: latent-control heads (LatCH) against those features, the FusionOpt optimizer, SAO-Small finetuning, and Stable Audio 3 control adapters. A fork of `stable-audio-tools`. |
+| **[stable-audio-3](https://github.com/Taikakim/stable-audio-3)** | Runs **Stable Audio 3** inference with those controls: LatCH-guided generation, LoRA finetuning, long-form rendering, and experimental samplers. A fork of `stable-audio-3`. |
+
+**Flow:** **mir-feature-extraction** (measure musical features) → `audio-tools-avp` (train heads/adapters that steer toward them) → `stable-audio-3` (generate, steered). Because the control heads read the same latent space the generator carves, **a feature this repo can measure becomes a knob you can steer** — the throughline across all three.
+
 ## What It Does
 
 1. **Organizes** audio files into structured folders
