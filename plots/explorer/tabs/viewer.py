@@ -113,9 +113,14 @@ def layout() -> html.Div:
 
 
 def _manip_panel() -> list:
-    features = ["brightness", "rms_energy_bass", "danceability",
-                "hardness", "female_probability"]
-    labels   = ["Brightness", "Bass Energy", "Danceability", "Hardness", "Female Voice"]
+    # Training-free ridge-steering features (no trained head needed) first, then the
+    # scalar classifier sliders (which fall back to head/correlation guidance).
+    features = ["brightness", "rms_energy_bass", "rms_energy_mid", "rms_energy_air",
+                "spectral_flux", "spectral_flatness",
+                "danceability", "hardness", "female_probability"]
+    labels   = ["Brightness", "Bass Energy", "Mid Energy", "Air / Treble",
+                "Spectral Flux", "Flatness",
+                "Danceability", "Hardness", "Female Voice"]
     return [
         html.Div([
             html.Label(lbl, style={"fontSize": "10px", "color": "#888",

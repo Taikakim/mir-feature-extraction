@@ -110,10 +110,25 @@ The old shape server (port 7892) is no longer needed.
 
 ### LatCH latent manipulation
 
-Sliders in the Viewer tab (Brightness, Bass Energy, Danceability, Hardness,
-Female Voice) nudge the latent before decode. Backend in `plots/explorer/latch.py`:
-- If `models/latch/{feature}.pt` exists → uses the trained LatCH gradient at t≈0
-- Otherwise → falls back to `models/latent_correlations.json` (existing behaviour)
+Sliders in the Viewer tab nudge the latent before decode. Backend in
+`plots/explorer/latch.py`, dispatch order:
+1. **Training-free ridge steering** (preferred) — if a direction for the feature exists in
+   `models/latch/steer_directions.npz`, shift every frame along it: `z += strength·sigma·beta`
+   (slider value = natural-std steps; symmetric for ±). No trained head needed. Producer:
+   `plots/explorer/compute_steer_directions.py` (ridge-fits feature ← latent frame over a
+   crop sample). Per-frame sliders: Brightness, Bass/Mid/Air Energy, Spectral Flux, Flatness.
+2. Else if `models/latch/{feature}.pt` exists → trained LatCH gradient at t≈0.
+3. Else → `models/latent_correlations.json` fallback.
+
+Scalar classifier sliders (Danceability, Hardness, Female Voice) have no per-frame target →
+they use path 2/3.
+
+> ⚠️ Steering authority is **latent-dependent**. On the SAO-Small 64-d latent the per-frame
+> ridge R² is modest (0.06–0.25; best: flatness 0.25, bass 0.16) — these features need
+> sequence context a single frame lacks, so training-free steering is *gentle* here (the
+> trained heads, which see the whole sequence, are stronger). The same technique is strong on
+> SA3's semantic SAME latent (R² 0.6–0.9). Re-run `compute_steer_directions.py` after
+> re-encoding latents.
 
 ---
 
@@ -292,6 +307,7 @@ integrated latent audio player for real-time VAE decode via the latent server.
 
 ```bash
 source /home/kim/Projects/SAO/stable-audio-tools/rocm_env.sh
+source /home/kim/Projects/SAO/stable-audio-tools/sat-venv/bin/activate # This is a bit unwieldy, need to think about this -> maybe try to see if it works in the SAO venv with the addition of soundfile and whatever is needed.
 cd /home/kim/Projects/mir
 python scripts/latent_server.py
 ```

@@ -2,6 +2,14 @@
 
 Guidance for Claude Code when working in this repository.
 
+> **Cross-project coordination (read first).** This repo is one of three in the
+> mir + Stable Audio pipeline. Shared facts — data paths, which venv for which
+> task, gotchas that span repos — live in `/home/kim/Projects/SAO/MASTER.md`.
+> Read it before cross-cutting work, and append to
+> `/home/kim/Projects/SAO/WORKLOG.md` when you finish something another repo's
+> agent would want to know.
+@/home/kim/Projects/SAO/MASTER.md
+
 ## Project Overview
 
 MIR feature extraction pipeline for conditioning Stable Audio Tools. Extracts 97+ numeric features, 496 classification labels, and 5 AI text descriptions from audio. Processes full mixes and separated stems.
@@ -129,6 +137,35 @@ db.count()                           # total entries
 **Pipeline integration:** `pipeline.py` writes to TimeseriesDB instead of `results` dict when `skip_timeseries: false`. The `existing_keys` / sentinel pattern is bypassed — the DB `has()` check is the source of truth for resume logic.
 
 **Encoding:** `encode_dataset.py` already strips all list fields from companion JSONs (the `padding_mask` exception is for SAT training). TimeseriesDB is for analysis tools and future conditioning only — the encoder does not read from it.
+
+## Whole-Track Timeseries (per-track npz, for variable-offset crops)
+
+The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when the crop-to-track mapping is fixed at MIR time. For workflows that need **variable training-crop offsets** (e.g. SA3 LoRA fine-tuning with beat-aligned crops chosen at encode time, or future LatCH training against arbitrary windows), a parallel **whole-track** store exists:
+
+- **Producer:** `src/spectral/whole_track_timeseries.py`
+  ```bash
+  python src/spectral/whole_track_timeseries.py <Goa_Separated_root> --workers 4
+  ```
+  Walks each track folder, extracts 20 fields at **100 Hz over the whole track** (`madmom` beat/downbeat activations, `librosa` onset envelopes per stem, multiband/per-stem RMS, spectral, HPCP), writes one `<track>.TIMESERIES.npz` per source track. Resumable (skips existing). Driven by chunked-fresh-pool workers (see `--chunk-size`, `--chunk-timeout`).
+
+- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — currently 4461 npz, **21 GB total**. Each npz contains:
+  - 1-D fields shape `(N_frames,)` where `N_frames ≈ duration_sec × 100`
+  - `hpcp_ts` shape `(N_frames, 12)`
+  - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, etc.
+
+- **Consumer (cropper/resampler):** `/home/kim/Projects/SAO/stable-audio-tools/scripts/whole_track_target_source.py`
+  ```python
+  from whole_track_target_source import resample_axis0, _read_npz
+  arrays, meta = _read_npz("/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz")
+  # Slice arrays[field][s:e] then resample_axis0(win, target_n_frames)
+  ```
+  `WholeTrackTargetSource.get(crop_key, feature, start_time, end_time, n_frames)` packages this for LatCH dataloaders.
+
+- **Use cases**: LatCH-head training against arbitrary crop windows (the SAT trainer reads via the consumer above); per-crop timeseries companions for SA3 LoRA latents (sliced to T=4096 alongside each `.npy`, see `/tmp/sa3_encode_from_manifest.py`).
+
+When to choose which store:
+- **TimeseriesDB (per crop)**: fixed crop-to-track mapping, queried by crop key — used by the legacy LatCH dataset.
+- **Whole-track npz (per track)**: arbitrary windows extracted at consumer time — used by anything that needs to slice a specific `[start_sec, end_sec]` and resample to a target frame count.
 
 ## Development Rules
 

@@ -1,23 +1,49 @@
-# Context Handover for Claude
+# LatCH Project Status
 
-## What was just completed
-Antigravity has fully implemented the **LatCH (Latent-Control Heads)** training and inference pipeline into the Stable Audio Open (SAO) repository. The new files are located at `/home/kim/Projects/SAO/stable-audio-tools/scripts/` (`latch_model.py`, `latch_dataset.py`, `train_latch.py`, and `generate_latch_guided.py`).
+## What LatCH Is
 
-The LatCH models are designed to provide temporal (frame-by-frame) guidance to the diffusion model during generation.
+**LatCH (Latent-Control Heads)** — lightweight (~7M parameter) Bidirectional Transformer heads trained to predict MIR time-series features from noisy VAE latents. Used to apply Training-Free Guidance (TFG) during Stable Audio Open inference.
 
-## The Problem
-Currently, the MIR extraction pipeline (in `/home/kim/Projects/mir`) outputs `.INFO` JSON files where the audio features are condensed into static scalar averages (e.g., `bpm: 140.3`, `rms_energy_bass: -17.54`). 
+Implementation lives at `/home/kim/Projects/SAO/stable-audio-tools/scripts/`:
+- `latch_model.py` — LatCH architecture (BiTransformer, RoPE, VP noise schedule)
+- `latch_dataset.py` — Dataset: maps `.npy` SAO latents → MIR time-series features from TimeseriesDB
+- `train_latch.py` — Training loop. Usage: `python scripts/train_latch.py --feature <name> --epochs 10`
+- `generate_latch_guided.py` — Inference: Selective TFG applied to Euler sampler (first 20% of steps)
 
-For LatCH to work properly, it requires these features to be **time-series arrays**, tightly aligned to the VAE latent frame rate of the diffusion model.
+Full architecture/design notes: `/home/kim/Projects/SAO/stable-audio-tools/scripts/LATCH_README.md`
 
-## Your Task
-Update the local MIR extraction scripts to output time-series arrays (specifically arrays of length `256`) instead of scalars for dynamic audio features.
+## Current State
 
-### Technical Requirements
-1.  **Target Temporal Resolution**: The SAO model operates at 44,100 Hz with a downsampling ratio of 2048. Therefore, the MIR features must be extracted or interpolated to match a frame rate of exactly **~21.5332 Hz** (which corresponds to exactly 256 frames for an 11.89-second chunk of audio).
-2.  **Specific Features to Convert**:
-    *   `rms_energy_bass`, `rms_energy_body`, `rms_energy_mid`, `rms_energy_air`
-    *   `spectral_flatness`, `spectral_flux`, `spectral_skewness`, `spectral_kurtosis`
-    *   `beat_activations` (you need to replace the static `bpm` integer with an array of frame-wise beat probabilities or binary activations).
-    *   Pitch contours or Chroma vectors (e.g. converting `hpcp_0` through `hpcp_11` from 12 global static averages into a 12-channel chronogram array of length 256).
-3.  Ensure that the `.INFO` files are updated to serialize these lists properly so that `latch_dataset.py` can load them as PyTorch tensors of shape `[1, 256]`.
+### Timeseries — DONE
+Time-series features are extracted and stored in SQLite at `/home/kim/Projects/mir/data/timeseries.db`.
+
+API:
+```python
+from core.timeseries_db import TimeseriesDB
+db = TimeseriesDB.open()
+arrays = db.get("Artist - Title_0")  # {field: np.ndarray} or None
+```
+
+Available fields (all `T=256` frames at ~21.53 Hz, matching SAO latent frame rate):
+- `rms_energy_{bass,body,mid,air}_ts`
+- `spectral_{flatness,flux,skewness,kurtosis}_ts`
+- `beat_activations_ts`, `downbeat_activations_ts`, `onsets_activations_ts`
+- `hpcp_ts` — shape `(256, 12)` chroma over time
+- `tonic_ts`, `tonic_strength_ts`
+
+### Trained Models — IN PROGRESS
+Checkpoints saved at `/home/kim/Projects/SAO/stable-audio-tools/latch_weights/`:
+
+| Feature | Epochs | Best checkpoint |
+|---|---|---|
+| `spectral_flatness_ts` | 10 | `latch_spectral_flatness_ts_ep10.pt` |
+| `tonic` | 10 | `latch_tonic_ep10.pt` |
+
+### Not Yet Trained
+All other available features — see `LATCH_README.md` for the full list.
+
+## Next Steps
+
+1. Evaluate trained models (loss curves, qualitative generation tests with `generate_latch_guided.py`)
+2. Train remaining features: `rms_energy_*_ts`, `beat_activations_ts`, `hpcp_ts`, etc.
+3. Multi-feature guidance (combine multiple LatCH heads at inference time)
