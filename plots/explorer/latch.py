@@ -40,6 +40,31 @@ def _load_correlations() -> dict:
     return _CORR_CACHE
 
 
+_STEER_PATH         = _DEFAULT_LATCH_DIR / "steer_directions.npz"
+_STEER_CACHE: dict | None = None
+
+
+def _load_steer_directions() -> dict:
+    """Precomputed training-free ridge steering directions (compute_steer_directions.py)."""
+    global _STEER_CACHE
+    if _STEER_CACHE is None:
+        _STEER_CACHE = dict(np.load(_STEER_PATH)) if _STEER_PATH.exists() else {}
+    return _STEER_CACHE
+
+
+def _ridge_direction_steer(z: np.ndarray, feature: str, strength: float):
+    """Training-free steering: shift every latent frame along the feature's ridge
+    direction by `strength` natural-std units (z += strength·sigma·beta). No trained
+    head needed. Returns the edited [64,256] latent, or None if no direction exists."""
+    d = _load_steer_directions()
+    key = f"{feature}__dir"
+    if key not in d:
+        return None
+    beta  = d[key].astype(np.float32)                  # (64,) unit direction
+    sigma = float(d[f"{feature}__sigma"])              # natural std along the axis
+    return (z + strength * sigma * beta[:, None]).astype(np.float32)
+
+
 def apply_latch_guidance(
     z: np.ndarray,
     feature: str,
@@ -64,6 +89,11 @@ def apply_latch_guidance(
         latch_dir = _DEFAULT_LATCH_DIR
     if abs(strength) < 1e-6:
         return z.copy()
+
+    # Training-free ridge steering (preferred when a direction exists — no head needed).
+    steered = _ridge_direction_steer(z, feature, strength)
+    if steered is not None:
+        return steered
 
     ckpt = Path(latch_dir) / f"{feature}.pt"
     if ckpt.exists():

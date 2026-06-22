@@ -18,7 +18,7 @@ paths:
 # =============================================================================
 stages:
   organize: false                 # Stage 1: Organize raw files into project structure. set to false when running on a folder of already separated input files
-  track_analysis: false           # Stage 2: Full track analysis (Demucs, beats, metadata)
+  track_analysis: true           # Stage 2: Full track analysis (Demucs, beats, metadata)
   separate: false                 # Stage 2a: Stem separation — set false to skip separation and process only existing separated folders
   cropping: false                 # Stage 3: Create training crops
   crop_analysis: true            # Stage 4: Analyze crops (features + AI descriptions)
@@ -234,7 +234,7 @@ music_flamingo:
   # 1.0 = annotate everything (default); 0.1 = annotate ~10% per run.
   # Already-annotated crops are always skipped regardless of this value.
   # Increase gradually across runs to fill the dataset over time.
-  sample_probability: 0.05
+  sample_probability: 0.005
 
   # Prompt types to generate (define as "key: prompt text")
   # {genres}   → weighted Essentia genre distribution (softmax, top-5)
@@ -309,7 +309,7 @@ vocal_removal:
 # FILENAME CLEANUP
 # =============================================================================
 filename_cleanup:
-  enabled: true                  # Clean filenames for T5 tokenizer compatibility
+  enabled: false                  # Clean filenames for T5 tokenizer compatibility
                                  # Converts accented chars to ASCII, normalizes spaces/dashes
 
 # =============================================================================
@@ -354,5 +354,5 @@ processing:
   device: cuda                   # cuda or cpu
   overwrite: false               # Overwrite existing features
   verbose: false                 # Verbose logging
-  feature_workers: 10             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
+  feature_workers: 12             # Parallel workers for CPU features (loudness, spectral, timbral, etc.)
   essentia_workers: 2            # Separate limit for Essentia (TensorFlow deadlocks with >4-6 workers)
