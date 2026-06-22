@@ -108,3 +108,8 @@ plots/latent_analysis/data/*
 !plots/latent_analysis/data/posters/
 plots/latent_analysis/data/posters/*
 !plots/latent_analysis/data/posters/.gitkeep
+
+# Large local artifacts — never commit (added 2026-06-22)
+*.whl
+/data/
+.superpowers/
