@@ -56,6 +56,12 @@ Key settings:
 - `HIP_FORCE_DEV_KERNARG=1` -- prevent CPU/GPU desync
 - `TORCH_COMPILE=0` -- buggy with Flash Attention on RDNA
 - `MIOPEN_FIND_MODE` NOT set by default (causes freezes on some workloads)
+- **Native CK Flash-Attention — 30–100% faster, use it on the SA3/SAT venvs.** On the torch-2.10/2.12
+  ROCm venvs (`sat-venv`, `stable-audio-3/.venv`, `sa3-rocm7.13-test`) `flash_attn` is the **CK build**,
+  and you MUST `export FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE` (before `import torch`) to activate it —
+  the `TRUE` above is the slower Triton-AMD path; without `FALSE` you get `No module named 'aiter'` → no
+  FA. mir's own rocm-7.2 venv runs Triton FA2 (`TRUE`) and gains CK only after moving to the unified
+  rocm-7.13 venv (`SAO/MASTER.md` §3). Full story: MASTER §5 + `SAO/docs/flash-attn-ck-rdna4.md`.
 
 ## Architecture
 
