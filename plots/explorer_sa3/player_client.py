@@ -1,9 +1,11 @@
 """URL builders + reachability check for the SAME decode player.
 
-Targets the torch player `latent_server_sa3.py` (port 7892, full incl. /steer) by
-default. Set `SA3_PLAYER_PORT` (e.g. 7893) to point at the low-VRAM ONNX server
-`latent_server_onnx.py` instead — same /status /crops /meta /decode /mix /source
-shape (it has no /steer). `SA3_PLAYER_BASE` overrides the whole base URL.
+Defaults to the low-VRAM ONNX server `latent_server_onnx.py` (port 7893): ~2 GB VRAM,
+so it can decode/mix/source alongside a running training job without OOM. It has
+**no /steer** (LatCH steering needs the torch DiT/heads). For steering, set
+`SA3_PLAYER_PORT=7892` to use the torch player `latent_server_sa3.py` (full incl.
+/steer); `SA3_PLAYER_BASE` overrides the whole base URL. NB: the ONNX server does a
+~9-min MIGraphX compile at boot — start it once, long-lived.
 """
 from __future__ import annotations
 import os
@@ -11,7 +13,7 @@ from urllib.parse import urlencode
 
 BASE = os.environ.get(
     "SA3_PLAYER_BASE",
-    f"http://localhost:{os.environ.get('SA3_PLAYER_PORT', '7892')}")
+    f"http://localhost:{os.environ.get('SA3_PLAYER_PORT', '7893')}")
 
 
 def decode_url(crop_id: str) -> str:
