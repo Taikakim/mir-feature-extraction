@@ -18,6 +18,8 @@ MIR feature extraction pipeline for conditioning Stable Audio Tools. Extracts 97
 
 See **[TOOLS.md](TOOLS.md)** for the Pitch Shifter GUI and Feature Explorer / Latent Player.
 
+**SA3 control-eval specs (cross-repo):** the control-response evaluator `avp_sa3/sa3_control/onset_eval.py` (gain×density grid → `onset_eval.json`) and the eval-site GUIs in `~/riffer-evals/` (`onset_eval.html` browses every `onset_eval.json`; `disentangle.html` = the onset_per_beat tempo-shortcut page; `mp.html`, `traj.html`) — **full spec in `SAO/MASTER.md` §4.** The eval *measurement* (BPM/onset/groove via essentia/librosa) runs in **mir's venv** (`mir/bin/python`).
+
 ## Commands
 
 ```bash
