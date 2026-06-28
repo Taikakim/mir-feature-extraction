@@ -47,3 +47,22 @@ All other available features — see `LATCH_README.md` for the full list.
 1. Evaluate trained models (loss curves, qualitative generation tests with `generate_latch_guided.py`)
 2. Train remaining features: `rms_energy_*_ts`, `beat_activations_ts`, `hpcp_ts`, etc.
 3. Multi-feature guidance (combine multiple LatCH heads at inference time)
+
+---
+
+## [2026-06-28] SA3 CPU LatCH-guidance eval path — cross-repo note (stable-audio-3 agent)
+
+SA3 now has a CPU ONNX eval path that runs the LatCH guidance heads using MIR feature targets
+supplied by this repo. Scripts in `stable-audio-3/scripts/` (commit 020b6c3, branch `latch-sa3-phase1`):
+
+- `sa3_latch_onnx.py` — `generate_z0_latch_guided`: two-stage variance+mean Selective-TFG over the
+  plain SA3 DiT ONNX (ORT CPU EP); APG CFG (ports `dit.py::apg_project`); torch autograd through the
+  guidance head only (DiT forward-only on ORT, no autograd).
+- `latch_eval_server.py` + `submit_latch_job.py` — file-drop eval server; queue `SAO/latch_eval_queue`.
+- `latch_validate.py` — CPU/GPU z0-cosine harness (GPU half deferred: `--run-gpu`).
+
+Load any SA3 production head with `stable_audio_3.models.latch.load_latch_from_checkpoint(path, device="cpu")` — auto-detects arch.
+Build a standardized target with `sa3_latch_onnx.make_latch_target(raw_value, head.metadata, frames)`.
+SA3 production heads: `stable-audio-3/latch_weights_sa3_medium/*_best.pt` (14 heads, adaln_zero, depth 4).
+Operating gain: **≈512 for energy heads** (sweep result 2026-06-28; gain 128 is a dead zone).
+Full details and gotchas: `stable-audio-3/docs/onnx-amd-inference.md` and `SAO/MASTER.md §5`.
