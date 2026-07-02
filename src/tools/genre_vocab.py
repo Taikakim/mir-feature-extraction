@@ -10,6 +10,26 @@ def genre_significant_labels(mean400, labels400, prob_thresh: float = 0.10):
     return [labels400[i] for i in range(len(labels400)) if mean400[i] >= prob_thresh]
 
 
+def compute_track_mean400(src, effnet, genre_model, es):
+    """Load *src* with essentia MonoLoader and return the mean discogs-400 softmax
+    probability vector (shape (400,), dtype float32).
+
+    Shared between scan_corpus (Task 1) and store_genre (Task 2) so the inference
+    logic lives in exactly one place.
+
+    Args:
+        src:          Path-like — audio file to analyse.
+        effnet:       Callable returned by ``get_effnet_migraphx(…)``.
+        genre_model:  Callable returned by ``get_gmi_model("genre", …)``.
+        es:           The ``essentia.standard`` module (passed in to avoid
+                      re-importing inside a tight loop).
+    Returns:
+        np.ndarray of shape (400,) — mean patch probabilities.
+    """
+    audio = es.MonoLoader(filename=str(src), sampleRate=16000, resampleQuality=4)()
+    return np.mean(genre_model(effnet(audio)), axis=0).astype(np.float32)
+
+
 def select_genre_vocab(counts: dict, min_support: int = 303):
     """Return labels with count >= min_support, sorted by count descending then label ascending."""
     kept = [(lbl, n) for lbl, n in counts.items() if n >= min_support]
@@ -61,8 +81,7 @@ def scan_corpus(latents_dir: str, out_json: str, prob_thresh: float = 0.10, min_
             print(f"[skip] source missing: {src}", flush=True)
             skipped += 1
             continue
-        audio = es.MonoLoader(filename=src, sampleRate=16000, resampleQuality=4)()
-        mean400 = np.mean(genre(effnet(audio)), axis=0)   # (400,) softmax, mean over patches
+        mean400 = compute_track_mean400(src, effnet, genre, es)   # (400,) softmax, mean over patches
         sig = set(genre_significant_labels(mean400, labels400, prob_thresh))
         for _, _m in crops:
             for lbl in sig:
