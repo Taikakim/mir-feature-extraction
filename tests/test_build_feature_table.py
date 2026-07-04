@@ -80,13 +80,16 @@ def test_build_rows_end_to_end_shape_and_join():
     crop = {
         "Artist - A": {
             "mood_dicts": [{"melodic": 0.4}, {"energetic": 0.6}],
+            "genre_dicts": [{"Electronic---Techno": 0.5}, {"Electronic---Bleep": 0.3}],
             "rms": {"bass": [0.1, 0.3], "body": [], "mid": [], "air": []},
         },
     }
-    rows, genre_vocab, mood_vocab = build_rows(latents, crop, source="goa")
+    rows, vocabs = build_rows(latents, crop, source="goa")
 
-    assert genre_vocab == ["Goa", "Psy", "Techno"]
-    assert mood_vocab == ["energetic", "melodic"]
+    assert vocabs["genre_vocab"] == ["Goa", "Psy", "Techno"]
+    assert vocabs["mood_vocab"] == ["energetic", "melodic"]
+    # second lane: discogs taxonomy from the crop info, kept separate
+    assert vocabs["genre_discogs_vocab"] == ["Electronic---Bleep", "Electronic---Techno"]
 
     a = next(r for r in rows if r["source_track"] == "Artist - A")
     b = next(r for r in rows if r["source_track"] == "Artist - B")
@@ -95,15 +98,18 @@ def test_build_rows_end_to_end_shape_and_join():
     assert a["latent_indices"] == ["000000", "000001"]
     # genre_vec aligned to ["Goa","Psy","Techno"]: mean Goa=(0.8+0.6)/2=0.7, Psy=0.1
     assert a["genre_vec"] == [0.7, 0.1, 0.0]
+    # genre_discogs_vec aligned to ["Bleep","Techno"]: Bleep=(0+0.3)/2, Techno=(0.5+0)/2
+    assert a["genre_discogs_vec"] == [0.15, 0.25]
     assert a["mood_vec"] == [0.3, 0.2]      # energetic (0+0.6)/2, melodic (0.4+0)/2
     assert a["mood_present"] is True
     assert a["release_year"] == 1996 and a["year_known"] is True
     assert math.isclose(a["rms_energy_bass_mean"], 0.2)
     assert a["onset_density_mean"] == 4.0
 
-    # B: unjoined -> mood vector zero-filled, year unknown, rms NaN
+    # B: unjoined -> mood + discogs-genre vectors zero-filled, year unknown, rms NaN
     assert b["mood_vec"] == [0.0, 0.0]
+    assert b["genre_discogs_vec"] == [0.0, 0.0]
     assert b["mood_present"] is False
     assert b["year_known"] is False and b["release_year"] == YEAR_UNKNOWN
     assert math.isnan(b["rms_energy_bass_mean"])
-    assert b["genre_vec"] == [0.0, 0.0, 1.0]   # Techno
+    assert b["genre_vec"] == [0.0, 0.0, 1.0]   # Techno (coarse lane, from latents)

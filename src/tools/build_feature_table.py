@@ -179,6 +179,7 @@ def collect_crop_info(crop_info_root: Path, tracks: Iterable[str]) -> Dict[str, 
         if not folder.is_dir():
             continue
         mood_dicts: List[dict] = []
+        genre_dicts: List[dict] = []   # discogs taxonomy (finer 2nd genre lane)
         rms: Dict[str, list] = {b: [] for b in RMS_BANDS}
         for ip in folder.glob("*.INFO"):
             d = _load_json(ip)
@@ -186,12 +187,15 @@ def collect_crop_info(crop_info_root: Path, tracks: Iterable[str]) -> Dict[str, 
                 continue
             if isinstance(d.get("essentia_mood"), dict):
                 mood_dicts.append(d["essentia_mood"])
+            if isinstance(d.get("essentia_genre"), dict):
+                genre_dicts.append(d["essentia_genre"])
             for b in RMS_BANDS:
                 v = d.get(f"rms_energy_{b}")
                 if v is not None:
                     rms[b].append(v)
-        if mood_dicts or any(rms.values()):
-            out[track] = {"mood_dicts": mood_dicts, "rms": rms}
+        if mood_dicts or genre_dicts or any(rms.values()):
+            out[track] = {"mood_dicts": mood_dicts,
+                          "genre_dicts": genre_dicts, "rms": rms}
         if i % 500 == 0:
             logger.info("crop-info join: %d/%d tracks scanned", i, len(tracks))
     logger.info("crop-info join: matched %d/%d tracks", len(out), len(tracks))
@@ -199,10 +203,20 @@ def collect_crop_info(crop_info_root: Path, tracks: Iterable[str]) -> Dict[str, 
 
 
 def build_rows(latents: Dict[str, dict], crop: Dict[str, dict],
-               source: str) -> Tuple[List[dict], List[str], List[str]]:
-    """Assemble per-track records into rows + return (rows, genre_vocab, mood_vocab)."""
+               source: str) -> Tuple[List[dict], Dict[str, List[str]]]:
+    """Assemble per-track records into rows + return (rows, vocabs).
+
+    Two genre lanes kept as SEPARATE blocks (CONTINUITY's call): the coarse
+    training-native ``genre_vec`` (12-label style_genre) and the finer discogs
+    ``genre_discogs_vec`` (essentia_genre). Within a single-genre corpus the
+    coarse vector is near-constant, so the fine taxonomy carries the within-
+    corpus structure; kept unmixed so each can be whitened on its own before
+    k-means. ``vocabs`` maps each vector column to its ordered label list.
+    """
     genre_vocab = union_vocab(
         mean_probs(rec["genre_dicts"]) for rec in latents.values())
+    genre_discogs_vocab = union_vocab(
+        mean_probs(c.get("genre_dicts", [])) for c in crop.values())
     mood_vocab = union_vocab(
         mean_probs(c["mood_dicts"]) for c in crop.values())
 
@@ -211,6 +225,7 @@ def build_rows(latents: Dict[str, dict], crop: Dict[str, dict],
         genre_mean = mean_probs(rec["genre_dicts"])
         c = crop.get(track, {})
         mood_mean = mean_probs(c.get("mood_dicts", []))
+        genre_discogs_mean = mean_probs(c.get("genre_dicts", []))
         year, year_known = parse_year(rec["year_raw"])
         onset = agg_scalars(rec["onset"])
         bpm = agg_scalars(rec["bpm"])
@@ -220,6 +235,7 @@ def build_rows(latents: Dict[str, dict], crop: Dict[str, dict],
             "latent_indices": rec["indices"],
             "n_crops": len(rec["indices"]),
             "genre_vec": align_vector(genre_mean, genre_vocab),
+            "genre_discogs_vec": align_vector(genre_discogs_mean, genre_discogs_vocab),
             "mood_vec": align_vector(mood_mean, mood_vocab),
             "mood_present": bool(c.get("mood_dicts")),
             "bpm_mean": bpm["mean"],
@@ -233,10 +249,19 @@ def build_rows(latents: Dict[str, dict], crop: Dict[str, dict],
             row[f"rms_energy_{b}_mean"] = s["mean"]
             row[f"rms_energy_{b}_std"] = s["std"]
         rows.append(row)
-    return rows, genre_vocab, mood_vocab
+    vocabs = {
+        "genre_vocab": genre_vocab,                  # <-> genre_vec (12-label style)
+        "genre_discogs_vocab": genre_discogs_vocab,  # <-> genre_discogs_vec (finer)
+        "mood_vocab": mood_vocab,                    # <-> mood_vec
+    }
+    return rows, vocabs
 
 
-def write_outputs(rows: List[dict], genre_vocab: List[str], mood_vocab: List[str],
+# vector columns kept as lists (parquet) / JSON-encoded (csv)
+_VECTOR_COLS = ("latent_indices", "genre_vec", "genre_discogs_vec", "mood_vec")
+
+
+def write_outputs(rows: List[dict], vocabs: Dict[str, List[str]],
                   out_dir: Path, source: str) -> None:
     import pandas as pd
 
@@ -246,22 +271,24 @@ def write_outputs(rows: List[dict], genre_vocab: List[str], mood_vocab: List[str
     df.to_parquet(pq, index=False)
     # CSV: list columns are JSON-encoded so the file stays a flat, greppable table
     csv_df = df.copy()
-    for col in ("latent_indices", "genre_vec", "mood_vec"):
+    for col in _VECTOR_COLS:
         csv_df[col] = csv_df[col].map(json.dumps)
     csv = out_dir / "feature_table.csv"
     csv_df.to_csv(csv, index=False)
     vocab = out_dir / "vocab_map.json"
     vocab.write_text(json.dumps({
         "source": source,
-        "genre_vocab": genre_vocab,     # index i <-> genre_vec[i]
-        "mood_vocab": mood_vocab,       # index i <-> mood_vec[i]
+        **vocabs,                       # genre_vocab / genre_discogs_vocab / mood_vocab
         "n_tracks": len(rows),
-        "note": "genre_vec/mood_vec are zero-filled prob vectors aligned to these "
-                "vocabularies (union of observed top-k labels; tail probs ~0).",
+        "note": "genre_vec / genre_discogs_vec / mood_vec are zero-filled prob vectors "
+                "aligned to the like-named vocab (union of observed top-k labels; tail "
+                "probs ~0). genre_vec = coarse 12-label style taxonomy; genre_discogs_vec "
+                "= finer discogs taxonomy — separate blocks, whiten independently.",
     }, indent=2))
     logger.info("wrote %s (%d rows), %s, %s", pq.name, len(rows), csv.name, vocab.name)
-    logger.info("genre vocab: %d labels | mood vocab: %d labels",
-                len(genre_vocab), len(mood_vocab))
+    logger.info("genre vocab: %d | genre_discogs vocab: %d | mood vocab: %d",
+                len(vocabs["genre_vocab"]), len(vocabs["genre_discogs_vocab"]),
+                len(vocabs["mood_vocab"]))
 
 
 def main() -> int:
@@ -287,8 +314,8 @@ def main() -> int:
         return 1
     crop = collect_crop_info(args.crop_info_root, latents.keys()) \
         if args.crop_info_root else {}
-    rows, genre_vocab, mood_vocab = build_rows(latents, crop, args.source)
-    write_outputs(rows, genre_vocab, mood_vocab, args.out_dir, args.source)
+    rows, vocabs = build_rows(latents, crop, args.source)
+    write_outputs(rows, vocabs, args.out_dir, args.source)
     return 0
 
 
