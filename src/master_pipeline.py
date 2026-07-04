@@ -732,15 +732,30 @@ class MasterPipeline:
             self._run_track_analysis()
             _ran_track_analysis = True
             if self.ui: self.ui.set_stage('track_analysis', 'done')
-            state.mark_stage_completed('track_analysis')
-            state.save()
-            _flush_tunableop_results()
-            # Consolidate .INFO files into a single dataset.json for fast analysis
-            try:
-                from core.data_store import DataStore
-                DataStore.bootstrap(self.working_dir)
-            except Exception as _ds_exc:
-                logger.debug(f"DataStore.bootstrap (track): {_ds_exc}")
+            # Only record the stage complete if it actually succeeded. A wholesale
+            # separation failure (0 stems separated, >0 failed) must NOT be marked
+            # complete — otherwise the is_stage_completed() gate above silently
+            # skips the retry on every subsequent run (0-stem sticky-skip bug,
+            # caught 2026-07-04). Mirrors the "state cannot be trusted" philosophy
+            # the cropping stage below already documents.
+            if self.stats.track_analysis_succeeded():
+                state.mark_stage_completed('track_analysis')
+                state.save()
+                _flush_tunableop_results()
+                # Consolidate .INFO files into a single dataset.json for fast analysis
+                try:
+                    from core.data_store import DataStore
+                    DataStore.bootstrap(self.working_dir)
+                except Exception as _ds_exc:
+                    logger.debug(f"DataStore.bootstrap (track): {_ds_exc}")
+            else:
+                logger.warning(
+                    f"[STAGE 2] Track analysis did NOT complete — stem separation "
+                    f"failed on all {self.stats.tracks_separation_failed} track(s) "
+                    f"with 0 successes. NOT marking 'track_analysis' complete; it "
+                    f"will retry on the next run (previously this was silently "
+                    f"skipped as done)."
+                )
         else:
             logger.info(fmt_dim("\n[STAGE 2] Track Analysis: SKIPPED"))
             if self.ui: self.ui.set_stage('track_analysis', 'skipped')
@@ -1186,6 +1201,7 @@ class MasterPipeline:
                 logger.error(f"  Failed: {folder.name} - {e}")
                 
         self.stats.tracks_separated = success_count
+        self.stats.tracks_separation_failed = fail_count
         return tracks_to_process
 
 
@@ -1289,6 +1305,7 @@ class MasterPipeline:
                     logger.info(progress.update(i, f"{success_count} ok, {fail_count} failed"))
 
             self.stats.tracks_separated = success_count
+            self.stats.tracks_separation_failed = fail_count
             logger.info(progress.finish(f"{success_count} success, {fail_count} failed"))
 
         except Exception as e:
