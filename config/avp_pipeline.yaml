@@ -1,0 +1,160 @@
+paths:
+  input: /run/media/kim/9a410a1d-a4a8-4faf-8298-bcaa2576ea9d/avp-flac
+  output: /run/media/kim/9a410a1d-a4a8-4faf-8298-bcaa2576ea9d/avp-analyzed
+  latent_dataset: null
+stages:
+  organize: true
+  track_analysis: true
+  separate: true
+  cropping: false
+  crop_analysis: false
+source_separation:
+  backend: bs_roformer
+  bs_roformer:
+    model_name: jarredou-BS-ROFO-SW-Fixed-drums
+    model_dir: /home/kim/Projects/mir/models/bs-roformer
+    batch_size: 2
+    device: cuda
+    save_extra_stems: false
+    discard_stems:
+    - guitar
+    - piano
+  demucs:
+    model: htdemucs
+    shifts: 0
+    device: cuda
+    segment: null
+    output_format: mp3
+    mp3_bitrate: 128
+    clip_mode: rescale
+    workers: 4
+rhythm:
+  onsets: true
+  workers: 10
+cropping:
+  length_samples: 524288
+  mode: beat-aligned
+  overlap: false
+  div4: true
+  include_stems: true
+  skip_stems:
+  - vocals
+  workers: 8
+  flac_compression_level: 4
+features:
+  loudness: true
+  spectral: true
+  saturation: true
+  multiband_rms: true
+  chroma: false
+  hpcp_tiv: true
+  timbral: true
+  syncopation: true
+  complexity: true
+  essentia: true
+  essentia_genre: true
+  essentia_mood: true
+  essentia_instrument: true
+  essentia_voice: true
+  essentia_gender: false
+  vggish_use_migraphx: true
+  audiobox: true
+  per_stem_rhythm: true
+  per_stem_harmonic: true
+  per_stem: true
+  timeseries:
+    enabled: true
+    n_steps: 256
+    timbral: false
+    timbral_steps: 16
+  per_crop_bpm: false
+vocal_content:
+  crest_factor_threshold: 30.0
+  rms_threshold: -42.0
+  peak_threshold: -20.0
+overwrite:
+  demucs: false
+  source_separation: false
+  beats: false
+  bpm: false
+  crops: false
+  syncopation: false
+  complexity: false
+  loudness: false
+  spectral: false
+  saturation: false
+  multiband_rms: false
+  chroma: false
+  hpcp_tiv: false
+  timbral: false
+  essentia: false
+  audiobox: false
+  per_stem_rhythm: false
+  per_stem_harmonic: false
+  timeseries: false
+  music_flamingo: false
+  metadata: false
+music_flamingo:
+  enabled: false
+  model: Q8_0
+  context_size: 16384
+  sample_probability: 0.005
+  prompts:
+    full: '{genres} {metadata} Describe the track in detail: the mood, timbre, genre,
+      instrumentation, production aesthetics and techniques, construction. Do not
+      use filler words, be professional, do not hallucinate. It''s better to say nothing
+      than stretch the truth.'
+  max_tokens:
+    full: 512
+  revision:
+    enabled: false
+    model: models/LMM/granite-4.0-h-tiny-GGUF/granite-4.0-h-tiny-Q8_0.gguf
+    max_tokens: 512
+    temperature: 0.7
+    n_ctx: 4096
+    prompts:
+      short_technical: A brief technical description of production and mixing (20-30
+        words)
+      short_mood: The mood and emotional character (10-20 words)
+      short_genre: A general description of the track (5-15 words)
+metadata:
+  enabled: false
+  use_musicbrainz: true
+  use_fingerprinting: true
+  fix_various_artists: true
+  various_artists_aliases:
+  - various artists
+  - various
+  - va
+  - v/a
+  - v.a.
+  - compilation
+  - unknown artist
+  - unknown
+stem_quality:
+  enabled: true
+  crest_factor_threshold: -40
+  rms_threshold: -39
+  peak_threshold: -20
+vocal_removal:
+  enabled: false
+  method: auto
+filename_cleanup:
+  enabled: false
+rocm:
+  FLASH_ATTENTION_TRITON_AMD_ENABLE: 'TRUE'
+  PYTORCH_TUNABLEOP_ENABLED: '1'
+  PYTORCH_TUNABLEOP_TUNING: '1'
+  PYTORCH_TUNABLEOP_VERBOSE: '1'
+  PYTORCH_HIP_ALLOC_CONF: garbage_collection_threshold:0.8,max_split_size_mb:512
+  PYTORCH_HIP_FREE_MEMORY_THRESHOLD_MB: '256'
+  HIP_FORCE_DEV_KERNARG: '1'
+  TORCH_COMPILE: '0'
+  OMP_NUM_THREADS: '8'
+  MIOPEN_FIND_MODE: '3'
+processing:
+  device: cuda
+  overwrite: false
+  verbose: false
+  feature_workers: 12
+  essentia_workers: 2

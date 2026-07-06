@@ -298,7 +298,16 @@ def load_timeseries_npz(path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
 # Batch CLI
 # ---------------------------------------------------------------------------
 
-def _iter_track_dirs(root: Path):
+def _iter_track_dirs(root: Path, recursive: bool = False):
+    """Yield track dirs (those containing a full_mix.*). With recursive=True,
+    walk the whole tree so nested augmentation variant folders
+    (<track>/augmentations/<variant>/full_mix.flac) are found too."""
+    if recursive:
+        for dirpath, _dirnames, _filenames in os.walk(root):
+            d = Path(dirpath)
+            if find_full_mix(d) is not None:
+                yield d
+        return
     for child in sorted(root.iterdir()):
         if child.is_dir() and find_full_mix(child) is not None:
             yield child
@@ -374,6 +383,9 @@ def main():
     parser.add_argument("--no-hpcp", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N tracks")
+    parser.add_argument("--recursive", action="store_true",
+                        help="Walk the whole tree so nested augmentation variant "
+                             "folders (<track>/augmentations/<variant>/) are processed too.")
     parser.add_argument("--workers", type=int, default=1,
                         help="Parallel worker processes (default 1). Each builds its own "
                              "madmom + essentia stack; BLAS threads are pinned to 1 per worker.")
@@ -400,7 +412,7 @@ def main():
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(message)s")
 
-    track_dirs = list(_iter_track_dirs(args.root))
+    track_dirs = list(_iter_track_dirs(args.root, args.recursive))
     if args.limit:
         track_dirs = track_dirs[:args.limit]
     jobs: List[Tuple[str, str, bool]] = []
