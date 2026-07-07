@@ -2,10 +2,11 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
-from dash import Input, Output, no_update
+from dash import Input, Output, State, no_update
 from . import latents, analysis, viewer_tab, dataset_tab, analysis_tab, audio_panel
 from . import player_client as pc
-from .sidecar_index import CropMeta
+from .sidecar_index import CropMeta, group_by_track
+from .scalar_cache import ScalarCache
 from . import inference_tab, a2a_tab
 
 
@@ -32,34 +33,55 @@ def sample_ids(index: list[CropMeta], n: int, seed: int = 0) -> list[str]:
 
 
 def register(app, index: list[CropMeta], latent_dir: Path):
-    crop_opts = [{"label": f"{c.id} — {c.source_track}", "value": c.id}
-                 for c in index]
+    tracks = group_by_track(index)
+    track_opts = [{"label": f"{t or '(unknown track)'} — {len(cs)} crops",
+                   "value": t} for t, cs in sorted(tracks.items())]
+    cache = ScalarCache(latent_dir, [c.id for c in index])
+
+    @app.callback(Output("sa3-track-dd", "options"),
+                  Input("sa3-track-dd", "id"))
+    def _track_fill(_):
+        return track_opts
 
     @app.callback(Output("sa3-crop-dd", "options"),
-                  Input("sa3-crop-dd", "id"))
-    def _fill(_):
-        return crop_opts
+                  Output("sa3-crop-dd", "value"),
+                  Input("sa3-track-dd", "value"))
+    def _track_pick(track):
+        if track is None or track not in tracks:
+            return [], None
+        crops = sorted(tracks[track], key=lambda c: c.rel_pos)
+        opts = [{"label": f"{c.id} — pos {c.rel_pos:.2f}", "value": c.id}
+                for c in crops]
+        return opts, crops[0].id   # auto-select first crop → plots populate
 
     @app.callback(Output("sa3-latent-graph", "figure"),
                   Output("sa3-ts-dd", "options"),
+                  Output("sa3-ts-dd", "value"),
                   Output("sa3-audio-panel", "children"),
-                  Input("sa3-crop-dd", "value"))
-    def _show(cid):
+                  Input("sa3-crop-dd", "value"),
+                  State("sa3-ts-dd", "value"))
+    def _show(cid, ts_sel):
         if not cid:
-            return no_update, no_update, no_update
+            return (viewer_tab.placeholder_figure(
+                        "choose a track above — its first crop's latent "
+                        "renders here"),
+                    [], None, no_update)
         import json
         z = latents.load_latent(latent_dir, cid)
         meta = json.loads((latent_dir / f"{cid}.json").read_text())
         ts = latents.load_timeseries(latent_dir, cid)
         fig = viewer_tab.latent_figure(z, latents.content_frames(meta))
-        return (fig, [{"label": k, "value": k} for k in ts],
+        names = list(ts)
+        value = ts_sel if ts_sel in ts else (names[0] if names else None)
+        return (fig, [{"label": k, "value": k} for k in names], value,
                 audio_panel.panel(cid, pc.status()))
 
     @app.callback(Output("sa3-ts-graph", "figure"),
                   Input("sa3-crop-dd", "value"), Input("sa3-ts-dd", "value"))
     def _ts(cid, name):
         if not cid or not name:
-            return no_update
+            return viewer_tab.placeholder_figure(
+                "timeseries of the selected crop", height=240)
         ts = latents.load_timeseries(latent_dir, cid)[name]
         return viewer_tab.timeseries_figure(name, ts)
 
@@ -106,12 +128,26 @@ def register(app, index: list[CropMeta], latent_dir: Path):
         corr = analysis.dim_feature_corr(lats, feats)
         return analysis_tab.feature_corr_figure(corr, feat)
 
-    @app.callback(Output("sa3-ds-x", "options"), Output("sa3-ds-x", "value"),
-                  Output("sa3-ds-y", "options"), Output("sa3-ds-y", "value"),
-                  Input("sa3-ds-x", "id"))
-    def _ds_fill(_):
-        opts = scalar_options()
-        return opts, "bpm", opts, "lufs"
+    @app.callback(Output("sa3-ds-progress", "children"),
+                  Output("sa3-ds-x", "options"), Output("sa3-ds-y", "options"),
+                  Output("sa3-ds-interval", "disabled"),
+                  Input("sa3-ds-interval", "n_intervals"))
+    def _ds_progress(_n):
+        cache.ensure_started()   # loads cache npz or spawns ONE bg thread
+        st = cache.status()
+        base = scalar_options()
+        if st["state"] == "ready":
+            opts = base + [{"label": f"mean({f})", "value": f}
+                           for f in cache.fields()]
+            return (f"{len(opts)} features (timeseries-mean cache ready)",
+                    opts, opts, True)
+        return (f"computing timeseries means… {st['done']}/{st['total']} crops",
+                base, base, False)
+
+    def _ds_value(c: CropMeta, field: str):
+        if field in SCALAR_FIELDS:
+            return getattr(c, field)
+        return cache.value(c.id, field)
 
     @app.callback(Output("sa3-ds-graph", "figure"),
                   Input("sa3-ds-x", "value"), Input("sa3-ds-y", "value"))
@@ -120,7 +156,7 @@ def register(app, index: list[CropMeta], latent_dir: Path):
             return no_update
         xs, ys, txt = [], [], []
         for c in index:
-            xv, yv = getattr(c, xf), getattr(c, yf)
+            xv, yv = _ds_value(c, xf), _ds_value(c, yf)
             if xv is None or yv is None:
                 continue
             xs.append(xv); ys.append(yv); txt.append(f"{c.artist} — {c.title}")
