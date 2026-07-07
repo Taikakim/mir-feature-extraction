@@ -129,7 +129,12 @@ def steering_payload(vals: Sequence) -> dict:
                 "gain": float(film_gain) if film_gain is not None else 1.75}
     dora_dd, dora_strength = vals[21:23]
     dora = None
-    if dora_dd and dora_dd != "none":
+    if dora_dd == "none":
+        # explicit "none" must reach the server by name: an absent dora block
+        # means "use the op default" there (evr1x for /a2a_mix), which would
+        # silently override the user's base-model choice
+        dora = {"name": "none"}
+    elif dora_dd:
         dora = {"name": dora_dd, "ckpt_path": None,
                 "strength": (float(dora_strength)
                              if dora_strength is not None else 1.0)}
