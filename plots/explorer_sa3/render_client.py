@@ -101,3 +101,56 @@ def render(op: str, payload: dict, timeout: float = 3600.0) -> dict:
 def audio_url(rel: str) -> str:
     """BASE + rel (rel is an entry from resp['urls'], e.g. /audio/<job>/x.wav)."""
     return BASE + rel
+
+
+def ckpts(rescan: bool = False, root: str | None = None,
+          timeout: float = 60.0) -> dict | None:
+    """GET /ckpts — checkpoint journal (recursive *.ckpt / *.safetensors scan
+    of the server-side target folder, default /run/media/kim/Mantu1/sa3_lora_runs,
+    cached to a json journal keyed on mtime+size).
+
+    Params: rescan=1 forces a fresh walk; root overrides the scan folder.
+    Response: {"root": str, "ckpts": [{"path": str, "size": int, "mtime": float},
+    ...]}. Returns None when the server is unreachable."""
+    params: dict = {"rescan": int(bool(rescan))}
+    if root:
+        params["root"] = root
+    try:
+        r = requests.get(f"{BASE}/ckpts", params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+_SCHED_CACHE: dict[tuple, list[float]] = {}
+
+
+def schedule(steps: int, duration: float, dist_shift: float | None = None,
+             sigma_max: float = 1.0, timeout: float = 10.0) -> list[float] | None:
+    """POST /schedule — the real run sigma schedule (build_schedule with the
+    model's sampling_dist_shift unless dist_shift is given; length steps+1,
+    descending sigma_max→0).
+
+    Payload: {"steps": int, "duration": float (seconds; dist_shift is
+    length-dependent), "dist_shift": float|null (null = model default),
+    "sigma_max": float}. Response: {"sigmas": [float, ...]}.
+    Memoized per argument tuple; None when the server is unreachable (callers
+    should fall back to a linear ramp and say so)."""
+    key = (int(steps), float(duration),
+           None if dist_shift is None else float(dist_shift), float(sigma_max))
+    if key in _SCHED_CACHE:
+        return _SCHED_CACHE[key]
+    try:
+        r = requests.post(f"{BASE}/schedule", json={
+            "steps": int(steps), "duration": float(duration),
+            "dist_shift": dist_shift, "sigma_max": float(sigma_max),
+        }, timeout=timeout)
+        r.raise_for_status()
+        sig = [float(s) for s in r.json()["sigmas"]]
+    except Exception:
+        return None
+    if len(_SCHED_CACHE) > 256:
+        _SCHED_CACHE.clear()
+    _SCHED_CACHE[key] = sig
+    return sig

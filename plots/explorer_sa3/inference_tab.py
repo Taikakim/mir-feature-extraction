@@ -5,15 +5,47 @@ Routing: non-empty `inf-init-path` -> POST /a2a_track, else POST /generate.
 The generic steering panel (LatCH / FiLM / DoRA) is shared with the A2A tab
 via `controls` (ns="inf"). Long renders block this callback's worker thread
 synchronously; the 2 s interval keeps the status badge live meanwhile.
+
+Guidance controls: `cfg_interval` is native SIGMA semantics — the DiT gates
+CFG per step on `cfg_interval[0] <= sigma <= cfg_interval[1]`
+(stable_audio_3/models/dit.py:479, limited-interval guidance per
+Kynkäänniemi 2024) — so the RangeSlider lives in sigma space and step indices
+are only a secondary annotation on the schedule chart. The chart itself is a
+plotly port of interface/diffusion_cond.py:create_sigma_chart, fed by the
+server's /schedule endpoint so it shows the *real* dist-shift-warped run
+schedule. Checkpoint picker is fed by the /ckpts journal endpoint.
 """
 from __future__ import annotations
 import time
 
+import plotly.graph_objects as go
 from dash import Input, Output, State, dcc, html, no_update
 
 from . import controls, render_client
 
 _HISTORY_CAP = 50
+
+_TIP_APG = ("Adaptive Projected Guidance (Sadat 2024): guidance direction is "
+            "split into components parallel/orthogonal to the conditional "
+            "prediction. 1.0 = orthogonal-only (cleaner at high CFG), "
+            "0.0 = vanilla CFG, in between blends.")
+_TIP_CFG_INTERVAL = ("Limited-interval guidance (Kynkäänniemi 2024): CFG is "
+                     "applied ONLY at steps whose sigma lies inside this "
+                     "interval — native SIGMA semantics, gated in the DiT as "
+                     "cfg_interval[0] <= sigma <= cfg_interval[1]. Outside "
+                     "the interval the model runs uncond-free (also faster). "
+                     "[0,1] = CFG everywhere (default).")
+_TIP_DURPAD = ("Silence padding (s) appended after the requested duration "
+               "before generation; paper default 6 s. Trimmed on decode.")
+_TIP_LADDER = ("Comma-separated init-noise levels, e.g. 0.35,0.42,0.5 — "
+               "renders the same seed once per level (a2a_track only); "
+               "overrides the single init-noise value.")
+_TIP_DIST_SHIFT = ("Schedule warp: overrides the model's sampling_dist_shift "
+                   "in build_schedule. Leave blank for the model default. "
+                   "Length-dependent — duration changes the warp too.")
+_TIP_CKPT = ("Checkpoint journal: server-side recursive scan for *.ckpt / "
+             "*.safetensors (default root /run/media/kim/Mantu1/sa3_lora_runs), "
+             "cached by mtime+size. Free-text path overrides the dropdown.")
 
 
 def layout() -> html.Div:
@@ -21,16 +53,36 @@ def layout() -> html.Div:
         html.Div(id="inf-server-badge"),
         dcc.Interval(id="inf-interval", interval=2000),
         html.Div([
-            html.Label("Prompt"),
+            html.Label("Base prompt (persistent)"),
             dcc.Textarea(
                 id="inf-prompt",
                 placeholder=("TrackType: Music, VocalType: Instrumental, "
                              "... (prefix vocabulary, then free text)"),
                 style={"width": "100%", "height": "60px"}),
+            html.Label("Variation (appended with ', ' when both non-empty)"),
+            dcc.Textarea(
+                id="inf-variation",
+                placeholder="per-render variation, e.g. 'darker pads, half-time drop'",
+                style={"width": "100%", "height": "36px"}),
             html.Label("Negative prompt"),
             dcc.Input(id="inf-negprompt", type="text", value="",
                       style={"width": "100%"}),
         ]),
+        html.Div([
+            html.Span("checkpoint", title=_TIP_CKPT,
+                      style={"fontWeight": "bold"}),
+            dcc.Dropdown(id="inf-ckpt-dd", options=[], value=None,
+                         clearable=True, placeholder="base model (no ckpt)",
+                         style={"width": "420px", "display": "inline-block"}),
+            html.Button("Rescan", id="inf-ckpt-rescan"),
+            html.Span("or path"),
+            dcc.Input(id="inf-ckpt-path", type="text", value="",
+                      placeholder="free-text ckpt path (overrides dropdown)",
+                      style={"width": "30%"}),
+            html.Span(id="inf-ckpt-status",
+                      style={"fontSize": "11px", "color": "#666"}),
+        ], style={"display": "flex", "gap": "6px", "alignItems": "center",
+                  "flexWrap": "wrap", "marginTop": "8px"}),
         html.Div([
             html.Span("duration (s)"),
             dcc.Input(id="inf-duration", type="number", value=47, min=1,
@@ -44,12 +96,18 @@ def layout() -> html.Div:
             dcc.Input(id="inf-seed", type="number", value=-1),
             html.Span("batch"),
             dcc.Input(id="inf-batch", type="number", value=1, min=1, max=4),
-            html.Span("apg"),
+            html.Span("apg", title=_TIP_APG,
+                      style={"textDecoration": "underline dotted"}),
             dcc.Input(id="inf-apg", type="number", value=1.0, min=0, max=1,
                       step=0.1),
-            html.Span("dur pad (s)"),
+            html.Span("dur pad (s)", title=_TIP_DURPAD,
+                      style={"textDecoration": "underline dotted"}),
             dcc.Input(id="inf-durpad", type="number", value=6.0, min=0, max=30,
                       step=0.5),
+            html.Span("dist shift", title=_TIP_DIST_SHIFT,
+                      style={"textDecoration": "underline dotted"}),
+            dcc.Input(id="inf-dist-shift", type="number", value=None,
+                      placeholder="model", style={"width": "80px"}),
         ], style={"display": "flex", "gap": "6px", "alignItems": "center",
                   "flexWrap": "wrap", "marginTop": "8px"}),
         html.Div([
@@ -59,10 +117,26 @@ def layout() -> html.Div:
             html.Span("init noise"),
             dcc.Input(id="inf-init-noise", type="number", value=0.4, min=0.05,
                       max=0.95, step=0.01),
-            html.Span("noise ladder (e.g. 0.35,0.42,0.5)"),
+            html.Span("noise ladder (e.g. 0.35,0.42,0.5)", title=_TIP_LADDER,
+                      style={"textDecoration": "underline dotted"}),
             dcc.Input(id="inf-noise-ladder", type="text", value=""),
         ], style={"display": "flex", "gap": "6px", "alignItems": "center",
                   "flexWrap": "wrap", "marginTop": "8px"}),
+        html.Div([
+            html.Label("CFG interval (σ)", title=_TIP_CFG_INTERVAL,
+                       style={"fontWeight": "bold",
+                              "textDecoration": "underline dotted"}),
+            dcc.RangeSlider(
+                id="inf-cfg-interval", min=0.0, max=1.0, step=0.01,
+                value=[0.0, 1.0], allowCross=False,
+                marks={0: "σ=0", 0.25: "0.25", 0.5: "0.5",
+                       0.75: "0.75", 1: "σ=1"},
+                tooltip={"placement": "bottom", "always_visible": False}),
+            dcc.Loading(dcc.Graph(
+                id="inf-sigma-graph",
+                config={"displayModeBar": False},
+                style={"height": "280px"})),
+        ], style={"marginTop": "8px"}),
         controls.steering_panel("inf", dora_default="none"),
         html.Button("Render", id="inf-render-btn"),
         html.Pre(id="inf-status", style={"whiteSpace": "pre-wrap"}),
@@ -90,6 +164,81 @@ def _parse_ladder(text: str) -> list[float] | None:
     return [float(p) for p in parts]
 
 
+def _full_prompt(base: str | None, variation: str | None) -> str:
+    """Base + ', ' + variation when both non-empty; else whichever is set."""
+    b = (base or "").strip()
+    v = (variation or "").strip()
+    if b and v:
+        return f"{b}, {v}"
+    return b or v
+
+
+def _sigma_figure(steps, duration, dist_shift, interval, cfg,
+                  latch_windows) -> go.Figure:
+    """Plotly port of interface/diffusion_cond.py:create_sigma_chart.
+
+    Curves: sigma (descending) + progress = 1-sigma over step index.
+    CFG band: exactly the steps whose sigma satisfies the DiT gate
+    lo <= sigma <= hi (sigma semantics; step indices are annotation only).
+    Latch windows are fractions of total steps (yellow), with the
+    LatCH ∩ CFG overlap in orange.
+    """
+    steps = max(1, int(steps or 24))
+    duration = float(duration or 47)
+    ds = None if dist_shift in (None, "") else float(dist_shift)
+    lo, hi = (interval or [0.0, 1.0])
+    lo, hi = float(lo), float(hi)
+
+    sig = render_client.schedule(steps, duration, ds)
+    src = "server /schedule"
+    if sig is None:
+        sig = [1.0 - i / steps for i in range(steps + 1)]
+        src = "LINEAR FALLBACK — server down, no dist-shift warp"
+    x = list(range(len(sig)))
+
+    fig = go.Figure()
+    fig.add_scatter(x=x, y=sig, mode="lines+markers", name="sigma",
+                    line={"color": "#1f77b4"}, marker={"size": 4})
+    fig.add_scatter(x=x, y=[1.0 - s for s in sig], mode="lines",
+                    name="progress (1−σ)",
+                    line={"color": "#17becf", "dash": "dash"})
+
+    cfg_band = None
+    idx = [i for i, s in enumerate(sig) if lo <= s <= hi]
+    if idx:
+        cfg_band = (min(idx), max(idx))
+        fig.add_vrect(
+            x0=cfg_band[0], x1=cfg_band[1], fillcolor="green", opacity=0.15,
+            line_width=0,
+            annotation_text=(f"CFG σ∈[{lo:.2f},{hi:.2f}] "
+                             f"(steps {cfg_band[0]}–{cfg_band[1]})"),
+            annotation_position="top left")
+
+    for (ls, le) in latch_windows:
+        l0, l1 = float(ls) * steps, float(le) * steps
+        if l1 <= l0:
+            continue
+        fig.add_vrect(x0=l0, x1=l1, fillcolor="gold", opacity=0.15,
+                      line_width=0, annotation_text="LatCH",
+                      annotation_position="bottom left")
+        if cfg_band:
+            o0, o1 = max(l0, cfg_band[0]), min(l1, cfg_band[1])
+            if o0 < o1:
+                fig.add_vrect(x0=o0, x1=o1, fillcolor="orange", opacity=0.25,
+                              line_width=0)
+
+    fig.update_layout(
+        title={"text": (f"σ schedule · steps={steps} · dur={duration:g}s · "
+                        f"dist_shift={ds if ds is not None else 'model'} · "
+                        f"cfg={cfg} · [{src}]"),
+               "font": {"size": 12}},
+        xaxis_title="step", yaxis_title="value",
+        yaxis_range=[0, 1.05], height=280,
+        margin={"l": 40, "r": 10, "t": 40, "b": 30},
+        legend={"orientation": "h", "y": 1.12})
+    return fig
+
+
 def register_callbacks(app) -> None:
     controls.register(app, "inf")
 
@@ -109,36 +258,92 @@ def register_callbacks(app) -> None:
             html.Pre(tail, style={"fontSize": "11px", "margin": "2px 0"}),
         ], style={"color": "#070"})
 
+    @app.callback(Output("inf-ckpt-dd", "options"),
+                  Output("inf-ckpt-status", "children"),
+                  Input("inf-ckpt-rescan", "n_clicks"))
+    def _ckpt_journal(n_clicks):
+        # fires once at load (n_clicks=None → cached journal), then on button
+        resp = render_client.ckpts(rescan=bool(n_clicks))
+        if resp is None:
+            return [], "ckpt journal unavailable (server down?)"
+        root = (resp.get("root") or "").rstrip("/")
+        opts = []
+        for c in resp.get("ckpts", []):
+            path = c.get("path", "")
+            label = path[len(root) + 1:] if root and path.startswith(root + "/") else path
+            size = c.get("size")
+            if size:
+                label += f"  ({size / 1e6:.0f} MB)"
+            opts.append({"label": label, "value": path})
+        return opts, f"{len(opts)} ckpts · root {root}"
+
+    @app.callback(
+        Output("inf-sigma-graph", "figure"),
+        Input("inf-steps", "value"),
+        Input("inf-duration", "value"),
+        Input("inf-dist-shift", "value"),
+        Input("inf-cfg-interval", "value"),
+        Input("inf-cfg", "value"),
+        *[Input(f"inf-ctl-latch{i}-{s}", "value")
+          for i in range(1, controls.LATCH_SLOTS + 1)
+          for s in ("head", "start", "end")])
+    def _sigma_chart(steps, duration, dist_shift, interval, cfg, *latch):
+        windows = []
+        for i in range(controls.LATCH_SLOTS):
+            head, start, end = latch[i * 3:(i + 1) * 3]
+            if head in (None, "none", ""):
+                continue
+            windows.append((start if start is not None else 0.0,
+                            end if end is not None else 0.6))
+        return _sigma_figure(steps, duration, dist_shift, interval, cfg,
+                             windows)
+
     @app.callback(
         Output("inf-result", "children"),
         Output("inf-history", "data"),
         Output("inf-status", "children"),
         Input("inf-render-btn", "n_clicks"),
         State("inf-prompt", "value"),
+        State("inf-variation", "value"),
         State("inf-negprompt", "value"),
         State("inf-duration", "value"),
         State("inf-steps", "value"),
         State("inf-cfg", "value"),
+        State("inf-cfg-interval", "value"),
         State("inf-seed", "value"),
         State("inf-batch", "value"),
         State("inf-apg", "value"),
         State("inf-durpad", "value"),
+        State("inf-dist-shift", "value"),
+        State("inf-ckpt-dd", "value"),
+        State("inf-ckpt-path", "value"),
         State("inf-init-path", "value"),
         State("inf-init-noise", "value"),
         State("inf-noise-ladder", "value"),
         State("inf-history", "data"),
         *controls.steering_states("inf"),
         prevent_initial_call=True)
-    def _render(_n, prompt, negprompt, duration, steps, cfg, seed, batch,
-                apg, durpad, init_path, init_noise, ladder, history, *steer):
-        if not (prompt or "").strip():
+    def _render(_n, base_prompt, variation, negprompt, duration, steps, cfg,
+                cfg_interval, seed, batch, apg, durpad, dist_shift,
+                ckpt_dd, ckpt_path, init_path, init_noise, ladder, history,
+                *steer):
+        prompt = _full_prompt(base_prompt, variation)
+        if not prompt:
             return no_update, no_update, "error: prompt is empty"
         try:
             steering = controls.steering_payload(list(steer))
         except Exception as e:
             return no_update, no_update, f"steering error: {e}"
+        lo, hi = (cfg_interval or [0.0, 1.0])
         common = {"steps": int(steps or 24), "cfg_scale": float(cfg or 6.0),
-                  "seed": int(seed if seed is not None else -1)}
+                  "seed": int(seed if seed is not None else -1),
+                  "cfg_interval": [float(lo), float(hi)],
+                  "apg_scale": float(apg if apg is not None else 1.0)}
+        if dist_shift not in (None, ""):
+            common["dist_shift"] = float(dist_shift)
+        ckpt = (ckpt_path or "").strip() or (ckpt_dd or "").strip()
+        if ckpt:
+            common["ckpt_path"] = ckpt
         if (init_path or "").strip():
             op = "a2a_track"
             payload = {"audio_path": init_path.strip(),
@@ -157,7 +362,6 @@ def register_callbacks(app) -> None:
                        "negative_prompt": negprompt or "",
                        "duration": float(duration or 47),
                        "batch_size": int(batch or 1),
-                       "apg_scale": float(apg if apg is not None else 1.0),
                        "duration_padding_sec": float(
                            durpad if durpad is not None else 6.0),
                        **common, **steering}
@@ -169,7 +373,7 @@ def register_callbacks(app) -> None:
         files = resp.get("files", [])
         entry = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                  "op": op,
-                 "label": (prompt or "")[:60],
+                 "label": prompt[:60],
                  "urls": urls, "files": files,
                  "meta": resp.get("meta", {})}
         history = ([entry] + (history or []))[:_HISTORY_CAP]
