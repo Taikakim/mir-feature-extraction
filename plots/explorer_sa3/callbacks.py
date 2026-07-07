@@ -6,6 +6,7 @@ from dash import Input, Output, no_update
 from . import latents, analysis, viewer_tab, dataset_tab, analysis_tab, audio_panel
 from . import player_client as pc
 from .sidecar_index import CropMeta
+from . import inference_tab, a2a_tab
 
 
 SCALAR_FIELDS = ["bpm", "lufs", "rel_pos"]
@@ -124,3 +125,6 @@ def register(app, index: list[CropMeta], latent_dir: Path):
                 continue
             xs.append(xv); ys.append(yv); txt.append(f"{c.artist} — {c.title}")
         return dataset_tab.scatter_figure(xs, ys, xlabel=xf, ylabel=yf, text=txt)
+
+    inference_tab.register_callbacks(app)
+    a2a_tab.register_callbacks(app, index, latent_dir)
