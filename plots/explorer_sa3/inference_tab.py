@@ -40,7 +40,11 @@ _TIP_DURPAD = ("Silence padding (s) appended after the requested duration "
 _TIP_LADDER = ("Comma-separated init-noise levels, e.g. 0.35,0.42,0.5 — "
                "renders the same seed once per level (a2a_track only); "
                "overrides the single init-noise value.")
-_TIP_DIST_SHIFT = ("Schedule warp: overrides the model's sampling_dist_shift "
+_TIP_DIST_SHIFT = ("Sigma-SCHEDULE WARP (not a model input). Blank = the checkpoint's "
+                   "trained default (length-dependent shift, paper Eq 3). Number = constant "
+                   "override: 1.0 linear; >1 concentrates steps at HIGH sigma (structure); "
+                   "<1 at LOW sigma (detail/polish — the under-trained tail). The sigma "
+                   "chart redraws with it. Original tip: "
                    "in build_schedule. Leave blank for the model default. "
                    "Length-dependent — duration changes the warp too.")
 _TIP_CKPT = ("Checkpoint journal: server-side recursive scan for *.ckpt / "
@@ -107,7 +111,7 @@ def layout() -> html.Div:
             html.Span("dist shift", title=_TIP_DIST_SHIFT,
                       style={"textDecoration": "underline dotted"}),
             dcc.Input(id="inf-dist-shift", type="number", value=None,
-                      placeholder="model", style={"width": "80px"}),
+                      placeholder="ckpt default", style={"width": "90px"}),
         ], style={"display": "flex", "gap": "6px", "alignItems": "center",
                   "flexWrap": "wrap", "marginTop": "8px"}),
         html.Div([
