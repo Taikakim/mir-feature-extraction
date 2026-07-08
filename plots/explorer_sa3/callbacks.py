@@ -33,6 +33,7 @@ def sample_ids(index: list[CropMeta], n: int, seed: int = 0) -> list[str]:
 
 
 def register(app, index: list[CropMeta], latent_dir: Path):
+    analysis_tab.register_coact(app, index, latent_dir)
     tracks = group_by_track(index)
     track_opts = [{"label": f"{t or '(unknown track)'} — {len(cs)} crops",
                    "value": t} for t, cs in sorted(tracks.items())]
