@@ -158,6 +158,7 @@ class MusicFlamingoGGUF:
         gpu_layers: int = 99,
         context_size: int = 2048,
         token_limits: Optional[Dict[str, int]] = None,
+        trim_frac: Optional[float] = None,
     ):
         """
         Initialize Music Flamingo GGUF.
@@ -169,11 +170,16 @@ class MusicFlamingoGGUF:
             gpu_layers: Layers to offload to GPU (99 = all)
             context_size: LLM context window size (default 2048)
             token_limits: Custom max tokens per prompt type (overrides defaults)
+            trim_frac: If set (e.g. 0.6), send only the first trim_frac of each
+                track, fading out over the last 5%-of-track before the cut
+                (Kim 2026-07-08: descriptions don't lose accuracy, big speedup
+                on long tracks — a goa track's last 40% adds no new information)
         """
         self.cli_path = Path(cli_path) if cli_path else DEFAULT_CLI_PATH
         self.model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
         self.gpu_layers = gpu_layers
         self.context_size = context_size
+        self.trim_frac = trim_frac
 
         # Merge custom token limits with defaults
         self.token_limits = DEFAULT_TOKEN_LIMITS.copy()
@@ -272,7 +278,27 @@ class MusicFlamingoGGUF:
         _SUPPORTED_EXTS = {'.wav', '.flac', '.mp3'}
         _tmp_link: Optional[Path] = None
         audio_arg = str(audio_path)
-        if audio_path.suffix.lower() not in _SUPPORTED_EXTS:
+        if self.trim_frac:
+            # Kim's Flamingo cheat (2026-07-08): send only the first trim_frac
+            # of the track, fading out over the final 5%-of-track before the
+            # cut — the tail of a dance track adds no caption information.
+            probe = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'csv=p=0', str(audio_path.resolve())],
+                check=True, capture_output=True, text=True)
+            dur = float(probe.stdout.strip())
+            cut = dur * self.trim_frac
+            fade_start = dur * max(0.0, self.trim_frac - 0.05)
+            _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}.wav")
+            subprocess.run(
+                ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(audio_path.resolve()),
+                 '-t', f'{cut:.3f}',
+                 '-af', f'afade=t=out:st={fade_start:.3f}:d={cut - fade_start:.3f}',
+                 str(_tmp_link)],
+                check=True, capture_output=True,
+            )
+            audio_arg = str(_tmp_link)
+        elif audio_path.suffix.lower() not in _SUPPORTED_EXTS:
             _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}.wav")
             subprocess.run(
                 ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(audio_path.resolve()), str(_tmp_link)],
@@ -542,6 +568,7 @@ def batch_analyze_music_flamingo_gguf(
     model: str = 'Q8_0',
     overwrite: bool = False,
     token_limits: Optional[Dict[str, int]] = None,
+    trim_frac: Optional[float] = None,
 ) -> Dict[str, any]:
     """
     Batch analyze with Music Flamingo GGUF.
@@ -584,7 +611,7 @@ def batch_analyze_music_flamingo_gguf(
 
     # Initialize analyzer ONCE
     try:
-        analyzer = MusicFlamingoGGUF(model=model, token_limits=token_limits)
+        analyzer = MusicFlamingoGGUF(model=model, token_limits=token_limits, trim_frac=trim_frac)
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
         return stats
@@ -658,6 +685,10 @@ if __name__ == "__main__":
     parser.add_argument('--model', default='Q8_0', choices=list(AVAILABLE_MODELS.keys()),
                         help='Quantization level (Q8_0=best/default, Q6_K=balanced, IQ3_M=fast)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing analyses')
+    parser.add_argument('--trim-frac', type=float, default=None,
+                        help="Send only the first FRAC of each track (fade out over the "
+                             "last 5%% of track before the cut). 0.6 recommended — Kim's "
+                             "speedup cheat, captions don't lose accuracy")
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
 
     args = parser.parse_args()
@@ -674,11 +705,12 @@ if __name__ == "__main__":
                 path,
                 model=args.model,
                 overwrite=args.overwrite,
+                trim_frac=args.trim_frac,
             )
             if stats['failed'] > 0:
                 sys.exit(1)
         else:
-            analyzer = MusicFlamingoGGUF(model=args.model)
+            analyzer = MusicFlamingoGGUF(model=args.model, trim_frac=args.trim_frac)
 
             audio_path = path
             save_to_info = False
