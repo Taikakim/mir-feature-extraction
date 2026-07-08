@@ -288,7 +288,11 @@ class MusicFlamingoGGUF:
                 check=True, capture_output=True, text=True)
             dur = float(probe.stdout.strip())
             cut = dur * self.trim_frac
-            fade_start = dur * max(0.0, self.trim_frac - 0.05)
+            # absolute cap: even 60% of a 10-min track overflows an 8192 ctx
+            # ("failed to find a memory slot", 53 tracks on 2026-07-08); ~4 min
+            # of audio is a safe token budget and loses no caption information
+            cut = min(cut, 240.0)
+            fade_start = max(0.0, cut - dur * 0.05)
             _tmp_link = Path(f"/dev/shm/mir_mf_{_os.getpid()}_{int(time.monotonic()*1000)}.wav")
             subprocess.run(
                 ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(audio_path.resolve()),
