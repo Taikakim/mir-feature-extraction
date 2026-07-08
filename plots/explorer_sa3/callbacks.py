@@ -87,13 +87,15 @@ def register(app, index: list[CropMeta], latent_dir: Path):
         return viewer_tab.timeseries_figure(name, ts)
 
     @app.callback(Output("sa3-xcorr-graph", "figure"),
-                  Input("sa3-analysis-go", "n_clicks"))
-    def _analysis(n):
+                  Input("sa3-analysis-go", "n_clicks"),
+                  State("sa3-analysis-n", "value"))
+    def _analysis(n, n_sample):
         if not n:
             return no_update
-        ids = sample_ids(index, 400)
+        k = int(n_sample or 400) or len(index)      # 0 = ALL
+        ids = sample_ids(index, k)
         lats = [latents.load_latent(latent_dir, i) for i in ids]
-        return analysis_tab.xcorr_figure(analysis.dim_xcorr(lats))
+        return analysis_tab.xcorr_figure(analysis.dim_xcorr(lats), n_crops=len(ids))
 
     @app.callback(Output("sa3-feat-dd", "options"),
                   Output("sa3-feat-dd", "value"),

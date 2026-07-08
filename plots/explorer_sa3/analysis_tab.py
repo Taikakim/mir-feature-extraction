@@ -59,19 +59,22 @@ def coactivation_figure(z: np.ndarray, feat: np.ndarray, feature_name: str,
     return fig
 
 
-def xcorr_figure(c: np.ndarray) -> go.Figure:
+def xcorr_figure(c: np.ndarray, n_crops: int | None = None) -> go.Figure:
     fig = go.Figure(go.Heatmap(z=c, colorscale="RdBu", zmid=0, zmin=-1, zmax=1))
+    scope = f"random sample of {n_crops} crops" if n_crops else "sampled crops"
     fig.update_layout(
-        title="Latent-channel cross-correlation (256 × 256 channels)",
+        title=f"Latent-channel cross-correlation (256 × 256 channels, {scope})",
         xaxis_title="latent channel index",
         yaxis_title="latent channel index",
         height=560)
     return fig
 
 
-def feature_corr_figure(corr: np.ndarray, feature: str) -> go.Figure:
+def feature_corr_figure(corr: np.ndarray, feature: str,
+                        n_crops: int | None = None) -> go.Figure:
     fig = go.Figure(go.Bar(x=np.arange(len(corr)), y=corr))
-    fig.update_layout(title=f"latent channel ↔ {feature} correlation",
+    scope = f", {n_crops}-crop sample" if n_crops else ""
+    fig.update_layout(title=f"latent channel ↔ {feature} correlation{scope}",
                       xaxis_title="latent channel index",
                       yaxis_title="Pearson r",
                       height=320)
@@ -80,7 +83,14 @@ def feature_corr_figure(corr: np.ndarray, feature: str) -> go.Figure:
 
 def layout() -> html.Div:
     return html.Div([
-        html.Button("Recompute (sampled)", id="sa3-analysis-go"),
+        html.Div([
+            html.Button("Recompute", id="sa3-analysis-go"),
+            dcc.Dropdown(id="sa3-analysis-n", clearable=False, value=400,
+                         options=[{"label": "400 crops (fast)", "value": 400},
+                                  {"label": "1000 crops", "value": 1000},
+                                  {"label": "ALL 5400 (slow, ~min)", "value": 0}],
+                         style={"minWidth": "220px"}),
+        ], style={"display": "flex", "gap": "8px"}),
         dcc.Loading(dcc.Graph(id="sa3-xcorr-graph"), type="default"),
         dcc.Dropdown(id="sa3-feat-dd",
                      placeholder="feature to correlate against…"),
