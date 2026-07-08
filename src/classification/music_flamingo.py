@@ -569,6 +569,7 @@ def batch_analyze_music_flamingo_gguf(
     overwrite: bool = False,
     token_limits: Optional[Dict[str, int]] = None,
     trim_frac: Optional[float] = None,
+    context_size: int = 8192,
 ) -> Dict[str, any]:
     """
     Batch analyze with Music Flamingo GGUF.
@@ -597,6 +598,14 @@ def batch_analyze_music_flamingo_gguf(
     logger.info("")
 
     folders = find_organized_folders(root_directory)
+    # Skip augmentation VARIANT folders (avp-analyzed/<track>/augmentations/<variant>/):
+    # variants inherit the parent track's caption (+ bpm suffix) at sidecar-build time —
+    # captioning them directly is 6x wasted GPU and pollutes .INFO placement. (2026-07-08:
+    # the first avp batch burned 1341 failed calls walking into these.)
+    n_before = len(folders)
+    folders = [f for f in folders if 'augmentations' not in Path(f).parts]
+    if len(folders) != n_before:
+        logger.info(f"Skipping {n_before - len(folders)} augmentation variant folders")
 
     stats = {
         'total': len(folders),
@@ -611,7 +620,8 @@ def batch_analyze_music_flamingo_gguf(
 
     # Initialize analyzer ONCE
     try:
-        analyzer = MusicFlamingoGGUF(model=model, token_limits=token_limits, trim_frac=trim_frac)
+        analyzer = MusicFlamingoGGUF(model=model, token_limits=token_limits, trim_frac=trim_frac,
+                                     context_size=context_size)
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
         return stats
@@ -685,6 +695,10 @@ if __name__ == "__main__":
     parser.add_argument('--model', default='Q8_0', choices=list(AVAILABLE_MODELS.keys()),
                         help='Quantization level (Q8_0=best/default, Q6_K=balanced, IQ3_M=fast)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing analyses')
+    parser.add_argument('--ctx-size', type=int, default=8192,
+                        help='llama context size; 2048 only fits ~2.5 min of audio — full '
+                             'tracks need 8192+ (found 2026-07-08: "failed to find a memory '
+                             'slot" = context overflow, not VRAM)')
     parser.add_argument('--trim-frac', type=float, default=None,
                         help="Send only the first FRAC of each track (fade out over the "
                              "last 5%% of track before the cut). 0.6 recommended — Kim's "
@@ -706,6 +720,7 @@ if __name__ == "__main__":
                 model=args.model,
                 overwrite=args.overwrite,
                 trim_frac=args.trim_frac,
+                context_size=args.ctx_size,
             )
             if stats['failed'] > 0:
                 sys.exit(1)
