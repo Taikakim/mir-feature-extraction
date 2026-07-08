@@ -48,8 +48,7 @@ def metrics(path):
     return dict(chroma_flux=flux, pc_trans_rate=trans, pc_entropy=ent, pc_active=active)
 
 
-def main():
-    out = "/home/kim/Projects/mir/stats/melodic_movement_ladder.csv"
+def default_jobs():
     jobs = []  # (label, nl, path)
     base = os.path.expanduser("~/.cache/evals_aac/renders")
     for adapter in ("evr1x", "newstack"):
@@ -59,6 +58,40 @@ def main():
     src = "/run/media/kim/9a410a1d-a4a8-4faf-8298-bcaa2576ea9d/avp-flac/009 goddess guerrilla (2006)/Aavepyora - Goddess Guerilla - Kaikki-Alla.flac"
     if os.path.exists(src):
         jobs.append(("source", 0.0, src))
+    return jobs
+
+
+def main():  # noqa: C901
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", action="append", default=[],
+                    help="dir of clips to score (label = dirname, nl parsed from _nl<NN> "
+                         "in filename when present; repeatable). Default: the "
+                         "a2a_kaikkialla ladder + source.")
+    ap.add_argument("--source", default=None, help="reference source audio to include")
+    ap.add_argument("--out", default="/home/kim/Projects/mir/stats/melodic_movement_ladder.csv")
+    args = ap.parse_args()
+
+    if args.dir:
+        jobs = []
+        for d in args.dir:
+            label = os.path.basename(os.path.normpath(d))
+            for p in sorted(glob.glob(os.path.join(d, "*.m4a")) +
+                            glob.glob(os.path.join(d, "*.wav")) +
+                            glob.glob(os.path.join(d, "*.flac"))):
+                name = os.path.basename(p)
+                nl = 0.0
+                if "nl" in name:
+                    try:
+                        nl = int(name.split("nl")[1][:2]) / 100
+                    except ValueError:
+                        pass
+                jobs.append((label, nl, p))
+        if args.source:
+            jobs.append(("source", 0.0, args.source))
+    else:
+        jobs = default_jobs()
+    out = args.out
     print(f"{len(jobs)} clips")
 
     with open(out, "w", newline="") as fo:
