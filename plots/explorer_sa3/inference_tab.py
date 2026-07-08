@@ -138,6 +138,45 @@ def layout() -> html.Div:
                 style={"height": "280px"})),
         ], style={"marginTop": "8px"}),
         controls.steering_panel("inf", dora_default="none"),
+        html.Details([
+            html.Summary("Weight garden — shuffle (the databending op that works)"),
+            dcc.Checklist(id="inf-mut-on",
+                          options=[{"label": " enable (rebuilds model)", "value": "on"}],
+                          value=[]),
+            html.Span("amount (fraction shuffled)"),
+            dcc.Slider(id="inf-mut-amount", min=0.05, max=1.0, step=0.05, value=0.25,
+                       marks={0.05: "0.05", 0.25: "0.25", 0.5: "0.5", 1.0: "1"}),
+            html.Span("target"),
+            dcc.Dropdown(id="inf-mut-target", clearable=False, value="attn",
+                         options=[{"label": t, "value": t}
+                                  for t in ("attn", "mlp", "norm", "all")]),
+            html.Span("mutation seed"),
+            dcc.Input(id="inf-mut-seed", type="number", value=1234),
+            html.Span("decay direction"),
+            dcc.Dropdown(id="inf-mut-decay", clearable=False, value="late",
+                         options=[{"label": d, "value": d} for d in ("late", "early")]),
+            html.Span("decay rate"),
+            dcc.Slider(id="inf-mut-decay-rate", min=0.0, max=1.0, step=0.1, value=0.5,
+                       marks={0: "0", 0.5: "0.5", 1: "1"}),
+        ], open=False),
+        html.Details([
+            html.Summary("Rhythm preserve — selection steering (a2a only)"),
+            dcc.Checklist(id="inf-pres-on",
+                          options=[{"label": " enable (ping-pong sampler, best-of-K "
+                                             "renoise scored by LatCH head vs source "
+                                             "envelope)", "value": "on"}],
+                          value=[]),
+            html.Span("scoring head"),
+            dcc.Dropdown(id="inf-pres-head", clearable=False, value="onset_envelope",
+                         options=[{"label": h, "value": h}
+                                  for h in ("onset_envelope", "onset_envelope_drums",
+                                            "rms_energy_bass", "rms_drums")]),
+            html.Span("K candidates"),
+            dcc.Input(id="inf-pres-k", type="number", value=4, min=2, max=16),
+            html.Span("active until (fraction of steps)"),
+            dcc.Slider(id="inf-pres-until", min=0.1, max=1.0, step=0.05, value=0.5,
+                       marks={0.1: "0.1", 0.5: "0.5", 1.0: "1"}),
+        ], open=False),
         html.Button("Render", id="inf-render-btn"),
         html.Pre(id="inf-status", style={"whiteSpace": "pre-wrap"}),
         html.Div(id="inf-result"),
@@ -320,12 +359,24 @@ def register_callbacks(app) -> None:
         State("inf-init-path", "value"),
         State("inf-init-noise", "value"),
         State("inf-noise-ladder", "value"),
+        State("inf-mut-on", "value"),
+        State("inf-mut-amount", "value"),
+        State("inf-mut-target", "value"),
+        State("inf-mut-seed", "value"),
+        State("inf-mut-decay", "value"),
+        State("inf-mut-decay-rate", "value"),
+        State("inf-pres-on", "value"),
+        State("inf-pres-head", "value"),
+        State("inf-pres-k", "value"),
+        State("inf-pres-until", "value"),
         State("inf-history", "data"),
         *controls.steering_states("inf"),
         prevent_initial_call=True)
     def _render(_n, base_prompt, variation, negprompt, duration, steps, cfg,
                 cfg_interval, seed, batch, apg, durpad, dist_shift,
-                ckpt_dd, ckpt_path, init_path, init_noise, ladder, history,
+                ckpt_dd, ckpt_path, init_path, init_noise, ladder,
+                mut_on, mut_amount, mut_target, mut_seed, mut_decay, mut_decay_rate,
+                pres_on, pres_head, pres_k, pres_until, history,
                 *steer):
         prompt = _full_prompt(base_prompt, variation)
         if not prompt:
@@ -344,6 +395,14 @@ def register_callbacks(app) -> None:
         ckpt = (ckpt_path or "").strip() or (ckpt_dd or "").strip()
         if ckpt:
             common["ckpt_path"] = ckpt
+        if mut_on and "on" in mut_on:
+            common["mutate"] = {"enabled": True,
+                                "amount": float(mut_amount or 0.25),
+                                "target": mut_target or "attn",
+                                "seed": int(mut_seed or 1234),
+                                "decay_rate": float(mut_decay_rate
+                                                    if mut_decay_rate is not None else 0.5),
+                                "decay_direction": mut_decay or "late"}
         if (init_path or "").strip():
             op = "a2a_track"
             payload = {"audio_path": init_path.strip(),
@@ -356,6 +415,12 @@ def register_callbacks(app) -> None:
                 return no_update, no_update, f"bad noise ladder: {ladder!r}"
             if levels:
                 payload["noise_levels"] = levels
+            if pres_on and "on" in pres_on:
+                payload["preserve"] = {"enabled": True,
+                                       "head": pres_head or "onset_envelope",
+                                       "k": int(pres_k or 4),
+                                       "until": float(pres_until
+                                                      if pres_until is not None else 0.5)}
         else:
             op = "generate"
             payload = {"prompt": prompt,
