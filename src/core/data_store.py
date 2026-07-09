@@ -1,22 +1,26 @@
 """
 DataStore: Consolidated dataset cache for HDD-optimised pipeline.
 
-Maintains a ``dataset.json`` file that aggregates all ``.INFO`` file contents
+Maintains a ``dataset.jsonl`` file that aggregates all ``.INFO`` file contents
 into a single sequential read, eliminating thousands of random seeks at
 analysis time.
 
-``dataset.json`` is a *derived artefact* — always rebuilt from the primary
+``dataset.jsonl`` is a *derived artefact* — always rebuilt from the primary
 ``.INFO`` files.  Pipeline workers keep writing ``.INFO`` for crash safety.
 At the end of each phase the main process consolidates everything here.
 
-JSON structure::
+One JSON object per line, each carrying its own key — this keeps the file
+line-greppable / jq-streamable (`grep '"_key": "TrackName_0"' dataset.jsonl`),
+unlike the old single-line ``dataset.json`` dict::
 
-    {
-      "_meta": {"generated_at": "ISO-8601", "root": "/abs/path", "count": 5000},
-      "TrackName":   {"bpm": 128.5, "lufs": -14.2, ...},
-      "TrackName_0": {"bpm": 128.5, "lufs": -14.2, ...},
-      ...
-    }
+    {"_key": "TrackName", "bpm": 128.5, "lufs": -14.2, ...}
+    {"_key": "TrackName_0", "bpm": 128.5, "lufs": -14.2, ...}
+    ...
+
+Generation metadata lives in a small sidecar next to the jsonl,
+``dataset.meta.json``::
+
+    {"generated_at": "ISO-8601", "root": "/abs/path", "count": 5000}
 
 Usage::
 
@@ -24,7 +28,7 @@ Usage::
     store = DataStore.bootstrap(Path("/output/crops"))
 
     # Load existing cache (fast: single sequential read)
-    store = DataStore.load(Path("/output/crops/dataset.json"))
+    store = DataStore.load(Path("/output/crops/dataset.jsonl"))
 
     # Queries
     missing_keys = store.missing("flamingo_brief")
@@ -50,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 def _compact_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Replace list values with their length before storing in dataset.json.
+    """Replace list values with their length before storing in dataset.jsonl.
 
     Timeseries arrays (e.g. rms_energy_bass_ts: [256 floats]) and beat arrays
     (downbeats, beat_activations_ts, …) can each be hundreds of floats.  Storing
@@ -61,6 +65,38 @@ def _compact_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     in the per-crop .INFO files when needed.
     """
     return {k: len(v) if isinstance(v, list) else v for k, v in entry.items()}
+
+
+def _meta_path(dataset_path: Path) -> Path:
+    """Sidecar path for a dataset.jsonl's generation metadata, e.g.
+    ``dataset.jsonl`` -> ``dataset.meta.json``."""
+    return dataset_path.with_name(dataset_path.stem + ".meta.json")
+
+
+def _read_meta(meta_path: Path) -> Dict[str, Any]:
+    if not meta_path.exists():
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"DataStore: could not read {meta_path}: {exc}")
+        return {}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 class DataStore:
@@ -77,7 +113,7 @@ class DataStore:
 
     @classmethod
     def bootstrap(cls, root: Path) -> "DataStore":
-        """Scan all *.INFO files under *root*, build the data dict, write dataset.json.
+        """Scan all *.INFO files under *root*, build the data dict, write dataset.jsonl.
 
         Always rebuilds from source-of-truth ``.INFO`` files.  Call this at the
         end of each pipeline phase from the main process (not from workers).
@@ -89,7 +125,7 @@ class DataStore:
             DataStore loaded with all discovered entries.
         """
         root = Path(root)
-        dataset_path = root / "dataset.json"
+        dataset_path = root / "dataset.jsonl"
         data: Dict[str, Dict] = {}
 
         info_files = sorted(root.rglob("*.INFO"))
@@ -115,25 +151,32 @@ class DataStore:
 
     @classmethod
     def load(cls, path: Path) -> "DataStore":
-        """Load an existing dataset.json.  Fast: single sequential read.
+        """Load an existing dataset.jsonl.  Fast: single sequential read.
 
         Args:
-            path: Path to ``dataset.json``.
+            path: Path to ``dataset.jsonl``.
 
         Returns:
-            DataStore with the cached entries (``_meta`` is stripped from data).
+            DataStore with the cached entries.
 
         Raises:
             FileNotFoundError: if *path* does not exist.
-            json.JSONDecodeError: if the file is corrupt.
+            json.JSONDecodeError: if a line is corrupt.
         """
         path = Path(path)
+        data: Dict[str, Dict] = {}
         with open(path, "r", encoding="utf-8") as f:
-            raw: Dict[str, Any] = json.load(f)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec: Dict[str, Any] = json.loads(line)
+                key = rec.pop("_key")
+                data[key] = rec
 
-        root_str = raw.get("_meta", {}).get("root")
+        meta = _read_meta(_meta_path(path))
+        root_str = meta.get("root")
         root = Path(root_str) if root_str else path.parent
-        data = {k: v for k, v in raw.items() if k != "_meta"}
 
         store = cls(path=path, data=data, root=root)
         logger.debug(f"DataStore.load: loaded {len(data)} entries from {path}")
@@ -200,31 +243,21 @@ class DataStore:
     # ------------------------------------------------------------------
 
     def flush(self) -> None:
-        """Atomically write the current data dict to ``dataset.json``."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Atomically write the current data dict to ``dataset.jsonl`` + its
+        ``dataset.meta.json`` sidecar."""
+        lines = []
+        for key, entry in self.data.items():
+            rec = {"_key": key}
+            rec.update(entry)
+            lines.append(json.dumps(rec, ensure_ascii=False))
+        _atomic_write_text(self.path, "\n".join(lines) + ("\n" if lines else ""))
 
-        payload: Dict[str, Any] = {
-            "_meta": {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "root": str(self._root.resolve()),
-                "count": len(self.data),
-            }
+        meta = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "root": str(self._root.resolve()),
+            "count": len(self.data),
         }
-        payload.update(self.data)
-
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=self.path.parent, suffix=".tmp"
-        )
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
-            os.replace(tmp_path, self.path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        _atomic_write_text(_meta_path(self.path), json.dumps(meta, ensure_ascii=False))
 
     def to_csv(self, out: Path) -> None:
         """Export the dataset to a CSV file for use with the feature explorer.

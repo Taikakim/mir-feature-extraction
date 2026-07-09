@@ -286,7 +286,7 @@ print(f"Wrote {len(store)} rows")
 EOF
 ```
 
-Alternatively run the module directly (builds `dataset.json` only; `to_csv` needs the
+Alternatively run the module directly (builds `dataset.jsonl` only; `to_csv` needs the
 extra step above):
 
 ```bash

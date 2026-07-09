@@ -284,7 +284,7 @@ class CropsPipeline:
         elapsed = time.time() - start_time
         self._print_summary(elapsed)
 
-        # Consolidate all crop .INFO files into dataset.json for fast analysis
+        # Consolidate all crop .INFO files into dataset.jsonl for fast analysis
         try:
             from core.data_store import DataStore
             DataStore.bootstrap(input_dir)

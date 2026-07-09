@@ -742,7 +742,7 @@ class MasterPipeline:
                 state.mark_stage_completed('track_analysis')
                 state.save()
                 _flush_tunableop_results()
-                # Consolidate .INFO files into a single dataset.json for fast analysis
+                # Consolidate .INFO files into a single dataset.jsonl for fast analysis
                 try:
                     from core.data_store import DataStore
                     DataStore.bootstrap(self.working_dir)
@@ -831,7 +831,7 @@ class MasterPipeline:
             state.mark_stage_completed('crop_analysis')
             state.save()
             _flush_tunableop_results()
-            # Consolidate crop .INFO files into a single dataset.json
+            # Consolidate crop .INFO files into a single dataset.jsonl
             try:
                 from core.data_store import DataStore
                 crops_dir = getattr(self, 'crops_dir', None)
@@ -2843,8 +2843,8 @@ Config file template: config/master_pipeline.yaml
                         help='Run benchmark mode: time every feature on a reduced crop set '
                              '(200 CPU crops, 20 GPU crops) and save benchmark_<date>.md')
     parser.add_argument('--rebuild-dataset', action='store_true',
-                        help='Force rebuild dataset.json from .INFO files before running '
-                             '(use when dataset.json may be out of sync)')
+                        help='Force rebuild dataset.jsonl from .INFO files before running '
+                             '(use when dataset.jsonl may be out of sync)')
 
     # Generate config template
     parser.add_argument('--generate-config', type=str, metavar='PATH',
@@ -3014,13 +3014,13 @@ Config file template: config/master_pipeline.yaml
         # Plain coloured logging
         setup_colored_logging(level=log_level)
 
-    # Optionally rebuild dataset.json from .INFO files before running
+    # Optionally rebuild dataset.jsonl from .INFO files before running
     if getattr(args, 'rebuild_dataset', False):
         try:
             from core.data_store import DataStore
             crops_dir = pipeline._get_crops_dir()
             if crops_dir.exists():
-                logger.info(f"[--rebuild-dataset] Rebuilding dataset.json from {crops_dir} ...")
+                logger.info(f"[--rebuild-dataset] Rebuilding dataset.jsonl from {crops_dir} ...")
                 DataStore.bootstrap(crops_dir)
             else:
                 logger.warning(f"[--rebuild-dataset] Crops directory not found: {crops_dir}")
