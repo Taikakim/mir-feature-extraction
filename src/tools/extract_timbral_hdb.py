@@ -80,10 +80,31 @@ def process_track(fm_path, info_path):
 
     if _track_done(info_path):
         return "skip (done)"
+    tmp_wav = None
+    analyze_path = fm_path
+    if fm_path.lower().endswith(".m4a"):
+        # libsndfile (soundfile/timbral_models' underlying decoder) cannot open
+        # m4a/AAC containers at all -- "Format not recognised", 100% reproducible,
+        # nothing to do with system load (96/4470 goa tracks are m4a-sourced;
+        # discovered 2026-07-10 debugging what looked like memory-pressure
+        # failures but was this the whole time, coincidentally clustered near
+        # the OOM incident in corpus sort order). Pre-transcode via ffmpeg to a
+        # temp wav soundfile CAN read; mp3/ogg/aiff all work natively, no
+        # transcode needed for those.
+        tmp_wav = f"/dev/shm/mir_timbral_{os.getpid()}.wav"
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", fm_path, tmp_wav],
+                            capture_output=True, timeout=60)
+        if r.returncode != 0:
+            return f"ffmpeg transcode: {(r.stderr or b'').decode(errors='replace')[-150:]}"
+        analyze_path = tmp_wav
     try:
-        results = analyze_all_timbral_features(fm_path, features=FEATURES)
-    except Exception as e:
-        return f"analyze: {type(e).__name__}: {e}"
+        try:
+            results = analyze_all_timbral_features(analyze_path, features=FEATURES)
+        except Exception as e:
+            return f"analyze: {type(e).__name__}: {e}"
+    finally:
+        if tmp_wav and os.path.exists(tmp_wav):
+            os.remove(tmp_wav)
     missing = [f for f in FEATURES if f not in results]
     if missing:
         return f"partial (missing {missing})"
