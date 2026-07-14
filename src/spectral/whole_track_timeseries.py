@@ -317,6 +317,7 @@ def _iter_track_dirs(root: Path, recursive: bool = False):
 _WORKER_BEAT = None
 _WORKER_DOWNBEAT = None
 _WORKER_CFG: Dict = {}
+_WORKER_EXPANDED = None
 
 
 def _apply_rocm_env(yaml_path: str, profile: str) -> None:
@@ -342,25 +343,68 @@ def _apply_rocm_env(yaml_path: str, profile: str) -> None:
 
 
 def _worker_init(frame_rate: int, do_hpcp: bool,
-                 rocm_yaml: str = "", rocm_profile: str = "none") -> None:
+                 rocm_yaml: str = "", rocm_profile: str = "none",
+                 expanded: bool = False, add_fields: bool = False) -> None:
     _apply_rocm_env(rocm_yaml, rocm_profile)   # before any (future) torch import
-    global _WORKER_BEAT, _WORKER_DOWNBEAT, _WORKER_CFG
+    global _WORKER_BEAT, _WORKER_DOWNBEAT, _WORKER_CFG, _WORKER_EXPANDED
     _WORKER_BEAT, _WORKER_DOWNBEAT = make_madmom_processors()
-    _WORKER_CFG = {"frame_rate": frame_rate, "do_hpcp": do_hpcp}
+    _WORKER_CFG = {"frame_rate": frame_rate, "do_hpcp": do_hpcp,
+                   "expanded": expanded, "add_fields": add_fields}
+    if expanded or add_fields:
+        from spectral.whole_track_expanded import ExpandedExtractor
+        _WORKER_EXPANDED = ExpandedExtractor()   # TF models load lazily on 1st use
+
+
+def _run_expanded(track_dir: Path, data: Dict, meta: Dict,
+                  wanted=None) -> None:
+    """Compute expanded fields for a freshly-extracted track and fold them
+    into (data, meta) in place."""
+    full_mix = find_full_mix(track_dir)
+    new, rates, extra = _WORKER_EXPANDED.extract(
+        full_mix, wanted=wanted, existing=data, existing_meta=meta)
+    data.update(new)
+    meta["fields"] = sorted(data.keys())
+    meta.setdefault("field_rates", {}).update(rates)
+    meta.setdefault("expanded", {}).update(extra)
 
 
 def _process_one(job: Tuple[str, str, bool]) -> Tuple[str, str, object]:
     """Extract + save one track. Returns (name, status, info). Picklable for pools."""
     track_dir, out_path, overwrite = job
     name = Path(track_dir).name
+    t0 = time.time()
+    if _WORKER_CFG.get("add_fields") and Path(out_path).exists() and not overwrite:
+        # incremental mode on an existing sidecar: compute only missing
+        # expanded fields, merge atomically (legacy fields untouched)
+        from spectral.whole_track_expanded import (
+            merge_expanded, missing_expanded_fields)
+        missing = missing_expanded_fields(Path(out_path))
+        if not missing:
+            return name, "skip", None
+        try:
+            data, meta = load_timeseries_npz(Path(out_path))
+            full_mix = find_full_mix(Path(track_dir))
+            if full_mix is None:
+                return name, "fail", "no full_mix for add-fields"
+            new, rates, extra = _WORKER_EXPANDED.extract(
+                full_mix, wanted=missing, existing=data, existing_meta=meta)
+            merge_expanded(Path(out_path), new, rates, extra)
+            return name, "ok", {"n_frames": meta["n_frames"], "n_fields": len(new),
+                                "stems": ["+add"], "elapsed": time.time() - t0}
+        except Exception as e:
+            return name, "fail", str(e)
+        finally:
+            import gc
+            gc.collect()
     if Path(out_path).exists() and not overwrite:
         return name, "skip", None
-    t0 = time.time()
     try:
         data, meta = extract_whole_track(
             Path(track_dir), frame_rate=_WORKER_CFG["frame_rate"],
             beat_proc=_WORKER_BEAT, downbeat_proc=_WORKER_DOWNBEAT,
             do_hpcp=_WORKER_CFG["do_hpcp"])
+        if _WORKER_CFG.get("expanded") or _WORKER_CFG.get("add_fields"):
+            _run_expanded(Path(track_dir), data, meta)
         save_timeseries_npz(Path(out_path), data, meta)
         return name, "ok", {"n_frames": meta["n_frames"], "n_fields": len(data),
                             "stems": meta["stems_present"], "elapsed": time.time() - t0}
@@ -382,6 +426,16 @@ def main():
                         help="Where to write .npz (default: inside each track folder)")
     parser.add_argument("--no-hpcp", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--add-fields", action="store_true",
+                        help="Incremental expanded-fields mode (2026-07-14 sweep): "
+                             "for tracks whose sidecar already exists, compute ONLY "
+                             "the missing expanded fields (whole_track_expanded.py) "
+                             "and merge them in — legacy fields are never recomputed. "
+                             "Tracks with no sidecar get a full extraction (legacy + "
+                             "expanded). Resumable: done = all expanded fields present.")
+    parser.add_argument("--expanded", action="store_true",
+                        help="Also compute the expanded field set on full "
+                             "extractions (implied by --add-fields).")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N tracks")
     parser.add_argument("--recursive", action="store_true",
                         help="Walk the whole tree so nested augmentation variant "
@@ -440,7 +494,8 @@ def main():
     if args.workers <= 1:
         # Single process: apply the full rocm profile (incl. OMP_NUM_THREADS=8).
         _worker_init(args.frame_rate, not args.no_hpcp,
-                     args.rocm_env_yaml, args.rocm_profile)
+                     args.rocm_env_yaml, args.rocm_profile,
+                     args.expanded, args.add_fields)
         for job in jobs:
             _report(*_process_one(job))
     else:
@@ -461,6 +516,13 @@ def main():
 
         def _pending(js):
             # A job is done once its output npz exists (unless overwriting).
+            # In add-fields mode "done" = sidecar exists AND has every
+            # expanded field (existence alone would mark everything done).
+            if args.add_fields:
+                from spectral.whole_track_expanded import missing_expanded_fields
+                return [j for j in js
+                        if j[2] or not Path(j[1]).exists()
+                        or missing_expanded_fields(Path(j[1]))]
             return [j for j in js if j[2] or not Path(j[1]).exists()]
 
         # Chunked FRESH pools instead of one long-lived pool with
@@ -476,7 +538,8 @@ def main():
             ex = ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
                                      initializer=_worker_init,
                                      initargs=(args.frame_rate, not args.no_hpcp,
-                                               args.rocm_env_yaml, args.rocm_profile))
+                                               args.rocm_env_yaml, args.rocm_profile,
+                                               args.expanded, args.add_fields))
             try:
                 futs = [ex.submit(_process_one, j) for j in batch]
                 for fut in as_completed(futs, timeout=args.chunk_timeout):
