@@ -60,6 +60,16 @@ convolutions on it. On 16 GB that's comfortable in float32 but not trivial;
 `--quick` (256 µm → 2560²) is the safe first check that the kernels build and the
 predictions land before committing to the full patch.
 
+To bound rasterizer memory at a larger patch, `--tiles N` renders the coverage
+field in N×N contiguous blocks, each grown by a max-grain-radius halo. It is
+**clip-free** — a grain extending past a tile or patch edge wraps on the global
+torus and is rendered in full, never clipped — and **bitwise-identical** to the
+monolithic render (verified: 0 mismatched pixels across 2/3/4/5/8 tiles plus an
+oversized boundary-straddling grain). Contiguous blocks + halo keep each local
+grain whole; this is deliberately *not* strided/interlaced tiling, which would
+split grains across tiles and clip them. `--tiles` bounds the rasterizer only —
+the FFT scan stays global.
+
 ## Next steps (from the calibration brief)
 The parameters in `grain_sim.py` are plausible-but-unverified placeholders. The
 biggest knobs to replace with measured numbers: `LAMBDA_UM2` (coating weight —

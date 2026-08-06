@@ -185,6 +185,59 @@ def rasterize_union(xy, r, patch_um, fine_um):
     return grid.view(n, n)
 
 
+def rasterize_union_tiled(xy, r, patch_um, fine_um, n_tiles):
+    """Clip-free tiled union rasterizer. Bitwise-identical to rasterize_union but
+    caps peak memory at one tile + halo instead of the whole field.
+
+    The crystal field stays a SINGLE global torus. Each contiguous tile is grown
+    by a halo of the maximum grain radius and stamps every grain whose disc reaches
+    into it -- including grains centred in a neighbouring tile or wrapped across the
+    patch edge -- then writes only its own interior. A large grain that extends past
+    a tile boundary (or the patch boundary) is therefore rendered in full wherever
+    its disc lands; it is never clipped. Contiguous tiles + halo, NOT strided
+    interleaving: a grain's disc is local, so blocks keep it whole.
+    """
+    n = int(round(patch_um / fine_um))
+    grid = torch.zeros(n * n, device=DEVICE, dtype=DTYPE)
+    if xy.shape[0] == 0:
+        return grid.view(n, n)
+    halo = int(math.ceil(float(r.max().item()) / fine_um)) + 1   # max grain reach [px]
+    edges = [int(round(t * n / n_tiles)) for t in range(n_tiles + 1)]
+    off = torch.arange(-halo, halo + 1, device=DEVICE)
+    oy, ox = torch.meshgrid(off, off, indexing="ij")
+    oy, ox = oy.reshape(-1), ox.reshape(-1)
+    cx = (xy[:, 0] / fine_um)
+    cy = (xy[:, 1] / fine_um)
+    cxf = cx.floor()
+    cyf = cy.floor()
+    for ti in range(n_tiles):
+        x0, x1 = edges[ti], edges[ti + 1]
+        # centres within halo of this tile's x-range, on the torus
+        wx = ((cxf - (x0 - halo)) % n) < (x1 - x0 + 2 * halo)
+        for tj in range(n_tiles):
+            y0, y1 = edges[tj], edges[tj + 1]
+            wy = ((cyf - (y0 - halo)) % n) < (y1 - y0 + 2 * halo)
+            sel = wx & wy
+            if not bool(sel.any()):
+                continue
+            sx, sy, sr = cx[sel], cy[sel], r[sel]
+            # sub-chunk within the tile to bound the M x stamp_area index tensors
+            chunk = max(1, int(4e7 // oy.numel()))
+            for s in range(0, sx.shape[0], chunk):
+                sxc, syc, src = sx[s:s + chunk], sy[s:s + chunk], sr[s:s + chunk]
+                ix = (sxc.floor()[:, None] + ox[None, :])
+                iy = (syc.floor()[:, None] + oy[None, :])
+                dx = (ix + 0.5 - sxc[:, None]) * fine_um
+                dy = (iy + 0.5 - syc[:, None]) * fine_um
+                inside = (dx * dx + dy * dy) <= (src[:, None] ** 2)
+                gx = ix.long() % n
+                gy = iy.long() % n
+                # write ONLY this tile's interior; halo pixels belong to other tiles
+                keep = inside & (gx >= x0) & (gx < x1) & (gy >= y0) & (gy < y1)
+                grid[(gx * n + gy)[keep]] = 1.0
+    return grid.view(n, n)
+
+
 # ---------------------------------------------------------------------------
 # 6. Scanner: optical MTF then pixel aperture integration
 # ---------------------------------------------------------------------------
@@ -262,12 +315,15 @@ def radial_nps(density_px, pitch_um, nbins=48):
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def run(exposure, seed=0, verbose=False):
+def run(exposure, seed=0, verbose=False, n_tiles=1):
     gen = torch.Generator(device=DEVICE).manual_seed(seed)
     xy, r, z = sample_crystals(PATCH_UM, LAMBDA_UM2, R_MEDIAN_UM,
                                R_SIGMA_LOG, HARDCORE_UM, gen)
     dev = develop(r, z, exposure, gen)
-    cov = rasterize_union(xy[dev], r[dev], PATCH_UM, FINE_UM)
+    if n_tiles > 1:
+        cov = rasterize_union_tiled(xy[dev], r[dev], PATCH_UM, FINE_UM, n_tiles)
+    else:
+        cov = rasterize_union(xy[dev], r[dev], PATCH_UM, FINE_UM)
     # Macroscopic density: -log10 of MEAN transmittance. Never per fine voxel --
     # coverage there is binary, and -log10 of a binary field is not a density.
     macro_D = float(-torch.log10((1.0 - cov).mean().clamp_min(1e-5)).item())
@@ -299,6 +355,10 @@ def _parse_args():
     ap.add_argument("--quick", action="store_true",
                     help="fast smoke config (patch=256 um) for a first GPU run; "
                          "Selwyn will not fully converge at this size")
+    ap.add_argument("--tiles", type=int, default=1,
+                    help="tile the rasterizer NxN with a max-radius halo to cap "
+                         "peak memory (default 1 = monolithic). Clip-free: result "
+                         "is bitwise-identical to the monolithic render.")
     return ap.parse_args()
 
 
@@ -313,16 +373,17 @@ if __name__ == "__main__":
     if args.fine is not None:
         FINE_UM = float(args.fine)
 
+    tiles_note = f"   tiles {args.tiles}x{args.tiles}" if args.tiles > 1 else ""
     print(f"device: {DEVICE}   patch {PATCH_UM} um @ {FINE_UM} um   "
-          f"-> {int(PATCH_UM/SCAN_PITCH_UM)} px output\n")
+          f"-> {int(PATCH_UM/SCAN_PITCH_UM)} px output{tiles_note}\n")
     print("Characteristic curve (D-logE):")
     exposures = [0.002, 0.005, 0.012, 0.03, 0.08, 0.2, 0.5, 1.2, 3.0]
     for e in exposures:
-        res = run(e, seed=args.seed)
+        res = run(e, seed=args.seed, n_tiles=args.tiles)
         print(f"  logE {math.log10(e):+6.2f}   D {res['mean_D']:6.3f}")
 
     print("\nNutting check at mid density:")
-    mid = run(0.08, seed=2, verbose=True)
+    mid = run(0.08, seed=2, verbose=True, n_tiles=args.tiles)
 
     print("\nSelwyn root-area check (G should be roughly constant):")
     for a_um, sd, G in selwyn_scan(mid["cov"], FINE_UM):

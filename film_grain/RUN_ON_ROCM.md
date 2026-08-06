@@ -32,9 +32,22 @@ python film_grain/grain_sim.py --quick
 # full calibration run (1024 um patch, 10240^2 fine grid)
 python film_grain/grain_sim.py
 ```
-If the full run OOMs on a smaller card, step down: `--patch 512` then `--patch 768`.
-16 GB should handle the full 1024 um run (fine grid ~419 MB float32, FFT working
-set a few GB transient).
+If the full run OOMs on a smaller card, either step the patch down
+(`--patch 512` then `--patch 768`) or keep the full patch and tile the rasterizer:
+```bash
+python film_grain/grain_sim.py --tiles 4     # 4x4 tiles, max-radius halo
+```
+`--tiles N` splits the rasterizer into N×N contiguous blocks each grown by a
+halo of the maximum grain radius, so peak rasterizer memory is ~1/N² of the
+monolithic grid. It is **clip-free and bitwise-identical** to the monolithic
+render (verified: 0 mismatched pixels across 2/3/4/5/8 tiles, including an
+oversized grain straddling a tile seam and the patch edge — it wraps, it does not
+clip). The crystal field stays one global torus; contiguous blocks + halo keep
+each local grain whole (do NOT confuse with strided/interlaced tiling, which
+would split grains and clip them). Note: `--tiles` bounds the *rasterizer* only;
+the FFT scan is still global, so it is the next memory item if you push the patch
+much larger. 16 GB should handle the full 1024 um run untiled (fine grid ~419 MB
+float32, FFT working set a few GB transient).
 
 ## 4. What "working" looks like (compare against these)
 These are measured from an actual `--quick` run of this exact code on CPU
