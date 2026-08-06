@@ -25,10 +25,14 @@ is supposed to.
 - **Selwyn:** `G = σ_D · √(2A)` roughly constant across aperture area A
 - A characteristic curve with a real **toe** from the K-photon threshold
 
-These were checked independently in NumPy before first GPU run: the K=4
+These were checked two ways before first GPU run. (1) Independent NumPy: the K=4
 threshold gives a foot log-log slope ~3.1 vs ~0.8 for single-hit (toe confirmed),
-and simulated macro density tracks the Nutting prediction to ~2–3% in the thin
-limit.
+and an overlap-allowed Poisson-Boolean field tracks the Nutting prediction to
+~2–3%. (2) The actual code on CPU (`--quick`): clean toe, Selwyn `G` constant to
+three digits across 12/24/48 µm apertures, and simulated density ~6% *above* the
+Nutting prediction — the Matérn hard-core process suppresses overlap relative to
+the Poisson-Boolean baseline, so the sign flips vs the NumPy check. See
+`RUN_ON_ROCM.md` for the reference numbers.
 
 ## Running (ROCm)
 The entry point calls `setup_rocm_env()` from `../src/core/rocm_env.py` (the

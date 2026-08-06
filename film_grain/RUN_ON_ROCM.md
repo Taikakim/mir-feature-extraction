@@ -37,28 +37,49 @@ If the full run OOMs on a smaller card, step down: `--patch 512` then `--patch 7
 set a few GB transient).
 
 ## 4. What "working" looks like (compare against these)
-These are the CPU/NumPy-verified expectations. GPU output should match in shape;
-exact values shift a little with seed and with the on-GPU RNG.
+These are measured from an actual `--quick` run of this exact code on CPU
+(`--device cpu`, seed defaults). GPU output should match closely; exact values
+shift a little with the on-GPU RNG stream. The full 1024 µm run gives the same
+curve (macro density is patch-independent in expectation) and a cleaner Selwyn.
 
-**Characteristic curve (D-logE):** monotonic, a real *toe* — D near zero at the
-low-exposure foot, climbing and saturating near `D_max ≈ 0.95` with the current
-placeholder `LAMBDA_UM2=13`. Roughly:
+**Characteristic curve (D-logE):** monotonic, a real *toe* — D at/below zero at
+the low-exposure foot, climbing and saturating near `D_max ≈ 0.95` with the
+current placeholder `LAMBDA_UM2=13`. Reference (`--quick`, CPU):
 ```
-  logE  -2.70   D ~0.00      <- toe
-  logE  -1.10   D ~0.3-0.5
-  logE  -0.30   D ~0.8
-  logE  +0.48   D ~0.95      <- shoulder (capped by coating weight)
+  logE  -2.70   D -0.000     <- dead toe (K-hit threshold)
+  logE  -1.52   D  0.043
+  logE  -1.10   D  0.257
+  logE  -0.30   D  0.897
+  logE  +0.48   D  0.949     <- shoulder (capped by coating weight)
 ```
 
 **Nutting check (verbose block):** `Nutting prediction D` and
-`simulated macroscopic D` should agree to within a few percent at this mid
-density, with the simulated value **slightly below** the prediction (disc overlap
-in the union). If simulated ≫ prediction, something is wrong.
+`simulated macroscopic D` should agree to within ~10%. On the reference run the
+simulated value is **slightly ABOVE** the prediction (0.260 vs 0.246, ~+6%): the
+Matérn hard-core process suppresses disc overlap relative to the Poisson-Boolean
+field Nutting assumes, so coverage — and thus density — runs a little high. (A
+plain overlap-allowed Poisson model instead sits ~2% *below*; both are "close",
+the sign just depends on whether hard-core repulsion is on.) A gross mismatch —
+simulated more than ~1.5× the prediction, or far below — means something is wrong.
 
-**Selwyn root-area check:** `G = σ_D·√(2A)` should be roughly constant across the
-12 / 24 / 48 / 96 µm apertures on the **full** run (expect ±~15%). On `--quick`
-(256 µm) it will *not* converge — the 96 µm aperture may be skipped and G will
-drift. That is expected; the root-area law needs patch ≫ 48 µm aperture.
+**Selwyn root-area check:** `G = σ_D·√(2A)` should be roughly constant across
+apertures, and `σ_D` should halve each time the aperture diameter doubles.
+Reference (`--quick`, CPU):
+```
+  aperture 12 µm   σ_D 0.0337   G 0.507
+  aperture 24 µm   σ_D 0.0169   G 0.508
+  aperture 48 µm   σ_D 0.0085   G 0.509
+  aperture 96 µm   σ_D 0.0037   G 0.450   <- finite-size droop at 256 µm patch
+```
+G constant to ~3 digits across 12/24/48 µm is the pass. The 96 µm droop is a
+finite-patch artifact (only ~2.7 apertures span a 256 µm patch) and should
+**disappear on the full 1024 µm run** — that is the whole reason for the 1024 µm
+default. If G drifts badly at 12–48 µm too, that is a real failure.
+
+**RMS granularity / NPS:** reference `--quick` gives `σ_D×1000 ≈ 8.5` at the
+48 µm aperture and a monotonically falling radial NPS (~1.2e-1 down to ~9e-3
+across 0.004→0.079 cyc/µm). Sane shape; the absolute level is high because the
+placeholders aren't calibrated yet.
 
 ## 5. Report back (paste verbatim)
 - The `device:` line (confirms GPU).
