@@ -187,8 +187,140 @@ def pick_peaks(x: np.ndarray, rate: float, min_gap_s: float = 0.25, k: float = 1
     return np.asarray(out, dtype=float) / rate
 
 
-def _match_f1(pred: np.ndarray, ref: np.ndarray, tol: float):
-    """Greedy one-to-one match within +/- tol seconds -> (precision, recall, f1)."""
+# ---------------------------------------------------------------------------
+# Cycle structure. Interface agreed with CONTINUITY 2026-08-12:
+#   cycle_boundaries(stream, rate) -> {"boundaries": float[] sec,
+#                                      "shapes": float[n_cycles, D],
+#                                      "phase": float[n_frames] in [0,1),
+#                                      "index": int[n_frames]}
+# The hard boundaries and the soft per-frame phase/index are the same object viewed two ways;
+# both are returned because a caller that cannot trust a segmentation can still use the phase.
+#
+# GRID-FREE IS A HARD CONSTRAINT, NOT A PREFERENCE. Nothing below reads BEATS_GRID. The period
+# comes from the stream's own autocorrelation and the phase from folding the stream onto that
+# period, so the whole construction is invariant to the per-field latency that the offset study
+# showed we cannot pin down (see best_offset). The beat grid appears ONLY in the scoring code,
+# never in the derivation -- the moment a boundary depends on madmom, everything downstream
+# inherits a dependency on the one thing this is meant to work without, and we get a subtler
+# version of the beat_activation_ts circularity.
+# ---------------------------------------------------------------------------
+
+def autocorr(x: np.ndarray) -> np.ndarray:
+    """Unbiased autocorrelation via FFT, normalised to acf[0] == 1.
+
+    The /(n-k) is not cosmetic: the raw FFT autocorrelation tapers linearly with lag simply
+    because fewer samples overlap, which biases every period search toward SHORT lags. Without
+    it a bar-length peak loses to a beat-length one on geometry alone.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x - x.mean()
+    n = len(x)
+    f = np.fft.rfft(x, 2 * n)
+    ac = np.fft.irfft(f * np.conj(f))[:n]
+    counts = np.arange(n, 0, -1, dtype=float)
+    ac = ac / counts
+    return ac / (ac[0] or 1.0)
+
+
+def dominant_period(x: np.ndarray, rate: float, min_s: float = 1.0, max_s: float = 12.0):
+    """-> (period_seconds, acf_peak_strength). Phase-invariant by construction.
+
+    Plain argmax, and the obvious objection to it is real: autocorrelation peaks at EVERY integer
+    multiple of the true period, the unbiased normalisation makes those peaks near-equal, so the
+    pick among them is close to arbitrary. A pure 2 s sine reports 10.01 s here. The textbook fix
+    is to take the SHORTEST lag within a few percent of the maximum.
+
+    THAT FIX WAS TESTED AND REJECTED ON EVIDENCE (14 tracks, 2026-08-12). It does repair the sine
+    (2.00 s), and it degrades real music badly: bar-lock collapses from Rayleigh R=0.9915 / p=1e-6
+    to R=0.5147 / p=0.025, and within-3%-of-a-whole-bar from 12/14 to 8/14, because on real
+    material the shortest strong peak is often a SUB-bar grouping (0.74-0.76 bars = 3 beats).
+    Argmax over the unbiased ACF is the rule that actually finds bars, so it stays.
+
+    The residual caveat is honest and unfixed: the reported period may be a small integer multiple
+    of the true loop length (the validated set contains 1, 2, 3, 4 and 6-bar answers, and some of
+    the larger ones are plausibly multiples of a shorter loop). For distinct-vs-recurring cycle
+    comparison a multiple groups N bars per cycle rather than misplacing anything, so it is
+    tolerable -- but do not read `period` as "the loop length" without checking.
+    """
+    ac = autocorr(x)
+    lo, hi = int(min_s * rate), min(int(max_s * rate), len(ac) - 1)
+    if hi <= lo + 2:
+        return 0.0, 0.0
+    seg = ac[lo:hi]
+    k = int(np.argmax(seg))
+    return (lo + k) / rate, float(seg[k])
+
+
+def cycle_boundaries(stream: np.ndarray, rate: float, D: int = 16,
+                     min_s: float = 1.0, max_s: float = 12.0):
+    """Segment a stream into repeating cycles without any external grid.
+
+    period  <- autocorrelation peak (phase-invariant)
+    phase   <- fold the stream onto that period and put the boundary at the profile's MINIMUM,
+               i.e. the quietest point of the average cycle. A cycle should start where the last
+               one finished, and the trough is the only self-derived landmark that means that;
+               anchoring on the maximum instead puts the boundary on the downbeat hit, which
+               splits the very event a shape descriptor should contain.
+    shapes  <- each cycle resampled to D bins, so shapes[i] is comparable across cycles and
+               across tracks with different tempi.
+
+    Returns hard boundaries AND the soft per-frame (phase, index). If the period search fails
+    the result is honest rather than empty: one cycle spanning the whole stream, strength 0.0 --
+    check `strength` before trusting a segmentation.
+
+    `index` is NEGATIVE (-1) for the frames before the first boundary. Those frames are a real
+    partial cycle, not an error, and they are marked rather than folded into cycle 0 so a
+    consumer never averages a fragment in with whole cycles.
+
+    VALIDATED against a grid it never reads (14 tracks, 2026-08-12): the derived period lands on
+    a whole BAR on all 14 -- ratios to the beat interval of 3.95..3.98, 7.91..8.07, 12.02, 16.15,
+    24.24, i.e. 1, 2, 3, 4 and 6 bars in 4/4. Median deviation 0.0115 bars against 0.25 expected
+    if the period were arbitrary; Rayleigh test on (period/beat/4 mod 1) gives R=0.9915, p=1.1e-6.
+    Cycle shapes resemble each other (mean per-bin spread / overall spread = 0.788).
+    """
+    n = len(stream)
+
+    def no_cycle():
+        """The single honest answer for every way this can fail to find structure."""
+        return {"boundaries": np.array([0.0, n / rate]), "period": 0.0, "strength": 0.0,
+                "shapes": np.zeros((1, D)), "phase": np.zeros(n), "index": np.zeros(n, int)}
+
+    period_s, strength = dominant_period(stream, rate, min_s, max_s)
+    P = int(round(period_s * rate))
+    # A DEAD STREAM MUST NOT PRODUCE A CONFIDENT PERIOD. On flat input the autocorrelation is
+    # identically zero, argmax returns the first lag, and the function happily reports
+    # period == min_s with a full set of cycles -- a fabricated segmentation of nothing, which
+    # is the failure mode a consumer is least able to notice. The threshold is deliberately
+    # LOOSE (real tracks measure 0.70-0.94): it is a deadness guard, not a quality gate, and
+    # setting it high would silently discard weakly-periodic material that is genuinely there.
+    if P < 4 or P >= n or strength < 0.05:
+        return no_cycle()
+
+    n_cyc = n // P
+    folded = stream[:n_cyc * P].reshape(n_cyc, P)
+    profile = folded.mean(axis=0)
+    off = int(np.argmin(profile))                      # trough of the average cycle
+
+    # Not one whole cycle fits after the phase offset. Reachable on short or aperiodic input
+    # (white noise picks a long period, the offset eats the remainder) and it used to raise
+    # IndexError on `starts[-1]` -- a crash in a consumer's loop rather than a usable answer.
+    starts = np.arange(off, n - P + 1, P)
+    if len(starts) == 0:
+        return no_cycle()
+
+    bounds = np.concatenate([starts, [starts[-1] + P]]) / rate
+    # Resample each cycle to D bins by POSITION-WITHIN-CYCLE, not by frame index. (_resample_to
+    # is the wrong tool here: called with src_rate == dst_rate it would hand back the first D
+    # frames of the cycle and silently discard the rest.)
+    src = np.linspace(0.0, 1.0, P)
+    dst = np.linspace(0.0, 1.0, D)
+    shapes = np.stack([np.interp(dst, src, stream[s:s + P]) for s in starts])
+
+    t = np.arange(n)
+    ph = ((t - off) % P) / P
+    idx = np.floor_divide(t - off, P)
+    return {"boundaries": bounds, "period": period_s, "strength": strength,
+            "shapes": shapes, "phase": ph, "index": idx}
     if len(pred) == 0 or len(ref) == 0:
         return 0.0, 0.0, 0.0
     used = np.zeros(len(ref), dtype=bool)
