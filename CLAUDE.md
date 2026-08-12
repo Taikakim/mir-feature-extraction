@@ -161,10 +161,34 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
   ```
   Walks each track folder, extracts 20 fields at **100 Hz over the whole track** (`madmom` beat/downbeat activations, `librosa` onset envelopes per stem, multiband/per-stem RMS, spectral, HPCP), writes one `<track>.TIMESERIES.npz` per source track. Resumable (skips existing). Driven by chunked-fresh-pool workers (see `--chunk-size`, `--chunk-timeout`).
 
-- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — currently 4461 npz, **21 GB total**. Each npz contains:
+- **Expanded fields:** `src/spectral/whole_track_expanded.py` adds 26 model/DSP fields at their
+  own **native rates** (0.2–100 Hz) — read `field_rates` from the sidecar meta, never assume 100 Hz.
+  Incremental backfill: `whole_track_timeseries.py --add-fields` (recomputes only what is missing).
+
+- **Melody height (4 fields, 2026-08-12) — the pitch/melody control-head target.**
+  `f0_other_ts`, `f0_other_voiced_ts`, `f0_bass_ts`, `f0_bass_voiced_ts`, all 100 Hz,
+  `PredominantPitchMelodia` + `EqualLoudness` on the **separated stems** (other 55–1760 Hz,
+  bass 30–350 Hz). These are the only pitch fields that are **not octave-folded** — hpcp,
+  chroma_linmap, bass_chroma_linmap and chords are all pitch *class*, in which a rising line
+  and its inversion are identical, so "make the lead go up" is unexpressible from them.
+  - **Unvoiced frames are `0.0` Hz. MASK with the `_voiced_ts` field; never regress on the raw
+    values — 0 Hz is not a low note.** Voiced *fraction* is itself meaningful (a low value means
+    that stem has little predominant melody, not that tracking failed).
+  - Two voices because a rolling bassline is a melodic voice in its own right. Any mapping onto
+    SA3's 3-band chroma conditioning (bass→low, other→mid+high) belongs at the **conditioning**
+    stage, not in extraction.
+  - Skipped, not faked from the mix, where a stem is missing (4 goa folders).
+  - **Open:** `f0_bass_ts` may sit one octave above the true fundamental — melodia and YIN
+    disagree by ~12 semitones on every bass stem tested and three tests failed to settle it.
+    Melodia was chosen for contour stability (YIN flips octaves *within* a track), not because
+    its octave is known right. Re-open if absolute bass register ever matters.
+
+- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — 4461 goa npz (plus avp
+  and genre corpora in the same directory — **do not glob the directory as a goa denominator**),
+  **21 GB+**. Each npz contains:
   - 1-D fields shape `(N_frames,)` where `N_frames ≈ duration_sec × 100`
   - `hpcp_ts` shape `(N_frames, 12)`
-  - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, etc.
+  - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, `fields`, `field_rates`, etc.
 
 - **Consumer (cropper/resampler):** `/home/kim/Projects/SAO/stable-audio-tools/scripts/whole_track_target_source.py`
   ```python
