@@ -119,9 +119,10 @@ DSP_FIELDS = [
 # Melody height. Separate from DSP_FIELDS because these are the only fields computed from a
 # SEPARATED STEM rather than the mix, so they are skipped (not faked from the mix) when stems
 # are absent -- see ExpandedExtractor._melody.
-MELODY_FIELDS = ["f0_ts", "f0_voiced_ts"]
+MELODY_FIELDS = ["f0_other_ts", "f0_other_voiced_ts",
+                 "f0_bass_ts", "f0_bass_voiced_ts"]
 EXPANDED_FIELDS = MODEL_FIELDS + DSP_FIELDS + MELODY_FIELDS
-EXPANDED_VERSION = 2          # 2: + f0_ts / f0_voiced_ts (melody height from the `other` stem)
+EXPANDED_VERSION = 2          # 2: + f0_{other,bass}_ts / _voiced_ts (melody height per voice)
 
 _EPS = 1e-10
 
@@ -307,7 +308,13 @@ class ExpandedExtractor:
 
     @staticmethod
     def _melody(track_dir: Path) -> Optional[Tuple[Dict[str, np.ndarray], float]]:
-        """f0 height + voicing from the separated lead stem, at 100 Hz.
+        """f0 height + voicing for BOTH melodic voices -- bass and lead -- at 100 Hz.
+
+        TWO VOICES, NOT ONE (Kim, 2026-08-12): a goa rolling bassline is a melodic voice in its
+        own right, and a lead-only f0 misses it. The bass/other stem split already separates the
+        low voice from the mid+high one, so no band-filtering within a stem is needed. Mapping
+        these onto SA3's 3-band chroma conditioning (bass -> low, other -> mid+high) belongs at
+        the conditioning stage, not baked in here.
 
         WHY THIS FIELD EXISTS. Every pitch field in the set is octave-folded pitch CLASS (hpcp,
         chroma_linmap, bass_chroma_linmap, chords) or a scalar salience -- a rising line and its
@@ -331,6 +338,25 @@ class ExpandedExtractor:
         substituting the mix -- a field that means "lead melody" on some tracks and "whatever was
         loudest" on others is worse than a missing field.
 
+        THE BASS OCTAVE IS AN OPEN QUESTION, AND MELODIA WAS CHOSEN DESPITE IT. On every bass
+        stem tested, melodia and YIN disagree by almost exactly 12 semitones (medians 52.0/45.2/
+        44.3 vs 40.0/32.6/32.4 MIDI). Exactly one is wrong; three separate tests failed to say
+        which. Both frequencies carry real spectral energy, so neither is inventing a partial.
+        The decisive odd-harmonic test -- if f_low is the fundamental then 3*f_low must have
+        energy, whereas 1.5*f_high need not -- came back inconclusive (3*f0 vs 1.5*f0 peak ratios
+        3.7/3.5, 6.1/4.0, 2.8/1.1), plausibly because a filtered synth bass has weak upper
+        harmonics and because 10.8 Hz bins are coarse relative to an 80 Hz fundamental.
+
+        The choice therefore rests on a criterion that does NOT need the octave resolved:
+        CONTOUR STABILITY. Melodia gives 95-97% of steps <= 2 semitones with ~0.1% octave jumps;
+        YIN gives 87.8-97.9% with up to 8.4% octave jumps -- i.e. YIN flips octaves WITHIN a
+        track, which is fatal for a control target, whereas a consistent constant offset is not.
+        Relative control ("make the bass go up") is unaffected either way.
+
+        SO: if absolute bass register ever matters (aligning to real MIDI, naming notes), treat
+        f0_bass_ts as possibly one octave high and re-open this. It is a known unknown, not an
+        oversight, and it does not block the head.
+
         VOICING IS A SEPARATE FIELD, DELIBERATELY. Unvoiced frames are 0.0 in f0_ts, and 0 Hz is
         not a low note -- any consumer must mask with f0_voiced_ts rather than regress on the
         raw values. The voiced FRACTION is also informative in its own right: one of the eight
@@ -338,19 +364,23 @@ class ExpandedExtractor:
         that stem simply has less predominant melody in it, which is a fact about the music
         rather than a tracking failure.
         """
-        stem = track_dir / "other.flac"
-        if not stem.exists():
-            return None
         import essentia.standard as es
         from core.file_utils import read_audio
-        raw, sr = read_audio(str(stem))
-        mono = raw.mean(axis=1) if getattr(raw, "ndim", 1) > 1 else raw
-        mono44 = _resample(np.asarray(mono, dtype=np.float32), sr, 44100)
-        mel = es.PredominantPitchMelodia(frameSize=2048, hopSize=441, sampleRate=44100)
-        f0, _ = mel(es.EqualLoudness(sampleRate=44100)(mono44))
-        f0 = np.asarray(f0, dtype=np.float32)
-        return {"f0_ts": f0,
-                "f0_voiced_ts": (f0 > 0).astype(np.float32)}, 100.0
+        out: Dict[str, np.ndarray] = {}
+        el = es.EqualLoudness(sampleRate=44100)
+        for voice, fmin, fmax in (("other", 55.0, 1760.0), ("bass", 30.0, 350.0)):
+            stem = track_dir / f"{voice}.flac"
+            if not stem.exists():
+                continue
+            raw, sr = read_audio(str(stem))
+            mono = raw.mean(axis=1) if getattr(raw, "ndim", 1) > 1 else raw
+            mono44 = _resample(np.asarray(mono, dtype=np.float32), sr, 44100)
+            mel = es.PredominantPitchMelodia(frameSize=2048, hopSize=441, sampleRate=44100,
+                                             minFrequency=fmin, maxFrequency=fmax)
+            f0 = np.asarray(mel(el(mono44))[0], dtype=np.float32)
+            out[f"f0_{voice}_ts"] = f0
+            out[f"f0_{voice}_voiced_ts"] = (f0 > 0).astype(np.float32)
+        return (out, 100.0) if out else None
 
     def _spectral_10hz(self, mono44: np.ndarray, sr: int) -> Tuple[Dict[str, np.ndarray], float]:
         """Bark/ERB bands, dissonance, pitch salience, inharmonicity, novelty —
@@ -522,12 +552,12 @@ class ExpandedExtractor:
         if wanted & set(MELODY_FIELDS):
             mel = self._melody(full_mix.parent)
             if mel is None:
-                logger.warning("  f0 skipped: no other.flac stem beside %s", full_mix.name)
+                logger.warning("  f0 skipped: no bass/other stems beside %s", full_mix.name)
                 extra["f0_source"] = None
             else:
                 dmel, fpsmel = mel
                 put(dmel, fpsmel)
-                extra["f0_source"] = "other.flac"
+                extra["f0_source"] = sorted(k for k in dmel if k.endswith("_voiced_ts"))
 
         # --- DSP -----------------------------------------------------------
         if wanted & {"attack_logattacktime_ts", "attack_tctototal_ts",
