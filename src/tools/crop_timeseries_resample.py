@@ -89,6 +89,42 @@ def _mode_pool(arr: np.ndarray, n: int) -> np.ndarray:
     return out
 
 
+_RATE_WARNED: set = set()
+
+
+def _effective_rate(key: str, arr: np.ndarray, rates: dict, default: float,
+                    duration: float) -> float:
+    """The rate to actually slice with -- DERIVED, not trusted.
+
+    `field_rates` can be wrong, and one entry demonstrably is. maest_embed_ts's rate is hardcoded
+    in the producer as 16000/(313*256) = 0.19968 Hz (an assumed 5.008 s patch hop); the patches
+    actually land ~10.1 s apart. Measured over 300 sidecars: stored/true = 2.020 median (p5 1.998,
+    p95 2.045), i.e. the field covers ~49.5% of every track's duration and is off by exactly 2x.
+
+    Consequences if trusted: time-indexed slicing maps the FIRST HALF of a track onto the whole
+    of it, and any crop starting past the halfway point fails coverage outright. Non-time-indexed
+    uses (rarity, retrieval, clip metrics -- what MAEST is actually for per MASTER §2) are
+    unaffected, which is why this sat undetected until something sliced every field by time.
+
+    n_frames / duration is the ground truth whenever duration is known, so prefer it and warn
+    once per field when the sidecar disagrees by more than 5%. This makes the consumer robust to
+    the whole class of wrong-rate metadata rather than to this one instance of it.
+    """
+    stated = float(rates.get(key, default))
+    n = arr.shape[0]
+    if duration <= 0 or n < 2:
+        return stated
+    derived = n / duration
+    if stated > 0 and abs(stated - derived) / stated > 0.05:
+        if key not in _RATE_WARNED:
+            _RATE_WARNED.add(key)
+            print(f"  [rate] {key}: sidecar says {stated:.5f} Hz, {n} frames over {duration:.1f}s "
+                  f"implies {derived:.5f} Hz ({stated/derived:.2f}x) -- using the derived rate",
+                  flush=True)
+        return derived
+    return stated
+
+
 def _slice(arr: np.ndarray, rate: float, start: float, end: float) -> Optional[np.ndarray]:
     """Slice [start, end) seconds using the FIELD'S OWN rate. None if it does not cover it."""
     total = arr.shape[0]
@@ -110,12 +146,13 @@ def build_crop_timeseries(arrays: Dict[str, np.ndarray], meta: dict,
     """
     rates = (meta or {}).get("field_rates", {})
     default_rate = float((meta or {}).get("frame_rate", 100.0))
+    duration = float((meta or {}).get("duration") or 0.0)
     out: Dict[str, np.ndarray] = {}
 
     for key, arr in arrays.items():
         if key == "__meta__":
             continue
-        rate = float(rates.get(key, default_rate))
+        rate = _effective_rate(key, np.asarray(arr), rates, default_rate, duration)
         win = _slice(np.asarray(arr), rate, start, end)
         if win is None:
             if strict:
