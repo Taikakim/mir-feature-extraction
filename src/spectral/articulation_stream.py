@@ -38,17 +38,54 @@ import numpy as np
 TS_ROOT = Path("/run/media/kim/Lehto/timeseries")
 CORPUS_ROOT = Path("/run/media/kim/Mantu/ai-music/Goa_Separated")
 
-# Sensible default: streams that plausibly mark *events* rather than slow state. Per-stem onset
-# envelopes are the most literal articulation signal we have; spectral flux is already a novelty
-# curve; hpcp/chroma flux marks harmonic change (Kim's "harmonic rhythm"); band energies mark
-# per-band pulse. Deliberately excludes the slow embedding fields (0.2-1 Hz) -- they describe
-# state, not articulation, and resampling them up would invent detail that is not there.
+# MEASURED, not guessed (14 tracks, tol 0.07 s, F1 vs a swept null p95). The first version of
+# this list was reasoned from what "plausibly marks events", and three of its ten entries were
+# wrong in two different ways.
+#
+#   field                     medF1  medNull  margin  beats-null   verdict
+#   onset_envelope_drums_ts   0.556   0.391   +0.163    13/13      keep
+#   onset_envelope_bass_ts    0.530   0.363   +0.154    13/13      keep
+#   spectral_flux_ts          0.546   0.376   +0.172    14/14      keep (best single stream)
+#   onset_envelope_ts         0.545   0.407   +0.146    14/14      keep (was never asked for)
+#   hpcp_ts                   0.493   0.404   +0.094    14/14      keep
+#   onset_envelope_other_ts   0.476   0.387   +0.092    13/13      keep
+#   chroma_linmap_ts          0.345   0.272   +0.072    14/14      keep
+#   rms_energy_bass_ts        0.430   0.414   +0.013    14/14      DROP -- at its own null
+#   rms_energy_air_ts         0.428   0.412   +0.012    12/14      DROP -- at its own null
+#   rms_energy_mid_ts         0.424   0.414   +0.006    12/14      DROP -- at its own null
+#   onset_envelope_vocals_ts  0.189   0.160   +0.017    12/13      DROP -- null (goa has no vocal)
+#
+# THE BAND ENERGIES CARRIED NOTHING. Not weak signal -- no signal: slow-varying state, so a
+# peak-picker fires wherever the envelope wobbles. The comment above this list used to say the
+# slow fields "describe state, not articulation" and then included them anyway. Dropping them
+# lifted the fused stream from margin +0.089 to +0.172 (median F1 0.487 -> 0.558), improving on
+# 13 of 14 tracks. That -- not timing disagreement, which is what I first claimed -- is why the
+# fused stream had been scoring BELOW its own best members: three of ten inputs were noise.
+#
+# AND ONE ENTRY NAMED NOTHING AT ALL. "onsets_activations_ts" is the PER-CROP TimeseriesDB
+# spelling; the whole-track npz calls the full-mix envelope "onset_envelope_ts". It was present
+# in 0 of 14 npz, reported missing on every run by the check build_stream does for exactly this,
+# and never read. Two stores, two vocabularies, one silent hole -- check the npz field list, do
+# not port a name across from the other store.
 DEFAULT_FIELDS = [
+    "onset_envelope_ts",
     "onset_envelope_drums_ts", "onset_envelope_bass_ts", "onset_envelope_other_ts",
-    "onsets_activations_ts", "spectral_flux_ts",
-    "hpcp_ts", "chroma_linmap_ts",
-    "rms_energy_bass_ts", "rms_energy_mid_ts", "rms_energy_air_ts",
+    "spectral_flux_ts", "hpcp_ts", "chroma_linmap_ts",
 ]
+
+# NOT a default field, and deliberately so, despite scoring by far the best thing here:
+# beat_activation_ts hits medF1 0.800 / margin +0.399 / 14 of 14 tracks -- more than double the
+# next field. It is CIRCULAR. beat_activation_ts is madmom's per-frame beat activation and
+# BEATS_GRID is madmom's DBN decoding OF THAT ACTIVATION, so the two are the input and output of
+# one model and high agreement is guaranteed by construction, not discovered.
+#
+# It is still worth having, as the thing this harness previously lacked: a POSITIVE CONTROL. A
+# validation pipeline that cannot recover madmom's own beats from madmom's own activation is
+# broken, and would fail silently by reporting everything as null. 0.800 says the harness
+# measures what it claims to. Use it to test the tester, never as an articulation input --
+# anything built on it inherits a dependency on the beat grid, which is exactly the property the
+# grid-free formulation exists to avoid.
+POSITIVE_CONTROL_FIELD = "beat_activation_ts"
 
 
 def _rate_of(name: str, meta: dict, default: float = 100.0) -> float:
@@ -172,13 +209,34 @@ OFFSETS = np.arange(-0.30, 0.301, 0.02)
 def best_offset(pred: np.ndarray, ref: np.ndarray, tol: float):
     """Best global time-shift and its F1.
 
-    A PER-FIELD OFFSET IS REQUIRED, not a nicety (measured 2026-08-12). The fields come from
-    different extractors with different window sizes and frame conventions, so each has its own
-    effective latency against the beat grid -- the drum onset envelope wants ~+0.16 s where the
-    fused stream wants ~-0.06 s. Uncalibrated, every stream scored AT CHANCE and looked like a
-    null result; calibrated, they all carry real beat-aligned articulation. Worse, uncalibrated
-    fusion averages streams that disagree about *when*, so the misalignment partly cancels --
-    which is why naive fusion scored below its own best member.
+    Sweeping an offset visibly rescues the scores: uncalibrated, every stream sat at chance and
+    looked like a null result; calibrated, they all scored well above it. The obvious reading is
+    that each extractor has its own effective latency against the beat grid (different window
+    sizes, different frame conventions) and the sweep is measuring that delay.
+
+    THAT READING IS MOSTLY WRONG, and it is worth keeping the correction next to the code that
+    invited it. Measured over 14 tracks (2026-08-12, same day, one track -> fourteen), the
+    per-field offset is NOT a constant of the field for most fields:
+
+        field                     median    IQR     range
+        hpcp_ts                   +0.04   0.000    stable  <- a real constant
+        spectral_flux_ts          -0.02   0.020    stable  <- a real constant
+        onset_envelope_bass_ts    -0.08   0.080    -0.20 .. +0.28
+        onset_envelope_other_ts   -0.02   0.160    spans the whole sweep
+        rms_energy_mid_ts         +0.04   0.210    spans the whole sweep
+        onset_envelope_drums_ts   -0.04   0.200    spans the whole sweep
+        rms_energy_air_ts         -0.06   0.270    spans the whole sweep
+
+    Only hpcp and spectral_flux behave like pipeline latencies. For the rest, "best offset" is
+    picking a local maximum in a nearly flat landscape -- a different thing from measuring a
+    delay, and it varies per track. The earlier claim that "drums want ~+0.16 s" was one track's
+    draw stated as a property of the extractor.
+
+    So the sweep stays (it is the fair way to score, and the null is swept identically so the
+    search cannot manufacture a result), but its output is NOT a calibration constant you may
+    bake in. Anything downstream either calibrates against a grid it has, restricts itself to the
+    two stable fields, or -- better -- uses a phase-invariant formulation that never needs the
+    offset at all.
     """
     scores = [(float(o), _match_f1(pred + o, ref, tol)[2]) for o in OFFSETS]
     o, f1 = max(scores, key=lambda t: t[1])
