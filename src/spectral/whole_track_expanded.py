@@ -56,6 +56,17 @@ Plain DSP (essentia, no models):
   chroma_linmap_ts    (n, 12) ~10 Hz NNLSChroma mid-range chromagram
   bass_chroma_linmap_ts (n,12) ~10 Hz  ... and its bass-range chromagram
 
+Melody height, from the SEPARATED STEMS (2026-08-12) — the only fields here not
+computed from the mix, and the only pitch fields that are not octave-folded:
+  f0_other_ts             100 Hz PredominantPitchMelodia on the lead/other stem
+  f0_other_voiced_ts      100 Hz  ... its voicing mask (1 = voiced)
+  f0_bass_ts              100 Hz  ... and on the bass stem (30-350 Hz bounds)
+  f0_bass_voiced_ts       100 Hz  ... its voicing mask
+Unvoiced frames are 0.0 Hz; MASK, never regress on the raw values — 0 Hz is not
+a low note. Skipped (not faked from the mix) where a stem is missing. See
+ExpandedExtractor._melody for why melodia rather than the f0 already computed
+and discarded in _spectral_10hz, and for the unresolved bass-octave caveat.
+
 Run under the mir venv (mir/bin/python — essentia+TF live there, NOT .venv).
 Selftest (validates every extractor on one real track, prints shapes/rates):
   mir/bin/python src/spectral/whole_track_expanded.py <track_dir> [--seconds 90]
@@ -369,8 +380,16 @@ class ExpandedExtractor:
         out: Dict[str, np.ndarray] = {}
         el = es.EqualLoudness(sampleRate=44100)
         for voice, fmin, fmax in (("other", 55.0, 1760.0), ("bass", 30.0, 350.0)):
-            stem = track_dir / f"{voice}.flac"
-            if not stem.exists():
+            # STEMS ARE NOT ALL .flac. 818 of 4461 goa folders (18%) carry .mp3 stems --
+            # Demucs and BS-RoFormer both default to mp3 output, which CLAUDE.md documents and
+            # I did not check before hardcoding the extension. A .flac-only lookup skipped every
+            # one of them, and because --add-fields treats "done" as "all expanded fields
+            # present", those tracks would have been retried forever and never completed: a
+            # permanent 18% hole in the target, biased toward whichever stems were separated
+            # with which tool.
+            stem = next((track_dir / f"{voice}{e}" for e in (".flac", ".mp3", ".wav")
+                         if (track_dir / f"{voice}{e}").exists()), None)
+            if stem is None:
                 continue
             raw, sr = read_audio(str(stem))
             mono = raw.mean(axis=1) if getattr(raw, "ndim", 1) > 1 else raw
