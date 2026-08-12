@@ -116,8 +116,12 @@ DSP_FIELDS = [
     "chords_idx_ts", "chords_strength_ts",
     "chroma_linmap_ts", "bass_chroma_linmap_ts",
 ]
-EXPANDED_FIELDS = MODEL_FIELDS + DSP_FIELDS
-EXPANDED_VERSION = 1
+# Melody height. Separate from DSP_FIELDS because these are the only fields computed from a
+# SEPARATED STEM rather than the mix, so they are skipped (not faked from the mix) when stems
+# are absent -- see ExpandedExtractor._melody.
+MELODY_FIELDS = ["f0_ts", "f0_voiced_ts"]
+EXPANDED_FIELDS = MODEL_FIELDS + DSP_FIELDS + MELODY_FIELDS
+EXPANDED_VERSION = 2          # 2: + f0_ts / f0_voiced_ts (melody height from the `other` stem)
 
 _EPS = 1e-10
 
@@ -182,6 +186,11 @@ class ExpandedExtractor:
         return alg
 
     def _maest(self, mono16: np.ndarray) -> np.ndarray:
+        # tracks shorter than one 10 s patch: empty embedding (0, 768) — field
+        # present-but-empty, matching the OpenL3-style contract, so resume's
+        # missing-field check doesn't retry forever (29 short avp jingles, 2026-07-14)
+        if len(mono16) < 165000:               # 10.0 s patch + headroom @16 kHz
+            return np.zeros((0, 768), dtype=np.float32)
         out = np.asarray(self._predictor("maest")(mono16))
         # (n_patches, 1, n_tokens, 768) or (n_patches, n_tokens, 768) -> token-mean
         out = out.reshape(out.shape[0], -1, out.shape[-1])
@@ -295,6 +304,53 @@ class ExpandedExtractor:
             if sl > _EPS and sr_ > _EPS:
                 corr[i] = float(np.corrcoef(l, r)[0, 1])
         return {"stereo_width_ts": width, "stereo_corr_ts": corr}
+
+    @staticmethod
+    def _melody(track_dir: Path) -> Optional[Tuple[Dict[str, np.ndarray], float]]:
+        """f0 height + voicing from the separated lead stem, at 100 Hz.
+
+        WHY THIS FIELD EXISTS. Every pitch field in the set is octave-folded pitch CLASS (hpcp,
+        chroma_linmap, bass_chroma_linmap, chords) or a scalar salience -- a rising line and its
+        inversion are identical in all of them. "Make the lead go up" is therefore unexpressible
+        from anything we extract, which makes this the missing prediction target for a pitch /
+        melody control head.
+
+        WHY MELODIA AND NOT THE f0 WE ALREADY THROW AWAY. `_spectral_10hz` already runs
+        PitchYinFFT and discards `p0`, keeping only the derived inharmonicity -- so it is
+        tempting to just store it. Measured on a real track, that f0 is NOT a melodic line: YIN
+        is a MONOPHONIC estimator and a goa lead stem is not monophonic, so it follows whichever
+        spectral peak wins each frame. Only 28.4% of its frame-to-frame steps are <= 2 semitones
+        and 10.0% are octave jumps. PredominantPitchMelodia does pitch-contour tracking with
+        voicing detection for polyphonic audio and gives 96.9% / 0.0% on the same input.
+        Validated over 8 tracks: steps <= 2 semitones median 95.4% (min 94.5%), octave jumps max
+        0.15%. Free is not the same as fit for purpose.
+
+        WHY THE `other` STEM. The full mix works but tracks ~5 points fewer voiced frames and
+        drags the median down where the bass wins; `other` is the lead/FX stem and is what a
+        melody control should follow. Returns None when the stem is absent rather than silently
+        substituting the mix -- a field that means "lead melody" on some tracks and "whatever was
+        loudest" on others is worse than a missing field.
+
+        VOICING IS A SEPARATE FIELD, DELIBERATELY. Unvoiced frames are 0.0 in f0_ts, and 0 Hz is
+        not a low note -- any consumer must mask with f0_voiced_ts rather than regress on the
+        raw values. The voiced FRACTION is also informative in its own right: one of the eight
+        tracks reads 28.4% voiced with the cleanest contour of the set (99.0% small steps), i.e.
+        that stem simply has less predominant melody in it, which is a fact about the music
+        rather than a tracking failure.
+        """
+        stem = track_dir / "other.flac"
+        if not stem.exists():
+            return None
+        import essentia.standard as es
+        from core.file_utils import read_audio
+        raw, sr = read_audio(str(stem))
+        mono = raw.mean(axis=1) if getattr(raw, "ndim", 1) > 1 else raw
+        mono44 = _resample(np.asarray(mono, dtype=np.float32), sr, 44100)
+        mel = es.PredominantPitchMelodia(frameSize=2048, hopSize=441, sampleRate=44100)
+        f0, _ = mel(es.EqualLoudness(sampleRate=44100)(mono44))
+        f0 = np.asarray(f0, dtype=np.float32)
+        return {"f0_ts": f0,
+                "f0_voiced_ts": (f0 > 0).astype(np.float32)}, 100.0
 
     def _spectral_10hz(self, mono44: np.ndarray, sr: int) -> Tuple[Dict[str, np.ndarray], float]:
         """Bark/ERB bands, dissonance, pitch salience, inharmonicity, novelty —
@@ -461,6 +517,17 @@ class ExpandedExtractor:
                 if k in wanted:
                     data[k] = v
                     rates[k] = float(fps if not isinstance(fps, dict) else fps[k])
+
+        # --- melody height (from the separated stem, not the mix) ----------
+        if wanted & set(MELODY_FIELDS):
+            mel = self._melody(full_mix.parent)
+            if mel is None:
+                logger.warning("  f0 skipped: no other.flac stem beside %s", full_mix.name)
+                extra["f0_source"] = None
+            else:
+                dmel, fpsmel = mel
+                put(dmel, fpsmel)
+                extra["f0_source"] = "other.flac"
 
         # --- DSP -----------------------------------------------------------
         if wanted & {"attack_logattacktime_ts", "attack_tctototal_ts",
