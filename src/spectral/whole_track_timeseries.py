@@ -567,6 +567,23 @@ def main():
                 new_pending = new_pending[1:]
             pending = new_pending
 
+    # REAP THE LAST POOL. `shutdown(wait=False)` above is deliberate -- a stuck worker must not
+    # be able to hang a multi-hour run -- but it means the final chunk's workers are still alive
+    # when main() returns, and they re-parent to init instead of dying. Measured after the
+    # 4461-track f0 backfill: 8 orphans at ~420 MB each, 2.4 GB held indefinitely by processes
+    # whose parent no longer existed. The run had printed "Done:" and given the shell back, so
+    # nothing suggested a third of the box's spare RAM was still spoken for. Same family as
+    # MASTER §5's orphaned-dataloader-worker note, in the MIR producer.
+    # Safe here: every chunk has completed, and the sidecar write is atomic (tmp + os.replace),
+    # so a terminated worker can at worst leave a .tmp file, never a damaged sidecar.
+    import multiprocessing as _mp
+    strays = _mp.active_children()
+    for p in strays:
+        p.terminate()
+        p.join(timeout=5)
+    if strays:
+        print(f"  reaped {len(strays)} pool worker(s)")
+
     print(f"\nDone: {done} written, {skipped} skipped, {failed} failed")
 
 
