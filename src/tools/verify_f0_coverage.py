@@ -11,8 +11,11 @@ draw are fine. So this checks EVERY track.
 
 THREE CHECKS, because coverage alone is not enough:
   1. COVERAGE   -- every track folder's sidecar carries all four f0 fields.
-  2. INTEGRITY  -- no sidecar LOST a pre-existing field. The pass rewrites 4461 files in place;
-                   a lost legacy field is far worse than a missing f0 and must stop everything.
+  2. INTEGRITY  -- no sidecar lost one of the 36 always-present fields. The pass rewrites 4461
+                   files in place; a lost legacy field is far worse than a missing f0 and must
+                   stop everything. This is a floor DERIVED from the corpus, not an assumed
+                   field count -- see UNIVERSAL for why the assumed version false-alarmed -- and
+                   it is the second line of defence behind a per-track before/after diff.
   3. PARITY     -- the .mp3-stem group and the .flac-stem group produce comparable f0. If mp3
                    stems track measurably worse, the head would train on two populations as if
                    they were one. A coverage sweep cannot see this: the fields are all present,
@@ -32,7 +35,33 @@ import numpy as np
 CORPUS = Path("/run/media/kim/Mantu/ai-music/Goa_Separated")
 TS = Path("/run/media/kim/Lehto/timeseries")
 F0_FIELDS = ["f0_other_ts", "f0_other_voiced_ts", "f0_bass_ts", "f0_bass_voiced_ts"]
-LEGACY_MIN = 46          # field count before the melody backfill
+# INTEGRITY FLOOR, DERIVED FROM THE CORPUS RATHER THAN ASSUMED. The first version of this
+# checker asserted every sidecar has >= 46 fields and printed "INTEGRITY FAILURE ... STOP" below
+# that. Measured field counts are 38 (x4), 44 (x1), 46 (x3756), 48 (x1), 50 (x699): the 4
+# stemless tracks legitimately lack the 8 per-stem fields (46-8=38), and one track is an
+# irregular 44/48. So the assumed floor fires the LOUDEST alarm in the tool on five healthy
+# tracks -- a false positive that would have stopped the whole pipeline. THE_FINN found the same
+# variation independently from a before-snapshot; this is the version that survives it.
+#
+# The 36 fields below are present in all 4461 goa sidecars. Note the weakness honestly: a
+# membership floor computed post-hoc cannot detect a field the pass destroyed everywhere (it
+# would simply not be in the universal set). The authoritative integrity test is a per-track
+# before/after diff -- THE_FINN holds that one. This is the second line of defence, not the first.
+UNIVERSAL = {
+    "attack_logattacktime_ts", "attack_maxratio_ts", "attack_strongdecay_ts",
+    "attack_tctototal_ts", "bark_bands_ts", "bass_chroma_linmap_ts", "chords_idx_ts",
+    "chords_strength_ts", "chroma_linmap_ts", "dissonance_ts", "dyncomplexity_loudness_ts",
+    "dyncomplexity_ts", "effnet_genre400_ts", "effnet_instrument_ts", "effnet_moodtheme_ts",
+    "erb_bands_ts", "hpcp_ts", "inharmonicity_ts", "loudness_ebu_momentary_ts",
+    "loudness_ebu_shortterm_ts", "maest_embed_ts", "novelty_curve_ts", "onset_envelope_ts",
+    "pitch_salience_ts", "rms_energy_air_ts", "rms_energy_bass_ts", "rms_energy_body_ts",
+    "rms_energy_mid_ts", "spectral_flatness_ts", "spectral_flux_ts", "spectral_kurtosis_ts",
+    "spectral_skewness_ts", "stereo_corr_ts", "stereo_width_ts", "va_deam_ts", "va_emomusic_ts",
+}
+# Parity DECISION is effect size, not significance: at n=4457 a KS test calls a musically
+# meaningless 0.02 median gap "divergent". Aligned with THE_FINN's threshold so our two
+# independent checkers decide on the same criterion rather than two different ones.
+PARITY_MAX_GAP = 0.05
 
 
 STEM_EXTS = (".flac", ".wav", ".mp3", ".ogg", ".m4a", ".aiff")
@@ -79,8 +108,9 @@ def main() -> int:
                 else:
                     for v in ("other", "bass"):
                         voiced[fmt].append((v, float(z[f"f0_{v}_voiced_ts"].mean())))
-                if len(have) < LEGACY_MIN:
-                    shrunk.append((d.name, len(have)))
+                lost = UNIVERSAL - have
+                if lost:
+                    shrunk.append((d.name, sorted(lost)[:4]))
         except Exception as e:
             missing.append((d.name, fmt, f"UNREADABLE: {type(e).__name__}"))
 
@@ -91,8 +121,8 @@ def main() -> int:
     for name, fmt, what in missing[:10]:
         print(f"  MISSING {name[:48]:48s} stems={fmt} {what}")
     if shrunk:
-        print(f"  *** INTEGRITY FAILURE: {len(shrunk)} sidecars have < {LEGACY_MIN} fields "
-              f"-- the merge LOST data. STOP. e.g. {shrunk[:3]}")
+        print(f"  *** INTEGRITY FAILURE: {len(shrunk)} sidecars are missing always-present "
+              f"fields -- the merge LOST data. STOP. e.g. {shrunk[:3]}")
 
     print("\nPARITY (voiced fraction by stem format -- a coverage sweep cannot see this):")
     for v in ("other", "bass"):
@@ -101,7 +131,8 @@ def main() -> int:
             vals = [x for vv, x in voiced[fmt] if vv == v]
             row[fmt] = (len(vals), float(np.median(vals)) if vals else float("nan"))
         d_med = row[".flac"][1] - row[".mp3"][1]
-        flag = "  <-- CHECK: groups differ by >10 points" if abs(d_med) > 0.10 else ""
+        flag = (f"  <-- CHECK: groups differ by more than {PARITY_MAX_GAP}"
+                if abs(d_med) > PARITY_MAX_GAP else "")
         print(f"  f0_{v:5s} flac n={row['.flac'][0]:4d} median {row['.flac'][1]:.3f} | "
               f"mp3 n={row['.mp3'][0]:4d} median {row['.mp3'][1]:.3f} | "
               f"diff {d_med:+.3f}{flag}")
