@@ -174,6 +174,22 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
   - **Unvoiced frames are `0.0` Hz. MASK with the `_voiced_ts` field; never regress on the raw
     values — 0 Hz is not a low note.** Voiced *fraction* is itself meaningful (a low value means
     that stem has little predominant melody, not that tracking failed).
+  - **RESAMPLING: never mean-pool f0 in Hz.** The standard consumer
+    (`stable-audio-tools/scripts/whole_track_target_source.py::resample_axis0`) downsamples by
+    fractional-bin mean pooling — correct for density/energy envelopes, wrong here, because it
+    averages real pitches with the 0.0 sentinel and drags each window toward silence by its
+    unvoiced fraction. Measured over 120 tracks at the SA3 grid (100 → 10.767 Hz, ~9.3 source
+    frames per target frame): **median error +0.00 st but p95 +15.86 st, with 17.2% of frames
+    wrong by more than a semitone** — sparse, severe, and concentrated at note boundaries where
+    the melody actually is. The median being zero is why a spot-check passes it. Pool the voiced
+    frames only:
+    ```python
+    num = resample_axis0(f0 * mask, n)
+    den = resample_axis0(mask, n)
+    f0_ds = np.where(den > 0, num / np.maximum(den, 1e-9), 0.0)   # and keep den as the weight
+    ```
+    (Or convert to semitones first and pool there.) The same caution applies to **any** future
+    field with a sentinel value — `resample_axis0` cannot know that `0.0` means "absent".
   - Two voices because a rolling bassline is a melodic voice in its own right. Any mapping onto
     SA3's 3-band chroma conditioning (bass→low, other→mid+high) belongs at the **conditioning**
     stage, not in extraction.
