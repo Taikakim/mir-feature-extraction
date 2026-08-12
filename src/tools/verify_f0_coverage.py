@@ -35,15 +35,31 @@ F0_FIELDS = ["f0_other_ts", "f0_other_voiced_ts", "f0_bass_ts", "f0_bass_voiced_
 LEGACY_MIN = 46          # field count before the melody backfill
 
 
+STEM_EXTS = (".flac", ".wav", ".mp3", ".ogg", ".m4a", ".aiff")
+
+
 def stem_format(d: Path):
-    for ext in (".flac", ".mp3", ".wav"):
+    for ext in STEM_EXTS:
         if (d / f"other{ext}").exists() and (d / f"bass{ext}").exists():
             return ext
     return None
 
 
+def is_track(d: Path) -> bool:
+    """A track folder is one with a full_mix, NOT merely a directory.
+
+    THE DENOMINATOR IS ITSELF A TRAP, and this checker walked into it. Counting every
+    subdirectory gives 4463; the producer processes 4461. The two extra are directories literally
+    NAMED ".flac" and ".mp3" -- junk entries that contain no full_mix -- so a dirs-based check
+    reports 2 phantom missing tracks. Use the producer's own criterion (a full_mix in any of its
+    six extensions) or the verifier disagrees with the pass for reasons that have nothing to do
+    with f0.
+    """
+    return any((d / f"full_mix{e}").exists() for e in STEM_EXTS)
+
+
 def main() -> int:
-    tracks = sorted(p for p in CORPUS.iterdir() if p.is_dir())
+    tracks = sorted(p for p in CORPUS.iterdir() if p.is_dir() and is_track(p))
     missing, stemless, shrunk, absent_npz = [], [], [], []
     voiced = {".flac": [], ".mp3": []}
 
