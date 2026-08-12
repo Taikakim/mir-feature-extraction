@@ -23,6 +23,14 @@ THREE FAILURES IN THE ONE-RULE-FITS-ALL VERSION, all silent (measured 2026-08-12
 3. CATEGORICAL FIELDS MEAN-POOLED. chords_idx_ts indexes a 24-chord vocab (-1 = unknown).
    Averaging C (3) and G (10) gives 6.5 -- a different chord. Needs the mode.
 
+A FOURTH THING THIS CANNOT FIX, so consumers should know it: upsampling a coarse field to the
+latent grid produces an array whose LENGTH is not its information content. A 0.2 Hz field
+(maest_embed_ts, dyncomplexity_ts) over a 47 s crop has ~9 real samples; interpolated to 4096
+latent frames it looks like a dense timeseries and is not one. That is correct behaviour -- the
+alternative is refusing to emit it -- but a head trained on it is learning from 9 numbers, not
+4096, and anything reading "4096 frames" as "4096 observations" will overestimate what the field
+supports. Check `field_rates` before believing a curve's resolution.
+
 Usage (from the SA3 encoder, replacing the single-rate loop):
 
     from crop_timeseries_resample import build_crop_timeseries
