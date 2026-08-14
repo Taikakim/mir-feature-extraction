@@ -126,11 +126,24 @@ def _effective_rate(key: str, arr: np.ndarray, rates: dict, default: float,
 
 
 def _slice(arr: np.ndarray, rate: float, start: float, end: float) -> Optional[np.ndarray]:
-    """Slice [start, end) seconds using the FIELD'S OWN rate. None if it does not cover it."""
+    """Slice [start, end) seconds using the FIELD'S OWN rate. None if it does not FULLY cover it.
+
+    Found 2026-08-15 stress-testing this module before vendoring it for LUMI (Kim, relaying G's
+    Stage-3 blocker report: "late crops dropped, early crops misaligned, no error raised" -- the
+    exact failure class this whole module exists to kill). The ORIGINAL version only returned
+    None on ZERO overlap (e<=s); a crop whose `end` ran past a field's actual data but still
+    started before it (e.g. the last crop of a track, or any field whose true coverage falls
+    short of the nominal track duration) got a SILENTLY TRUNCATED window instead -- which
+    build_crop_timeseries then pools/resamples up to n_frames as if it were the full span,
+    time-warping the tail into the whole output with no warning. `strict=True` claimed to guard
+    against exactly this and didn't. A 1-frame rounding allowance keeps ordinary float/round
+    jitter from spuriously tripping this on fully-covered crops.
+    """
     total = arr.shape[0]
     s = max(0, int(round(start * rate)))
-    e = min(total, int(round(end * rate)))
-    return None if e <= s else arr[s:e]
+    e_want = int(round(end * rate))
+    e = min(total, e_want)
+    return None if (e <= s or e < e_want - 1) else arr[s:e]
 
 
 def build_crop_timeseries(arrays: Dict[str, np.ndarray], meta: dict,
