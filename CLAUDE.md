@@ -161,6 +161,37 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
   ```
   Walks each track folder, extracts 20 fields at **100 Hz over the whole track** (`madmom` beat/downbeat activations, `librosa` onset envelopes per stem, multiband/per-stem RMS, spectral, HPCP), writes one `<track>.TIMESERIES.npz` per source track. Resumable (skips existing). Driven by chunked-fresh-pool workers (see `--chunk-size`, `--chunk-timeout`).
 
+- **Expected input layout — one folder per track, not a flat directory:**
+  ```
+  <track_dir>/full_mix.<ext>                     REQUIRED (flac/wav/mp3/ogg/m4a/aiff)
+  <track_dir>/{drums,bass,other,vocals}.<ext>     OPTIONAL — separated stems, same folder
+  ```
+  `find_full_mix()`/`find_stem_files()` (both in `whole_track_timeseries.py`) look for exactly
+  this — a flat directory of audio files (`--expanded` reports "Found 0 track folders" against
+  one) or a per-track folder missing `full_mix.*` both fail silently/loudly depending on mode.
+  To build this layout from a flat corpus, **hardlink** (`os.link`) `full_mix.<ext>` into a
+  per-track folder rather than symlinking (mixes things up for some readers) or copying (wastes
+  disk on a large corpus) — `master_pipeline.py`'s Stage 1 (Organization, legacy/pre-timeseries)
+  established this same convention and Stage 2a (stem separation) already writes stems into that
+  identical per-track folder, so a `master_pipeline.py`-organized corpus needs no reshaping.
+  Stems are optional but drive real fields: the base extractor's per-stem
+  `onset_envelope_{stem}_ts`/`rms_{stem}_ts` (8 fields, all 4 stems) and the expanded
+  extractor's melody-height `f0_{other,bass}_ts` (2026-08-12, below) both come from stems, not
+  the mix. A missing stem SKIPS its fields rather than faking them from the mix — check
+  `field_rates`/`fields` in the sidecar `__meta__`, never assume a field is present.
+  **Gotcha (2026-08-17): `--add-fields` only backfills the EXPANDED field set
+  (`missing_expanded_fields()`, scoped to `whole_track_expanded.py`'s `EXPANDED_FIELDS`) — it
+  does NOT re-run the base extractor. So if a track was first extracted with only `full_mix`
+  present and stems land later, `--add-fields` will correctly add melody-height but will
+  silently never add the base per-stem onset/RMS fields (they're not in its "missing" list at
+  all, not even reported). If stems arrive after the initial pass, re-run the full `--expanded
+  --overwrite` pass instead of `--add-fields`, or you end up with a permanent two-tier field
+  set and no signal that it happened.** Also: the melody-height stem lookup
+  (`whole_track_expanded.py`) only recognized `.flac/.mp3/.wav` until 2026-08-17, when `.m4a`
+  was added — BS-RoFormer via `goa_sep_task.py` outputs `.m4a`, the same blind-spot class as an
+  earlier goa `.mp3` fix documented in the same function (818/4461 goa folders were silently
+  skipped forever before that fix; check the extension list before trusting a new stem source).
+
 - **Expanded fields:** `src/spectral/whole_track_expanded.py` adds 26 model/DSP fields at their
   own **native rates** (0.2–100 Hz) — read `field_rates` from the sidecar meta, never assume 100 Hz.
   Incremental backfill: `whole_track_timeseries.py --add-fields` (recomputes only what is missing).
