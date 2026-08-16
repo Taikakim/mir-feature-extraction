@@ -387,7 +387,7 @@ class ExpandedExtractor:
             # present", those tracks would have been retried forever and never completed: a
             # permanent 18% hole in the target, biased toward whichever stems were separated
             # with which tool.
-            stem = next((track_dir / f"{voice}{e}" for e in (".flac", ".mp3", ".wav")
+            stem = next((track_dir / f"{voice}{e}" for e in (".flac", ".mp3", ".wav", ".m4a")
                          if (track_dir / f"{voice}{e}").exists()), None)
             if stem is None:
                 continue
