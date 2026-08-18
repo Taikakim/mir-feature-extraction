@@ -98,9 +98,52 @@ def transform_track(track_dir: Path, overwrite: bool = False) -> dict:
             continue
 
         existing.update(new_fields)
+        # 🔴 UPDATE __meta__ TOO — writing arrays without announcing them makes the sidecar LIE.
+        # Found by W 2026-08-18 auditing all 5035 Lehto sidecars: this wrote the four f0 arrays into
+        # 1346 avp augmentation variants and never touched __meta__, so meta["fields"] listed 46
+        # entries without them, field_rates had no f0, expanded_version stayed 1 and f0_source was
+        # absent. A consumer following our OWN documented rule ("check field_rates/fields in
+        # __meta__, never assume a field is present" — CLAUDE.md/MASTER) would conclude the melody
+        # target does not exist on every augmented avp track while the arrays sit right there.
+        # It failed silently rather than loudly because the f0 rate happens to fall back to
+        # frame_rate=100 correctly. Nothing broke only because both live consumers happen to read
+        # z.files rather than meta — that is luck, not design. merge_expanded already did this
+        # correctly; this tool simply did not copy the pattern.
+        _announce_f0_in_meta(existing, sorted(new_fields))
         np.savez(variant_npz_path, **existing)
         status[vname] = "written"
     return status
+
+
+def _announce_f0_in_meta(existing, f0_fields, rate=100.0, source="melodia+equalloudness/stems"):
+    """Record newly-written fields in the sidecar's __meta__ so it describes what it contains.
+
+    Mirrors what merge_expanded does. Idempotent: safe to re-run over already-fixed sidecars.
+    """
+    import json as _json
+    raw = existing.get("__meta__")
+    if raw is None:
+        return
+    try:
+        meta = _json.loads(str(raw)) if not isinstance(raw, dict) else dict(raw)
+        if isinstance(meta, str):
+            meta = _json.loads(meta)
+    except Exception:
+        return
+    fields = list(meta.get("fields", []))
+    for f in f0_fields:
+        if f not in fields:
+            fields.append(f)
+    meta["fields"] = fields
+    rates = dict(meta.get("field_rates", {}))
+    for f in f0_fields:
+        rates.setdefault(f, rate)
+    meta["field_rates"] = rates
+    meta.setdefault("f0_source", source)
+    # the f0 backfill is what expanded_version 2 denotes
+    if meta.get("expanded_version", 1) in (None, 1):
+        meta["expanded_version"] = 2
+    existing["__meta__"] = _json.dumps(meta)
 
 
 def main():
