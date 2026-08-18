@@ -195,6 +195,25 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
 - **Expanded fields:** `src/spectral/whole_track_expanded.py` adds 26 model/DSP fields at their
   own **native rates** (0.2–100 Hz) — read `field_rates` from the sidecar meta, never assume 100 Hz.
   Incremental backfill: `whole_track_timeseries.py --add-fields` (recomputes only what is missing).
+  **`field_rates` covers ONLY the 30 expanded fields (26 + the 4 melody) — the 20 base fields have
+  no entry at all** (verified across all 5035 Lehto sidecars), so `field_rates[f]` on a base field
+  is a `KeyError`: read it as `field_rates.get(f, meta["frame_rate"])`. Note also that
+  `expanded_version` lives at `meta["expanded"]["expanded_version"]`, **not** top level.
+  `chords_idx_ts` is a **class index** into the 24-triad `CHORD_VOCAB` (`-1` = unknown) — it must
+  be mode-pooled, never mean-pooled (averaging C=3 and G=10 gives a different chord).
+  **Per-track silent failure (2 goa sidecars, found 2026-08-18):** a madmom beat/downbeat
+  activation failure is logged as a warning and the track is written anyway, **48 fields instead of
+  50, with `beat_activation_ts`/`downbeat_activation_ts` simply absent** — nothing downstream
+  announces it. Check the field count, not just the file's existence.
+  **Stated-rate bug, fixed 2026-08-18:** `va_deam_ts`/`va_emomusic_ts` were stamped at
+  `16000/(96*160)` = 1.041667 Hz — 96 is VGGish's patch *size*; essentia's default patch *hop* is
+  93, so the true rate is 1.075269 Hz. 3.1% off, which sits under `crop_timeseries_resample`'s 5%
+  warn threshold and was therefore accepted silently (~19 s of tail drift on a 600 s track). The
+  producer now asks the algorithm for `patchHopSize`; **sidecars written earlier still carry the
+  wrong stated rate** — repair with `src/tools/repair_timeseries_meta.py --fix-vggish-rate`
+  (that tool also rebuilds a sidecar's `fields`/`field_rates`/`expanded` from the arrays actually
+  present, dry-run by default; it exists because `avp_f0_augment_transform.py` wrote the four f0
+  arrays into 1346 avp variants without ever announcing them in `__meta__`).
 
 - **Melody height (4 fields, 2026-08-12) — the pitch/melody control-head target.**
   `f0_other_ts`, `f0_other_voiced_ts`, `f0_bass_ts`, `f0_bass_voiced_ts`, all 100 Hz,
@@ -205,7 +224,8 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
   - **Unvoiced frames are `0.0` Hz. MASK with the `_voiced_ts` field; never regress on the raw
     values — 0 Hz is not a low note.** Voiced *fraction* is itself meaningful (a low value means
     that stem has little predominant melody, not that tracking failed).
-  - **RESAMPLING: never mean-pool f0 in Hz.** The standard consumer
+  - **RESAMPLING: never mean-pool f0 in Hz.** (`crop_timeseries_resample.py` already does the
+    right thing here — this is why to use it.) The older consumer
     (`stable-audio-tools/scripts/whole_track_target_source.py::resample_axis0`) downsamples by
     fractional-bin mean pooling — correct for density/energy envelopes, wrong here, because it
     averages real pitches with the 0.0 sentinel and drags each window toward silence by its
@@ -230,20 +250,37 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
     Melodia was chosen for contour stability (YIN flips octaves *within* a track), not because
     its octave is known right. Re-open if absolute bass register ever matters.
 
-- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — 4461 goa npz (plus avp
-  and genre corpora in the same directory — **do not glob the directory as a goa denominator**),
-  **21 GB+**. Each npz contains:
+- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — **5035 npz, ~37 GiB**
+  (audited 2026-08-18): **4461 goa + 574 genre-corpus sidecars, and ZERO avp** — **do not glob the
+  directory as a goa denominator**. The avp sidecars are NOT here; they live in place under
+  `<UUID drive>/avp-analyzed/<track>/` (and `.../augmentations/<variant>/` for the 1346 augmented
+  variants). A third, separate store — undocumented until now — is
+  `<UUID drive>/suomisoundi_timeseries/` (1260 npz, 6.7 GB).
+  **"50 fields" describes 4455 of those sidecars, not the store:** 574 have **46** (melody was
+  never run on the genre corpora), 4 have **38** (no stems → the 8 per-stem + 4 melody fields are
+  skipped), and 2 have **48** (the madmom activation failure noted above). Read `fields` from the
+  sidecar; do not assume the full set.
+  Each npz contains:
   - 1-D fields shape `(N_frames,)` where `N_frames ≈ duration_sec × 100`
   - `hpcp_ts` shape `(N_frames, 12)`
   - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, `fields`, `field_rates`, etc.
 
-- **Consumer (cropper/resampler):** `/home/kim/Projects/SAO/stable-audio-tools/scripts/whole_track_target_source.py`
+- **Consumer (cropper/resampler) — use `src/tools/crop_timeseries_resample.py`:**
   ```python
-  from whole_track_target_source import resample_axis0, _read_npz
-  arrays, meta = _read_npz("/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz")
-  # Slice arrays[field][s:e] then resample_axis0(win, target_n_frames)
+  from crop_timeseries_resample import build_crop_timeseries
+  out = build_crop_timeseries(arrays, meta, start_sec, end_sec, n_frames)
   ```
-  `WholeTrackTargetSource.get(crop_key, feature, start_time, end_time, n_frames)` packages this for LatCH dataloaders.
+  It lives in mir because how a field may legally be downsampled is a property of the
+  measurement, not of the consumer. It derives each field's rate from `n_frames / duration`
+  rather than trusting `field_rates` (one stored rate — `maest_embed_ts` — is wrong by exactly
+  2×), masked-mean-pools the sentinel fields (`f0_*_ts`, where `0.0` means unvoiced), mode-pools
+  the categorical ones (`chords_idx_ts`), and fails the crop loudly on partial coverage.
+  The older `SAO/stable-audio-tools/scripts/whole_track_target_source.py` is **superseded for
+  expanded fields**: its `get()` applies the single top-level `meta["frame_rate"]` (100 Hz) to
+  *every* field, which is right for the 20 base fields and wrong for the 26 expanded ones at
+  0.2–100 Hz — a coarse field then gets sliced at the wrong offset, silently, or comes back
+  empty and the crop is dropped. It is still fine for base-field LatCH dataloading
+  (`WholeTrackTargetSource.get(crop_key, feature, start_time, end_time, n_frames)`).
 
 - **Use cases**: LatCH-head training against arbitrary crop windows (the SAT trainer reads via the consumer above); per-crop timeseries companions for SA3 LoRA latents (sliced to T=4096 alongside each `.npy`, see `/tmp/sa3_encode_from_manifest.py`).
 

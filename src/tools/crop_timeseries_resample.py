@@ -115,14 +115,25 @@ def _effective_rate(key: str, arr: np.ndarray, rates: dict, default: float,
     if duration <= 0 or n < 2:
         return stated
     derived = n / duration
-    if stated > 0 and abs(stated - derived) / stated > 0.05:
-        if key not in _RATE_WARNED:
-            _RATE_WARNED.add(key)
-            print(f"  [rate] {key}: sidecar says {stated:.5f} Hz, {n} frames over {duration:.1f}s "
-                  f"implies {derived:.5f} Hz ({stated/derived:.2f}x) -- using the derived rate",
-                  flush=True)
-        return derived
-    return stated
+    # ALWAYS return the derived rate when duration is known -- which is what the docstring above
+    # always claimed this did. It did not: until 2026-08-18 the derived rate was used ONLY when
+    # the sidecar disagreed by more than 5%, so anything wrong by LESS than 5% was silently
+    # preferred over the ground truth. That is not hypothetical: va_deam_ts / va_emomusic_ts state
+    # 1.04167 Hz (the producer used essentia's patchSize=96 where patchHopSize=93 was meant) and
+    # measure 1.0753 Hz -- a 3.1% error, comfortably inside the band, so this function returned the
+    # WRONG rate on every VGGish field of all 5035 sidecars in the store. ~19 s of drift at the
+    # tail of a 600 s track, no warning.
+    #
+    # The lesson generalises past this instance: a TOLERANCE BAND IS NOT A CHECK. A guard that
+    # only fires on large errors licenses every small one, and small-but-systematic is the harder
+    # failure to find. The warning below now reports a disagreement worth investigating; it no
+    # longer decides which number gets used.
+    if stated > 0 and abs(stated - derived) / stated > 0.05 and key not in _RATE_WARNED:
+        _RATE_WARNED.add(key)
+        print(f"  [rate] {key}: sidecar says {stated:.5f} Hz, {n} frames over {duration:.1f}s "
+              f"implies {derived:.5f} Hz ({stated/derived:.2f}x) -- using the derived rate",
+              flush=True)
+    return derived
 
 
 def _slice(arr: np.ndarray, rate: float, start: float, end: float) -> Optional[np.ndarray]:

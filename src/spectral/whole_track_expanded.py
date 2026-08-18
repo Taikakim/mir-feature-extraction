@@ -27,8 +27,8 @@ NOT HIP, so it never trips the flash-attn/aiter import crash):
   effnet_genre400_ts    (n, 400)  ~1 Hz    discogs-effnet-bs64 -> genre_discogs400
   effnet_moodtheme_ts   (n, 56)   ~1 Hz    -> mtg_jamendo_moodtheme (sigmoid)
   effnet_instrument_ts  (n, 40)   ~1 Hz    -> mtg_jamendo_instrument (sigmoid)
-  va_deam_ts            (n, 2)    ~1.04 Hz VGGish -> DEAM (valence, arousal), 1-9
-  va_emomusic_ts        (n, 2)    ~1.04 Hz VGGish -> emoMusic (valence, arousal), 1-9
+  va_deam_ts            (n, 2)    ~1.075 Hz VGGish -> DEAM (valence, arousal), 1-9
+  va_emomusic_ts        (n, 2)    ~1.075 Hz VGGish -> emoMusic (valence, arousal), 1-9
 
 Plain DSP (essentia, no models):
   attack_logattacktime_ts   2 Hz  windowed (1 s / hop 0.5 s) LogAttackTime on the
@@ -629,8 +629,18 @@ class ExpandedExtractor:
                 put({"effnet_instrument_ts": np.asarray(
                     self._predictor("instrument")(emb), np.float32)}, fps)
         if wanted & {"va_deam_ts", "va_emomusic_ts"}:
-            vemb = np.asarray(self._predictor("vggish")(mono16), dtype=np.float32)
-            fps = 16000.0 / (96 * 160)
+            vggish = self._predictor("vggish")
+            vemb = np.asarray(vggish(mono16), dtype=np.float32)
+            # Rate = 16 kHz / (patchHopSize mel frames * 160 samples/frame). Ask the algorithm
+            # for its hop rather than hardcoding it: this was `96 * 160` = 1.041667 Hz, which is
+            # the patch SIZE, not the hop — essentia's TensorflowPredictVGGish defaults to
+            # patchHopSize 93 (patchSize 96), so the true rate is 1.075269 Hz. Measured on 40
+            # real sidecars, n_frames/duration over the stated rate = 1.0313 consistently; 3.1%
+            # sits UNDER the 5% warn threshold in crop_timeseries_resample._effective_rate, so
+            # the "derive, don't trust" guard accepted it silently (~19 s of drift at the tail
+            # of a 600 s track). Sidecars written before 2026-08-18 carry the wrong stated rate
+            # -- repair with src/tools/repair_timeseries_meta.py --fix-vggish-rate.
+            fps = 16000.0 / (int(vggish.paramValue("patchHopSize")) * 160)
             if "va_deam_ts" in wanted:
                 put({"va_deam_ts": np.asarray(
                     self._predictor("deam")(vemb), np.float32)}, fps)

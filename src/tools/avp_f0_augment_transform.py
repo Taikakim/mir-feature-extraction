@@ -22,6 +22,8 @@ Writes f0_other_ts / f0_bass_ts / f0_other_voiced_ts / f0_bass_voiced_ts into ea
 OWN .TIMESERIES.npz (merged with existing fields) — no melodia re-run, no re-encode.
 """
 import argparse
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,8 @@ import numpy as np
 VARIANTS_PITCH = {"pitch+1": 1, "pitch+2": 2, "pitch-1": -1, "pitch-2": -2}
 VARIANTS_TEMPO = {"tempo+5", "tempo+10", "tempo-5", "tempo-10"}
 F0_FIELDS = ["f0_other_ts", "f0_bass_ts", "f0_other_voiced_ts", "f0_bass_voiced_ts"]
+F0_RATE = 100.0               # melodia grid, same as the source sidecar's base rate
+F0_EXPANDED_VERSION = 2       # what the melody backfill denotes (whole_track_expanded.EXPANDED_VERSION)
 
 
 def _resample_1d(arr, n_out):
@@ -98,7 +102,7 @@ def transform_track(track_dir: Path, overwrite: bool = False) -> dict:
             continue
 
         existing.update(new_fields)
-        # 🔴 UPDATE __meta__ TOO — writing arrays without announcing them makes the sidecar LIE.
+        # UPDATE __meta__ TOO — writing arrays without announcing them makes the sidecar LIE.
         # Found by W 2026-08-18 auditing all 5035 Lehto sidecars: this wrote the four f0 arrays into
         # 1346 avp augmentation variants and never touched __meta__, so meta["fields"] listed 46
         # entries without them, field_rates had no f0, expanded_version stayed 1 and f0_source was
@@ -109,41 +113,72 @@ def transform_track(track_dir: Path, overwrite: bool = False) -> dict:
         # frame_rate=100 correctly. Nothing broke only because both live consumers happen to read
         # z.files rather than meta — that is luck, not design. merge_expanded already did this
         # correctly; this tool simply did not copy the pattern.
-        _announce_f0_in_meta(existing, sorted(new_fields))
-        np.savez(variant_npz_path, **existing)
+        announce_f0_in_meta(existing, sorted(new_fields), variant=vname)
+        save_npz_atomic(variant_npz_path, existing)
         status[vname] = "written"
     return status
 
 
-def _announce_f0_in_meta(existing, f0_fields, rate=100.0, source="melodia+equalloudness/stems"):
-    """Record newly-written fields in the sidecar's __meta__ so it describes what it contains.
+def announce_f0_in_meta(existing: dict, f0_fields, variant: str = None) -> bool:
+    """Record newly-written f0 fields in the sidecar's __meta__ so it describes what it holds.
 
-    Mirrors what merge_expanded does. Idempotent: safe to re-run over already-fixed sidecars.
+    Mirrors `whole_track_expanded.merge_expanded`: `fields` = every array actually present,
+    `field_rates` gains the f0 entries (100 Hz), and the provenance keys live in the
+    `expanded` SUB-DICT (`f0_source`, `expanded_version`) — not at top level, which is where
+    the first version of this fix mistakenly put them.
+
+    `f0_source` keeps merge_expanded's convention (the sorted list of `_voiced_ts` fields that
+    exist) so a consumer's "is melody present" test works identically on source and variant;
+    `f0_transform` records that these values were SCALED from the source, not re-extracted.
+
+    Idempotent. Returns True if the meta changed. `existing` is mutated in place.
     """
-    import json as _json
     raw = existing.get("__meta__")
     if raw is None:
-        return
+        return False
     try:
-        meta = _json.loads(str(raw)) if not isinstance(raw, dict) else dict(raw)
-        if isinstance(meta, str):
-            meta = _json.loads(meta)
+        meta = json.loads(str(raw))
+        if isinstance(meta, str):          # doubly-encoded, seen on a few older sidecars
+            meta = json.loads(meta)
     except Exception:
-        return
-    fields = list(meta.get("fields", []))
-    for f in f0_fields:
-        if f not in fields:
-            fields.append(f)
-    meta["fields"] = fields
+        return False
+    before = json.dumps(meta, sort_keys=True)
+
+    meta["fields"] = sorted(k for k in existing if k != "__meta__")
     rates = dict(meta.get("field_rates", {}))
     for f in f0_fields:
-        rates.setdefault(f, rate)
+        rates[f] = F0_RATE
     meta["field_rates"] = rates
-    meta.setdefault("f0_source", source)
-    # the f0 backfill is what expanded_version 2 denotes
-    if meta.get("expanded_version", 1) in (None, 1):
-        meta["expanded_version"] = 2
-    existing["__meta__"] = _json.dumps(meta)
+
+    expanded = dict(meta.get("expanded", {}))
+    expanded["f0_source"] = sorted(f for f in f0_fields if f.endswith("_voiced_ts"))
+    expanded["f0_transform"] = f"scaled-from-source:{variant}" if variant else "scaled-from-source"
+    if expanded.get("expanded_version", 1) in (None, 1):
+        expanded["expanded_version"] = F0_EXPANDED_VERSION
+    meta["expanded"] = expanded
+    # the first version of this fix wrote these two at top level; the canonical home is
+    # meta["expanded"] (merge_expanded's `extra`), so drop the strays rather than keep two truths
+    meta.pop("f0_source", None)
+    meta.pop("expanded_version", None)
+
+    if json.dumps(meta, sort_keys=True) == before:
+        return False
+    existing["__meta__"] = np.array(json.dumps(meta))
+    return True
+
+
+def save_npz_atomic(npz_path: Path, payload: dict) -> None:
+    """Compressed + atomic, like merge_expanded (this used to be a bare uncompressed np.savez:
+    a variant measured 10.7 MB against 8.5 MB for the same-shaped compressed source, and a
+    crash mid-write left a truncated sidecar in place of a good one).
+
+    The tmp name MUST end in .npz — np.savez appends the extension otherwise, leaving
+    'x.tmp.npz' while os.replace looks for 'x.tmp' (pilot bug 2026-07-14).
+    """
+    npz_path = Path(npz_path)
+    tmp = npz_path.parent / (npz_path.stem + ".tmp.npz")
+    np.savez_compressed(str(tmp), **payload)
+    os.replace(tmp, npz_path)
 
 
 def main():
