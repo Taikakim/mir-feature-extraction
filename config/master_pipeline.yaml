@@ -193,7 +193,16 @@ features:
   per_stem_harmonic: true
   per_stem: true
 
-  # Time-series features: per-step arrays at configurable resolution.
+  # ---------------------------------------------------------------------------
+  # PER-CROP time-series  ->  SQLite store  data/timeseries.db
+  # ---------------------------------------------------------------------------
+  # ONE OF TWO SEPARATE TIME-SERIES STORES. This one is per CROP: fixed-length
+  # arrays (n_steps values spanning the crop), written into the SQLite DB and
+  # keyed by "<track>_<crop-index>". It only works when the crop-to-track mapping
+  # is fixed at MIR time. The other store is `whole_track_timeseries:` below —
+  # different resolution, different keying, different files, different consumers.
+  # Changing keys here does NOT affect that one, and vice versa.
+  #
   # Keys written: rms_energy_{bass,body,mid,air}_ts, spectral_{flatness,flux,skewness,kurtosis}_ts,
   #               beat_activations_ts, downbeat_activations_ts, onsets_activations_ts,
   #               hpcp_ts (n_steps×12), tonic_ts, tonic_strength_ts.
@@ -204,6 +213,100 @@ features:
     n_steps: 256            # Must match SAO latent length (sample_size / downsampling_ratio)
     timbral: false          # Slow — benchmark first with benchmark_timeseries.py --include-timbral
     timbral_steps: 16       # Lower res for timbral (~750 ms/chunk at 256 steps / 44.1 kHz)
+
+  # ---------------------------------------------------------------------------
+  # WHOLE-TRACK time-series  ->  one <track>.TIMESERIES.npz per SOURCE TRACK
+  # ---------------------------------------------------------------------------
+  # THE OTHER STORE — NOT the per-crop `timeseries:` block above, and not
+  # controlled by it. Here the features are extracted continuously over the WHOLE
+  # track, so a consumer can slice ANY [start_sec, end_sec] window later and
+  # resample it to whatever frame count it needs. That is what makes
+  # variable-offset training crops (beat-aligned crops chosen at encode time)
+  # possible; the per-crop DB above cannot do it because its crops are frozen.
+  #
+  # Runs as pipeline sub-stage [2f], AFTER stem separation [2a] — several fields
+  # are extracted from the separated stems (per-stem onset envelopes + RMS, and
+  # the expanded melody-height f0_{other,bass}). If a stem is missing those
+  # fields are SKIPPED, not faked from the mix, and the npz keeps a permanently
+  # thinner field set until it is re-extracted with `overwrite: true`. Always
+  # read the sidecar `__meta__` (`fields` / `field_rates`) rather than assuming a
+  # field is present or that it is at 100 Hz.
+  #
+  # COST: this is one of the more expensive stages — roughly realtime-ish per
+  # track per worker with `expanded: true` (madmom beat/downbeat RNNs, librosa
+  # onset envelopes per stem, plus ~26 model/DSP fields). Budget accordingly on a
+  # multi-thousand-track corpus; it is fully resumable, so an interrupted run
+  # picks up where it stopped.
+  whole_track_timeseries:
+    enabled: true           # DEFAULT ON. false = skip sub-stage [2f] entirely.
+
+    # Where the .npz files go.
+    #   null  -> IN-FOLDER (default): <track_dir>/<track>.TIMESERIES.npz, right
+    #            next to full_mix — self-contained, moves with the track.
+    #   path  -> a single flat external directory (e.g. a big spare drive) that
+    #            collects every <track>.TIMESERIES.npz. Use when the corpus drive
+    #            is tight; note the files are large (~5 MB/track, tens of GB for
+    #            a few thousand tracks).
+    output_dir: null
+
+    expanded: true          # true  = base 100 Hz fields PLUS the ~26 expanded
+                            #         model/DSP fields (MAEST embeddings, sliding
+                            #         genre/mood/instrument, arousal-valence,
+                            #         attack transients, stereo width, Bark/ERB,
+                            #         chroma_linmap/chords, EBU-R128, melody
+                            #         height f0). Each lands at its OWN native
+                            #         rate (0.2-100 Hz), recorded in field_rates.
+                            # false = base fields only. Much faster, much less
+                            #         useful downstream. Only set false if you
+                            #         specifically want just beats/RMS/HPCP.
+
+    workers: 4              # Parallel extraction processes. 4 is the sane value
+                            # on the 9900X: each worker holds its own madmom +
+                            # model state, so RAM (not cores) is the limit.
+                            # 1 = serial, easiest to debug. >6 risks swapping.
+
+    chunk_size: 48          # Tracks handed to a worker pool before it is torn
+                            # down and respawned. Bounds memory growth from the
+                            # model libraries (they leak slowly). Lower = safer
+                            # on RAM, slightly more process-startup overhead.
+
+    chunk_timeout: 1800     # Seconds before a stuck chunk is abandoned and its
+                            # pool killed. 1800 (30 min) comfortably covers 48
+                            # long tracks; raise it if you extract >20 min tracks
+                            # with many workers, lower it to fail faster.
+
+    frame_rate: 100.0       # Base-field frame rate in Hz. 100 Hz (10 ms hop) is
+                            # the CANONICAL value — everything already extracted
+                            # and every consumer assumes it. Changing it makes a
+                            # corpus that will not line up with existing npz
+                            # files. Do not change without a reason.
+
+    hpcp: true              # Extract hpcp_ts, the (N_frames × 12) chroma array.
+                            # It is the single largest field in the npz; set
+                            # false only if you are tight on disk and certain
+                            # nothing downstream wants chroma.
+
+    recursive: false        # false = look for track folders one level under the
+                            #         corpus root (the standard layout that
+                            #         Stage 1 organization produces).
+                            # true  = walk the tree recursively. Needed only for
+                            #         nested/sharded corpora; slower to scan.
+
+    add_fields: false       # INCREMENTAL BACKFILL mode: recompute only fields
+                            # missing from an existing npz, leaving the rest
+                            # alone. Use after the expanded field set grows.
+                            # CAVEAT: it backfills only the EXPANDED set — it
+                            # does NOT re-run the base extractor, so base
+                            # per-stem fields that were skipped because the stems
+                            # arrived late will NEVER be added this way and no
+                            # warning is emitted. If stems landed after the first
+                            # pass, use `overwrite: true` instead.
+
+    overwrite: false        # Re-extract tracks that already have a .TIMESERIES.npz.
+                            # Default false makes the stage resumable and cheap
+                            # to re-run. This is the whole-track flag; the
+                            # separate `overwrite.timeseries` key at the bottom of
+                            # this file controls the PER-CROP SQLite store.
 
   # BPM per crop: when false (default), BPM is propagated from full-mix analysis.
   # Short crops (~12s) are unreliable for independent tempo detection (intros, breakdowns).
@@ -243,7 +346,13 @@ overwrite:
   audiobox: false                # Overwrite existing AudioBox aesthetics
   per_stem_rhythm: false         # Overwrite existing per-stem rhythm features
   per_stem_harmonic: false       # Overwrite existing per-stem harmonic features
-  timeseries: false              # Overwrite existing time-series features
+  timeseries: false              # Overwrite the PER-CROP time-series SQLite store
+                                 # (data/timeseries.db). Does NOT touch the
+                                 # whole-track .npz files — those have their own
+                                 # flag, features.whole_track_timeseries.overwrite.
+  whole_track_timeseries: false  # Overwrite existing <track>.TIMESERIES.npz files.
+                                 # Equivalent to features.whole_track_timeseries.overwrite;
+                                 # either one being true forces re-extraction.
   transcription: false           # Overwrite existing .MID transcriptions
   music_flamingo: false          # Overwrite existing AI descriptions
   metadata: false                # Overwrite existing metadata lookups

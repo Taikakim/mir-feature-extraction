@@ -162,10 +162,28 @@ class MasterPipelineConfig:
     skip_chroma: bool = False
     skip_hpcp_tiv: bool = False
     skip_timbral: bool = False
+    # --- PER-CROP timeseries (SQLite `data/timeseries.db`, 21.53 Hz, T=n_steps,
+    #     keyed by "<track>_<crop>"). This is NOT the whole-track npz store below.
     skip_timeseries: bool = True
     timeseries_n_steps: int = 256
     timeseries_timbral: bool = False
     timeseries_timbral_steps: int = 16
+
+    # --- WHOLE-TRACK timeseries (sub-stage 2f): one <track>.TIMESERIES.npz per
+    #     SOURCE TRACK, 100 Hz base fields + expanded fields at native rates.
+    #     Completely separate store from skip_timeseries above (different
+    #     resolution, different keying, different consumers). DEFAULT ON.
+    skip_whole_track_timeseries: bool = False
+    whole_track_ts_output_dir: Optional[Path] = None   # None => in-folder (default)
+    whole_track_ts_expanded: bool = True
+    whole_track_ts_workers: int = 4
+    whole_track_ts_chunk_size: int = 48
+    whole_track_ts_chunk_timeout: int = 1800
+    whole_track_ts_frame_rate: float = 100.0
+    whole_track_ts_hpcp: bool = True
+    whole_track_ts_recursive: bool = False
+    whole_track_ts_add_fields: bool = False
+    whole_track_ts_overwrite: bool = False
     skip_syncopation: bool = False
     skip_complexity: bool = False
     skip_essentia: bool = False
@@ -274,6 +292,9 @@ class MasterPipelineConfig:
         transcription = data.get('transcription', {})
         cropping = data.get('cropping', {})
         features = data.get('features', {})
+        # Whole-track timeseries block. Distinct from features.timeseries (per-crop
+        # SQLite) — see the comments on both YAML blocks.
+        wtts = features.get('whole_track_timeseries', {}) or {}
         flamingo = data.get('music_flamingo', {})
         metadata = data.get('metadata', {})
         processing = data.get('processing', {})
@@ -345,10 +366,25 @@ class MasterPipelineConfig:
             skip_chroma=not features.get('chroma', True),
             skip_hpcp_tiv=not features.get('hpcp_tiv', True),
             skip_timbral=not features.get('timbral', True),
+            # PER-CROP timeseries -> data/timeseries.db (NOT the whole-track npz)
             skip_timeseries=not features.get('timeseries', {}).get('enabled', False),
             timeseries_n_steps=int(features.get('timeseries', {}).get('n_steps', 256)),
             timeseries_timbral=features.get('timeseries', {}).get('timbral', False),
             timeseries_timbral_steps=int(features.get('timeseries', {}).get('timbral_steps', 16)),
+
+            # WHOLE-TRACK timeseries -> <track>.TIMESERIES.npz (DEFAULT ON)
+            skip_whole_track_timeseries=not wtts.get('enabled', True),
+            whole_track_ts_output_dir=(Path(wtts['output_dir'])
+                                       if wtts.get('output_dir') else None),
+            whole_track_ts_expanded=wtts.get('expanded', True),
+            whole_track_ts_workers=int(wtts.get('workers', 4)),
+            whole_track_ts_chunk_size=int(wtts.get('chunk_size', 48)),
+            whole_track_ts_chunk_timeout=int(wtts.get('chunk_timeout', 1800)),
+            whole_track_ts_frame_rate=float(wtts.get('frame_rate', 100.0)),
+            whole_track_ts_hpcp=wtts.get('hpcp', True),
+            whole_track_ts_recursive=wtts.get('recursive', False),
+            whole_track_ts_add_fields=wtts.get('add_fields', False),
+            whole_track_ts_overwrite=wtts.get('overwrite', False),
             skip_syncopation=not features.get('syncopation', True),
             skip_complexity=not features.get('complexity', True),
             skip_essentia=not features.get('essentia', True),
@@ -475,6 +511,28 @@ class MasterPipelineConfig:
                 'per_stem_harmonic': not self.skip_per_stem_harmonic,
                 'per_stem': not self.skip_per_stem,
                 'per_crop_bpm': self.per_crop_bpm,
+                # PER-CROP timeseries -> data/timeseries.db (21.53 Hz, T=n_steps)
+                'timeseries': {
+                    'enabled': not self.skip_timeseries,
+                    'n_steps': self.timeseries_n_steps,
+                    'timbral': self.timeseries_timbral,
+                    'timbral_steps': self.timeseries_timbral_steps,
+                },
+                # WHOLE-TRACK timeseries -> <track>.TIMESERIES.npz (a DIFFERENT store)
+                'whole_track_timeseries': {
+                    'enabled': not self.skip_whole_track_timeseries,
+                    'output_dir': (str(self.whole_track_ts_output_dir)
+                                   if self.whole_track_ts_output_dir else None),
+                    'expanded': self.whole_track_ts_expanded,
+                    'workers': self.whole_track_ts_workers,
+                    'chunk_size': self.whole_track_ts_chunk_size,
+                    'chunk_timeout': self.whole_track_ts_chunk_timeout,
+                    'frame_rate': self.whole_track_ts_frame_rate,
+                    'hpcp': self.whole_track_ts_hpcp,
+                    'recursive': self.whole_track_ts_recursive,
+                    'add_fields': self.whole_track_ts_add_fields,
+                    'overwrite': self.whole_track_ts_overwrite,
+                },
             },
             'metadata': {
                 'enabled': not self.skip_metadata,
@@ -801,6 +859,21 @@ class MasterPipeline:
                 if shutdown_requested.is_set():
                     return _shutdown_exit()
 
+                # 2f: Whole-track timeseries (features.whole_track_timeseries.enabled,
+                # DEFAULT ON). This catch-up wiring is what makes the stage run on an
+                # already-processed corpus — the shipped default path, where
+                # _run_track_analysis() is bypassed entirely.
+                if not self.config.skip_whole_track_timeseries:
+                    logger.info("[2f] Whole-Track Timeseries (catch-up pass)")
+                    if self.ui: self.ui.set_stage('whole_track_timeseries', 'running')
+                    self._run_whole_track_timeseries(folders)
+                    if self.ui: self.ui.set_stage('whole_track_timeseries', 'done')
+                else:
+                    if self.ui: self.ui.set_stage('whole_track_timeseries', 'skipped')
+
+                if shutdown_requested.is_set():
+                    return _shutdown_exit()
+
                 # 2c: Spotify / MusicBrainz lookup (controlled by metadata.enabled)
                 # Per-source skip logic inside _run_metadata_lookup() ensures
                 # rate-limited Spotify tracks are retried on future runs.
@@ -1107,6 +1180,30 @@ class MasterPipeline:
         if shutdown_requested.is_set():
             logger.info("Shutdown requested — stopping track analysis after rhythm.")
             return
+
+        # Sub-stage 2f: Whole-track timeseries (DEFAULT ON).
+        # MUST come after 2a (stem separation) — the per-stem and melody-height
+        # fields are extracted from the stems, and a missing stem silently drops
+        # its fields from the npz for good.
+        # NOTE: duplicates madmom work that 2b just did — see the docstring of
+        # _run_whole_track_timeseries() for the merge opportunity.
+        if not self.config.skip_whole_track_timeseries:
+            logger.info("\n[2f] Whole-Track Timeseries")
+            if self.ui: self.ui.set_stage('whole_track_timeseries', 'running')
+            self.stats.start_operation('whole_track_timeseries')
+            self._run_whole_track_timeseries(folders)
+            wt_time = self.stats.end_operation('whole_track_timeseries',
+                items_processed=len(folders),
+                audio_duration=self.stats.total_audio_duration)
+            if self.ui: self.ui.set_stage('whole_track_timeseries', 'done')
+            logger.info(fmt_dim(f"    Whole-track timeseries completed in {wt_time:.1f}s"))
+
+            if shutdown_requested.is_set():
+                logger.info("Shutdown requested — stopping track analysis after "
+                            "whole-track timeseries.")
+                return
+        else:
+            if self.ui: self.ui.set_stage('whole_track_timeseries', 'skipped')
 
         # Sub-stage 2c: Metadata lookup (with fingerprinting for Various Artists)
         logger.info("\n[2c] Metadata Lookup")
@@ -1625,6 +1722,118 @@ class MasterPipeline:
         logger.info(progress.finish(
             f"Transcription: {success} new, {skipped} skipped, {failed} failed"
         ))
+
+    def _run_whole_track_timeseries(self, folders: List[Path]):
+        """
+        Sub-stage 2f: whole-track timeseries -> one <track>.TIMESERIES.npz per
+        SOURCE TRACK (default: written in-folder next to full_mix).
+
+        DEFAULT ON (features.whole_track_timeseries.enabled). This is a DIFFERENT
+        store from the per-crop `features.timeseries` SQLite DB: 100 Hz base
+        fields over the whole track (plus expanded fields at their own native
+        rates), sliceable to ANY [start, end] window at consumer time, versus the
+        per-crop DB's fixed 21.53 Hz / T=256 crop-keyed arrays.
+
+        ORDERING: must run AFTER stem separation (2a) — the per-stem fields
+        (onset_envelope_{stem}_ts / rms_{stem}_ts, and the expanded melody-height
+        f0_{other,bass}_ts) come from the separated stems, not the mix. A missing
+        stem SKIPS its fields rather than faking them; a track extracted before
+        its stems landed keeps a permanently thinner field set unless re-run with
+        overwrite (`--add-fields` only backfills the EXPANDED set).
+
+        OPTIMISATION NOTE (deliberately NOT done here): this pass re-runs madmom's
+        beat/downbeat RNNs to obtain `beat_activations_ts` / `downbeat_activations_ts`,
+        and sub-stage 2b (`rhythm/beat_grid.py`) already computes those exact same
+        RNN activations and then DISCARDS them, keeping only the peak-picked beat
+        times. Merging the two passes — have 2b persist its activations and have
+        this stage consume them — would remove a genuinely expensive duplicate
+        forward pass over every track. It is a real optimisation, not a micro-one,
+        but it changes the contract of two modules, so it is left for a dedicated
+        change rather than folded in here.
+
+        The heavy lifting lives in spectral/whole_track_timeseries.run_batch(),
+        which is imported LAZILY: that module mutates ROCm/threading env vars at
+        import time, which would leak into the later GPU stages if imported at
+        module top level.
+        """
+        if self.config.skip_whole_track_timeseries:
+            logger.debug("Whole-track timeseries skipped "
+                         "(features.whole_track_timeseries.enabled: false)")
+            return
+
+        from core.graceful_shutdown import shutdown_requested
+        try:
+            from spectral.whole_track_timeseries import run_batch
+        except ImportError as exc:
+            logger.error(f"Whole-track timeseries unavailable: {exc}")
+            return
+
+        if not folders:
+            logger.info(fmt_dim("    No track folders — nothing to extract"))
+            return
+
+        out_dir = self.config.whole_track_ts_output_dir
+        overwrite = (self.config.whole_track_ts_overwrite
+                     or self.config.should_overwrite('whole_track_timeseries'))
+
+        logger.info(
+            f"Extracting whole-track timeseries for "
+            f"{fmt_notification(str(len(folders)))} tracks "
+            f"(expanded={self.config.whole_track_ts_expanded}, "
+            f"workers={self.config.whole_track_ts_workers}, "
+            f"out={out_dir if out_dir else 'in-folder'})"
+        )
+
+        progress = ProgressBar(len(folders), desc="Whole-track TS")
+        counter = {'n': 0}
+        _wt_start = time.time()
+
+        def _progress_cb(track_name: str, status: str):
+            counter['n'] += 1
+            i = counter['n']
+            if self.ui:
+                elapsed = time.time() - _wt_start
+                rate = i / elapsed if elapsed > 0.5 else 0.0
+                self.ui.set_current(
+                    file=track_name, operation='Whole-track timeseries',
+                    done=i, total=len(folders), rate=rate,
+                )
+            if status not in ('success', 'skipped'):
+                logger.debug(f"Whole-track TS {track_name}: {status}")
+            logger.info(progress.update(min(i, len(folders))))
+
+        try:
+            result = run_batch(
+                self.working_dir,
+                output_dir=out_dir,
+                expanded=self.config.whole_track_ts_expanded,
+                add_fields=self.config.whole_track_ts_add_fields,
+                overwrite=overwrite,
+                workers=self.config.whole_track_ts_workers,
+                chunk_size=self.config.whole_track_ts_chunk_size,
+                chunk_timeout=self.config.whole_track_ts_chunk_timeout,
+                frame_rate=self.config.whole_track_ts_frame_rate,
+                hpcp=self.config.whole_track_ts_hpcp,
+                recursive=self.config.whole_track_ts_recursive,
+                folders=folders,
+                progress_cb=_progress_cb,
+                should_stop=shutdown_requested.is_set,
+            )
+        except Exception as exc:
+            logger.error(f"Whole-track timeseries failed: {exc}")
+            if self.config.verbose:
+                logger.exception(exc)
+            return
+
+        result = result or {}
+        done = result.get('done', 0)
+        skipped = result.get('skipped', 0)
+        failed = result.get('failed', 0)
+        logger.info(progress.finish(
+            f"Whole-track timeseries: {done} new, {skipped} skipped, {failed} failed"
+        ))
+        for failure in (result.get('failures') or [])[:10]:
+            logger.warning(f"    Whole-track TS failure: {failure}")
 
     def _run_metadata_lookup(self, folders: List[Path]):
         """
@@ -3103,6 +3312,8 @@ Config file template: config/master_pipeline.yaml
             if config.skip_organize:         _disabled_stages.add('organize')
             if config.skip_track_analysis:   _disabled_stages.add('track_analysis')
             if config.skip_onset_analysis:   _disabled_stages.add('onset_analysis')
+            if config.skip_whole_track_timeseries:
+                _disabled_stages.add('whole_track_timeseries')
             if config.skip_metadata:         _disabled_stages.update({'metadata_id3', 'metadata_lookup'})
             if config.skip_crops:            _disabled_stages.add('cropping')
             if config.skip_crop_analysis:    _disabled_stages.add('crop_analysis')

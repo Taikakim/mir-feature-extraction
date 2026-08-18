@@ -34,25 +34,57 @@ Beat/downbeat are full-mix concepts, so they are NOT computed per stem.
 Per-frame tonic/key is intentionally omitted (meaningless at 10 ms resolution
 and prohibitively slow over a whole track) — store hpcp and derive key
 downstream over coarse windows if needed.
+
+Entry points:
+    extract_whole_track()  one track  → (data, meta)
+    run_batch()            a corpus   → {"done","skipped","failed","failures"};
+                           the importable batch runner (chunked fresh pools,
+                           per-chunk timeout, quarantine, orphan reap). Callable
+                           in-process — it does not mutate the caller's env.
+    main()                 thin argparse wrapper over run_batch().
 """
 
+import contextlib
 import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 # essentia-tensorflow drags in TensorFlow, which probes for NVIDIA CUDA on this
 # AMD/ROCm box and spams "Could not load libcudart / failed call to cuInit". We
 # only use essentia's CPU HPCP, never TF — silence its logs and skip the GPU
-# probe. Must be set before essentia is imported (below, transitively). Does NOT
-# affect ROCm/HIP (which uses HIP_VISIBLE_DEVICES), so future GPU features are fine.
+# probe. Must be set before essentia is imported (below, transitively).
+#
+# TF_CPP_MIN_LOG_LEVEL is a log-level only (changes no capability), so it is safe
+# to set at module scope. CUDA_VISIBLE_DEVICES is NOT: this module is imported
+# in-process by master_pipeline.py, whose later stages use the GPU, and an empty
+# visible-device list can crash flash_attn at import (MASTER §5). So the CUDA
+# hiding is applied in exactly two places instead:
+#   * script mode (below) — when run as the CLI, `__name__ == "__main__"` is
+#     already true while the module body executes, i.e. before essentia/TF is
+#     imported a few lines down. Preserves the old CLI behaviour exactly.
+#   * worker processes — run_batch() exports it into os.environ only for the
+#     window in which the spawn children are created (they snapshot the parent
+#     env at spawn, before importing anything), then restores the caller's env.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+# Env applied to the worker processes (and to the CLI's own process). See above.
+_WORKER_ENV_SETDEFAULT = {"CUDA_VISIBLE_DEVICES": "", "TF_CPP_MIN_LOG_LEVEL": "3"}
+# Pin BLAS HARD so N workers don't oversubscribe the CPU. Hard-set (not
+# setdefault) to override rocm_env.yaml's OMP_NUM_THREADS=8, which is for
+# single-process GPU training, not this CPU pool; workers re-apply the rocm
+# profile via setdefault, so this 1 wins for the BLAS vars while
+# MIOPEN_FIND_MODE=6 etc. still apply.
+_WORKER_ENV_FORCE = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+                     "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
+
+if __name__ == "__main__":
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -278,12 +310,27 @@ def extract_whole_track(
 
 
 def save_timeseries_npz(out_path: Path, data: Dict[str, np.ndarray], meta: Dict) -> None:
-    """Write {field: array} + JSON meta to a compressed .npz sidecar."""
+    """Write {field: array} + JSON meta to a compressed .npz sidecar, ATOMICALLY.
+
+    tmp + os.replace, same as whole_track_expanded.merge_expanded. Writing in
+    place is not safe here: the resume gate treats "sidecar exists" as "track
+    done", so a run interrupted mid-write (chunk timeout force-kill, Ctrl-C,
+    OOM) used to leave a truncated .npz that every later run then skipped.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {k: v.astype(np.float32) for k, v in data.items()}
     payload["__meta__"] = np.array(json.dumps(meta))
-    np.savez_compressed(str(out_path), **payload)
+    # tmp name must END in .npz — np.savez appends the extension otherwise,
+    # leaving 'x.tmp.npz' while os.replace looks for 'x.tmp' (pilot bug 2026-07-14)
+    tmp = out_path.parent / (out_path.stem + ".tmp.npz")
+    try:
+        np.savez_compressed(str(tmp), **payload)
+        os.replace(tmp, out_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def load_timeseries_npz(path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
@@ -297,6 +344,53 @@ def load_timeseries_npz(path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
 # ---------------------------------------------------------------------------
 # Batch CLI
 # ---------------------------------------------------------------------------
+
+def stem_fields_stale(track_dir: Path, out_path: Path) -> Optional[str]:
+    """Is an EXISTING sidecar missing base per-stem fields that we could compute now?
+
+    Returns None when the sidecar is fine, else a short human-readable reason.
+
+    Why this exists (the 2026-08-17 gotcha, now enforced instead of documented):
+    a track first extracted with only `full_mix` present gets NO per-stem fields
+    (`onset_envelope_{stem}_ts`, `rms_{stem}_ts` — 8 fields for 4 stems). If the
+    stems land later, plain existence-gating marks the track done forever, and
+    `--add-fields` cannot rescue it either: its missing-check is scoped to
+    whole_track_expanded.EXPANDED_FIELDS and never even reports the base fields.
+    So the gate also inspects the sidecar's `__meta__["stems_present"]` and the
+    actual array names, and asks for a FULL re-extract when stems exist on disk
+    now but are absent from the sidecar.
+
+    An unreadable/truncated sidecar also counts as stale (it is not usable, and
+    with the pre-atomic-write save it could be a half-written file).
+    """
+    stems_now = set(find_stem_files(Path(track_dir)))
+    try:
+        with np.load(str(out_path), allow_pickle=False) as z:
+            have = set(z.files)
+            meta = json.loads(str(z["__meta__"])) if "__meta__" in have else {}
+    except Exception as e:
+        return f"unreadable sidecar ({type(e).__name__})"
+    if not stems_now:
+        return None
+    stems_then = set(meta.get("stems_present", []))
+    missing = sorted(
+        s for s in stems_now
+        if s not in stems_then
+        or f"onset_envelope_{s}_ts" not in have
+        or f"rms_{s}_ts" not in have
+    )
+    if missing:
+        return f"stems on disk but not in sidecar: {','.join(missing)}"
+    return None
+
+
+def _stem_recheck_enabled(default: bool = True) -> bool:
+    """Escape hatch for the stems-aware resume gate: MIR_WT_STEM_RECHECK=0."""
+    v = os.environ.get("MIR_WT_STEM_RECHECK")
+    if v is None:
+        return default
+    return v.strip().lower() not in ("0", "false", "no", "off")
+
 
 def _iter_track_dirs(root: Path, recursive: bool = False):
     """Yield track dirs (those containing a full_mix.*). With recursive=True,
@@ -344,12 +438,14 @@ def _apply_rocm_env(yaml_path: str, profile: str) -> None:
 
 def _worker_init(frame_rate: int, do_hpcp: bool,
                  rocm_yaml: str = "", rocm_profile: str = "none",
-                 expanded: bool = False, add_fields: bool = False) -> None:
+                 expanded: bool = False, add_fields: bool = False,
+                 stem_recheck: bool = True) -> None:
     _apply_rocm_env(rocm_yaml, rocm_profile)   # before any (future) torch import
     global _WORKER_BEAT, _WORKER_DOWNBEAT, _WORKER_CFG, _WORKER_EXPANDED
     _WORKER_BEAT, _WORKER_DOWNBEAT = make_madmom_processors()
     _WORKER_CFG = {"frame_rate": frame_rate, "do_hpcp": do_hpcp,
-                   "expanded": expanded, "add_fields": add_fields}
+                   "expanded": expanded, "add_fields": add_fields,
+                   "stem_recheck": stem_recheck}
     if expanded or add_fields:
         from spectral.whole_track_expanded import ExpandedExtractor
         _WORKER_EXPANDED = ExpandedExtractor()   # TF models load lazily on 1st use
@@ -373,6 +469,16 @@ def _process_one(job: Tuple[str, str, bool]) -> Tuple[str, str, object]:
     track_dir, out_path, overwrite = job
     name = Path(track_dir).name
     t0 = time.time()
+    # Stems-aware resume: an existing sidecar written before its stems landed is
+    # NOT done — the base per-stem fields can only come from a full re-extract
+    # (--add-fields cannot add them; see stem_fields_stale). Force overwrite so
+    # both the add-fields branch and the plain-existence branch below re-run.
+    stale = None
+    if not overwrite and Path(out_path).exists() and _WORKER_CFG.get("stem_recheck", True):
+        stale = stem_fields_stale(Path(track_dir), Path(out_path))
+        if stale:
+            logger.warning(f"  {name}: re-extracting — {stale}")
+            overwrite = True
     if _WORKER_CFG.get("add_fields") and Path(out_path).exists() and not overwrite:
         # incremental mode on an existing sidecar: compute only missing
         # expanded fields, merge atomically (legacy fields untouched)
@@ -413,6 +519,281 @@ def _process_one(job: Tuple[str, str, bool]) -> Tuple[str, str, object]:
     finally:
         import gc
         gc.collect()
+
+
+@contextlib.contextmanager
+def _scoped_env(setdefault: Dict[str, str], force: Dict[str, str]):
+    """Apply env vars for the duration of the block, then restore EXACTLY.
+
+    Spawn children snapshot os.environ at creation time, so the parent has to
+    carry these vars while the pools are built. But master_pipeline.py calls
+    run_batch() in-process and its later stages need its own env back:
+    core.rocm_env sets OMP_NUM_THREADS=8 for the GPU stages, and an empty
+    visible-device list can crash flash_attn at import (MASTER §5). Hence
+    set-then-restore rather than a module-scope or main()-scope mutation.
+    """
+    saved: Dict[str, Optional[str]] = {}
+    try:
+        for k, v in setdefault.items():
+            if k not in os.environ:
+                saved[k] = None
+                os.environ[k] = v
+        for k, v in force.items():
+            if os.environ.get(k) != v:
+                saved[k] = os.environ.get(k)
+                os.environ[k] = v
+        yield
+    finally:
+        for k, old in saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
+
+def run_batch(
+    root: Path,
+    *,
+    output_dir: Optional[Path] = None,
+    expanded: bool = True,
+    add_fields: bool = False,
+    overwrite: bool = False,
+    workers: int = 4,
+    chunk_size: int = 48,
+    chunk_timeout: int = 1800,
+    frame_rate: float = 100.0,
+    hpcp: bool = True,
+    recursive: bool = False,
+    folders: Optional[List[Path]] = None,
+    progress_cb: Optional[Callable[[str, str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    # --- extras beyond the pipeline-facing contract (used by the CLI) --------
+    limit: Optional[int] = None,
+    rocm_yaml: str = "",
+    rocm_profile: str = "none",
+    stems_aware_resume: bool = True,
+    print_progress: bool = False,
+) -> dict:
+    """Run the whole-track timeseries extraction over a corpus. Importable.
+
+    This is main()'s former body: chunked fresh pools, per-chunk timeout,
+    poison-job quarantine, orphan reap. main() is now a thin argparse wrapper.
+
+    Args:
+        root: corpus root of <track>/ folders (each with full_mix.* [+ stems]).
+        output_dir: where to write the .npz. None (the DEFAULT) writes
+            in-folder: <track_dir>/<track_dir.name>.TIMESERIES.npz.
+        expanded: also compute whole_track_expanded's field set.
+        add_fields: incremental mode — for existing sidecars compute ONLY the
+            missing EXPANDED fields and merge them in.
+        overwrite: re-extract even where a sidecar exists.
+        workers: worker processes. <=1 runs in-process (no pool).
+        chunk_size: tracks per fresh pool (the essentia/madmom RSS-leak knob).
+        chunk_timeout: seconds before a stuck chunk's workers are force-killed.
+        frame_rate / hpcp: extraction knobs.
+        recursive: walk the whole tree (nested augmentation variant folders).
+        folders: explicit track folders; when given, discovery under root is
+            skipped (root is then only used for logging).
+        progress_cb: called (track_name, status) after every job, where status
+            is "ok" | "skip" | "fail". Exceptions from it are logged, not fatal.
+        should_stop: polled between chunks (and between jobs when workers<=1);
+            True stops cleanly — skip-existing makes the next run resume.
+        limit: process at most N tracks.
+        rocm_yaml / rocm_profile: ROCm env applied inside the workers.
+            Defaults to "none" here (an in-process caller owns its own GPU env);
+            the CLI keeps its historical "training" default.
+        stems_aware_resume: treat a sidecar written before its stems landed as
+            NOT done and re-extract it fully (see stem_fields_stale). Default
+            on; overridable per-call, or globally with MIR_WT_STEM_RECHECK=0.
+        print_progress: emit the CLI's per-track stdout lines.
+
+    Returns:
+        {"done": int, "skipped": int, "failed": int,
+         "failures": [(track_name, error_str), ...]}
+    """
+    root = Path(root)
+    if folders is not None:
+        track_dirs = [Path(f) for f in folders]
+    else:
+        track_dirs = list(_iter_track_dirs(root, recursive))
+    if limit:
+        track_dirs = track_dirs[:limit]
+
+    jobs: List[Tuple[str, str, bool]] = []
+    for td in track_dirs:
+        out = (Path(output_dir) / f"{td.name}.TIMESERIES.npz") if output_dir \
+            else (td / f"{td.name}.TIMESERIES.npz")
+        jobs.append((str(td), str(out), overwrite))
+
+    stem_recheck = stems_aware_resume and _stem_recheck_enabled()
+
+    def _say(msg: str) -> None:
+        """Operational messages: stdout for the CLI, the logger for callers."""
+        if print_progress:
+            print(msg, flush=True)
+        else:
+            logger.warning(msg)
+
+    if print_progress:
+        print(f"Found {len(jobs)} track folders under {root}; {workers} worker(s)")
+
+    done = skipped = failed = processed = 0
+    failures: List[Tuple[str, str]] = []
+
+    def _report(name: str, status: str, info) -> None:
+        nonlocal done, skipped, failed, processed
+        processed += 1
+        if status == "skip":
+            skipped += 1
+        elif status == "ok":
+            done += 1
+            if print_progress:
+                print(f"[{processed}/{len(jobs)}] {name}: {info['n_frames']} frames, "
+                      f"{info['n_fields']} fields, stems={info['stems']} ({info['elapsed']:.1f}s)")
+        else:
+            failed += 1
+            failures.append((name, str(info)))
+            if print_progress:
+                print(f"[{processed}/{len(jobs)}] {name}: FAILED — {info}")
+            else:
+                logger.warning(f"{name}: FAILED — {info}")
+        if progress_cb is not None:
+            try:
+                progress_cb(name, status)
+            except Exception as e:      # a bad callback must not kill the run
+                logger.warning(f"progress_cb raised for {name}: {e}")
+
+    initargs = (frame_rate, hpcp, rocm_yaml, rocm_profile,
+                expanded, add_fields, stem_recheck)
+
+    _announced: set = set()
+
+    def _pending(js):
+        # A job is done once its output npz exists (unless overwriting).
+        # In add-fields mode "done" = sidecar exists AND has every
+        # expanded field (existence alone would mark everything done).
+        # And in EITHER mode a sidecar written before this track's stems
+        # existed is NOT done — only a full re-extract can add the 8 base
+        # per-stem fields, so it is reported (once) and re-queued.
+        out = []
+        for j in js:
+            if j[2] or not Path(j[1]).exists():
+                out.append(j)
+                continue
+            if add_fields:
+                from spectral.whole_track_expanded import missing_expanded_fields
+                if missing_expanded_fields(Path(j[1])):
+                    out.append(j)
+                    continue
+            if stem_recheck:
+                reason = stem_fields_stale(Path(j[0]), Path(j[1]))
+                if reason:
+                    if j[1] not in _announced:
+                        _announced.add(j[1])
+                        _say(f"  re-extract queued: {Path(j[0]).name} — {reason}")
+                    out.append(j)
+                    continue
+        return out
+
+    # Track the pool processes WE created, so the final reap cannot touch an
+    # unrelated multiprocessing child of an in-process caller.
+    spawned: List = []
+
+    with _scoped_env(_WORKER_ENV_SETDEFAULT,
+                     _WORKER_ENV_FORCE if workers > 1 else {}):
+        if workers <= 1:
+            # Single process: apply the full rocm profile (incl. OMP_NUM_THREADS=8).
+            _worker_init(*initargs)
+            # Iterate ALL jobs (not _pending): _process_one does the skip check
+            # itself, and its "skip" returns are what feed the skipped count.
+            for job in jobs:
+                if should_stop is not None and should_stop():
+                    _say("  stop requested — halting (skip-existing resumes)")
+                    break
+                _report(*_process_one(job))
+        else:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            from concurrent.futures import TimeoutError as FTimeout
+            from concurrent.futures.process import BrokenProcessPool
+            # spawn (not fork): essentia pulls in TensorFlow, which deadlocks under fork.
+            ctx = mp.get_context("spawn")
+
+            # Chunked FRESH pools instead of one long-lived pool with
+            # max_tasks_per_child: in-pool worker recycling wedged (all N workers hit
+            # the recycle boundary together and the TF/essentia re-import deadlocked).
+            # A fresh pool per chunk bounds memory (full teardown releases the
+            # essentia/madmom leak) with no in-pool respawn to hang. A per-chunk
+            # as_completed timeout force-kills workers if any single track hangs, and
+            # skip-existing makes every chunk independently resumable.
+            pending = _pending(jobs)
+            while pending:
+                if should_stop is not None and should_stop():
+                    _say("  stop requested — halting between chunks "
+                         "(skip-existing resumes)")
+                    break
+                batch = pending[:chunk_size]
+                ex = ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                                         initializer=_worker_init,
+                                         initargs=initargs)
+                try:
+                    futs = [ex.submit(_process_one, j) for j in batch]
+                    for fut in as_completed(futs, timeout=chunk_timeout):
+                        _report(*fut.result())
+                except FTimeout:
+                    _say(f"\n[chunk timeout >{chunk_timeout}s] a task hung — "
+                         f"killing workers, continuing (skip-existing resumes)")
+                    for p in list(getattr(ex, "_processes", {}).values()):
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+                except BrokenProcessPool:
+                    _say("\n[pool broke] worker died — continuing (skip-existing resumes)")
+                finally:
+                    spawned.extend(getattr(ex, "_processes", {}).values())
+                    ex.shutdown(wait=False, cancel_futures=True)
+
+                new_pending = _pending(pending)
+                if new_pending and len(new_pending) == len(pending):
+                    # Zero progress this chunk → head job is poison; skip to stay unattended.
+                    poison = Path(new_pending[0][0]).name
+                    _say(f"  No progress this chunk; quarantining: {poison}")
+                    failed += 1
+                    failures.append((poison, "quarantined: no progress in chunk"))
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(poison, "fail")
+                        except Exception as e:
+                            logger.warning(f"progress_cb raised for {poison}: {e}")
+                    new_pending = new_pending[1:]
+                pending = new_pending
+
+    # REAP OUR POOLS. `shutdown(wait=False)` above is deliberate -- a stuck worker must not
+    # be able to hang a multi-hour run -- but it means the final chunk's workers are still alive
+    # when the run returns, and they re-parent to init instead of dying. Measured after the
+    # 4461-track f0 backfill: 8 orphans at ~420 MB each, 2.4 GB held indefinitely by processes
+    # whose parent no longer existed. The run had printed "Done:" and given the shell back, so
+    # nothing suggested a third of the box's spare RAM was still spoken for. Same family as
+    # MASTER §5's orphaned-dataloader-worker note, in the MIR producer.
+    # Safe here: every chunk has completed, and save_timeseries_npz writes atomically
+    # (tmp + os.replace), so a terminated worker can at worst leave a .tmp.npz file,
+    # never a truncated sidecar that the resume gate would mistake for a finished one.
+    # We only touch processes from OUR executors (`spawned`), never the caller's other
+    # multiprocessing children -- run_batch is called in-process by master_pipeline.py.
+    reaped = 0
+    for p in spawned:
+        try:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+                reaped += 1
+        except Exception:
+            pass
+    if reaped:
+        _say(f"  reaped {reaped} pool worker(s)")
+
+    return {"done": done, "skipped": skipped, "failed": failed, "failures": failures}
 
 
 def main():
@@ -466,125 +847,25 @@ def main():
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(message)s")
 
-    track_dirs = list(_iter_track_dirs(args.root, args.recursive))
-    if args.limit:
-        track_dirs = track_dirs[:args.limit]
-    jobs: List[Tuple[str, str, bool]] = []
-    for td in track_dirs:
-        out = (args.output_dir / f"{td.name}.TIMESERIES.npz") if args.output_dir \
-            else (td / f"{td.name}.TIMESERIES.npz")
-        jobs.append((str(td), str(out), args.overwrite))
-    print(f"Found {len(jobs)} track folders under {args.root}; {args.workers} worker(s)")
-
-    done = skipped = failed = processed = 0
-
-    def _report(name: str, status: str, info) -> None:
-        nonlocal done, skipped, failed, processed
-        processed += 1
-        if status == "skip":
-            skipped += 1
-        elif status == "ok":
-            done += 1
-            print(f"[{processed}/{len(jobs)}] {name}: {info['n_frames']} frames, "
-                  f"{info['n_fields']} fields, stems={info['stems']} ({info['elapsed']:.1f}s)")
-        else:
-            failed += 1
-            print(f"[{processed}/{len(jobs)}] {name}: FAILED — {info}")
-
-    if args.workers <= 1:
-        # Single process: apply the full rocm profile (incl. OMP_NUM_THREADS=8).
-        _worker_init(args.frame_rate, not args.no_hpcp,
-                     args.rocm_env_yaml, args.rocm_profile,
-                     args.expanded, args.add_fields)
-        for job in jobs:
-            _report(*_process_one(job))
-    else:
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        from concurrent.futures import TimeoutError as FTimeout
-        from concurrent.futures.process import BrokenProcessPool
-        # Pin BLAS HARD so N workers don't oversubscribe the CPU (spawn children
-        # inherit env). Hard-set (not setdefault) to override rocm_env.yaml's
-        # OMP_NUM_THREADS=8, which is for single-process GPU training, not the
-        # CPU pool; workers re-apply the rocm profile via setdefault, so this 1
-        # wins for the BLAS vars while MIOPEN_FIND_MODE=6 etc. still apply.
-        for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                  "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-            os.environ[v] = "1"
-        # spawn (not fork): essentia pulls in TensorFlow, which deadlocks under fork.
-        ctx = mp.get_context("spawn")
-
-        def _pending(js):
-            # A job is done once its output npz exists (unless overwriting).
-            # In add-fields mode "done" = sidecar exists AND has every
-            # expanded field (existence alone would mark everything done).
-            if args.add_fields:
-                from spectral.whole_track_expanded import missing_expanded_fields
-                return [j for j in js
-                        if j[2] or not Path(j[1]).exists()
-                        or missing_expanded_fields(Path(j[1]))]
-            return [j for j in js if j[2] or not Path(j[1]).exists()]
-
-        # Chunked FRESH pools instead of one long-lived pool with
-        # max_tasks_per_child: in-pool worker recycling wedged (all N workers hit
-        # the recycle boundary together and the TF/essentia re-import deadlocked).
-        # A fresh pool per chunk bounds memory (full teardown releases the
-        # essentia/madmom leak) with no in-pool respawn to hang. A per-chunk
-        # as_completed timeout force-kills workers if any single track hangs, and
-        # skip-existing makes every chunk independently resumable.
-        pending = _pending(jobs)
-        while pending:
-            batch = pending[:args.chunk_size]
-            ex = ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx,
-                                     initializer=_worker_init,
-                                     initargs=(args.frame_rate, not args.no_hpcp,
-                                               args.rocm_env_yaml, args.rocm_profile,
-                                               args.expanded, args.add_fields))
-            try:
-                futs = [ex.submit(_process_one, j) for j in batch]
-                for fut in as_completed(futs, timeout=args.chunk_timeout):
-                    _report(*fut.result())
-            except FTimeout:
-                print(f"\n[chunk timeout >{args.chunk_timeout}s] a task hung — "
-                      f"killing workers, continuing (skip-existing resumes)", flush=True)
-                for p in list(getattr(ex, "_processes", {}).values()):
-                    try:
-                        p.kill()
-                    except Exception:
-                        pass
-            except BrokenProcessPool:
-                print("\n[pool broke] worker died — continuing (skip-existing resumes)",
-                      flush=True)
-            finally:
-                ex.shutdown(wait=False, cancel_futures=True)
-
-            new_pending = _pending(pending)
-            if new_pending and len(new_pending) == len(pending):
-                # Zero progress this chunk → head job is poison; skip to stay unattended.
-                print(f"  No progress this chunk; quarantining: "
-                      f"{Path(new_pending[0][0]).name}", flush=True)
-                failed += 1
-                new_pending = new_pending[1:]
-            pending = new_pending
-
-    # REAP THE LAST POOL. `shutdown(wait=False)` above is deliberate -- a stuck worker must not
-    # be able to hang a multi-hour run -- but it means the final chunk's workers are still alive
-    # when main() returns, and they re-parent to init instead of dying. Measured after the
-    # 4461-track f0 backfill: 8 orphans at ~420 MB each, 2.4 GB held indefinitely by processes
-    # whose parent no longer existed. The run had printed "Done:" and given the shell back, so
-    # nothing suggested a third of the box's spare RAM was still spoken for. Same family as
-    # MASTER §5's orphaned-dataloader-worker note, in the MIR producer.
-    # Safe here: every chunk has completed, and the sidecar write is atomic (tmp + os.replace),
-    # so a terminated worker can at worst leave a .tmp file, never a damaged sidecar.
-    import multiprocessing as _mp
-    strays = _mp.active_children()
-    for p in strays:
-        p.terminate()
-        p.join(timeout=5)
-    if strays:
-        print(f"  reaped {len(strays)} pool worker(s)")
-
-    print(f"\nDone: {done} written, {skipped} skipped, {failed} failed")
+    stats = run_batch(
+        args.root,
+        output_dir=args.output_dir,
+        expanded=args.expanded,
+        add_fields=args.add_fields,
+        overwrite=args.overwrite,
+        workers=args.workers,
+        chunk_size=args.chunk_size,
+        chunk_timeout=args.chunk_timeout,
+        frame_rate=args.frame_rate,
+        hpcp=not args.no_hpcp,
+        recursive=args.recursive,
+        limit=args.limit,
+        rocm_yaml=args.rocm_env_yaml,
+        rocm_profile=args.rocm_profile,
+        print_progress=True,
+    )
+    print(f"\nDone: {stats['done']} written, {stats['skipped']} skipped, "
+          f"{stats['failed']} failed")
 
 
 if __name__ == "__main__":
