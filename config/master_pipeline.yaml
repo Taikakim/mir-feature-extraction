@@ -92,6 +92,32 @@ rhythm:
   workers: 10                     # Parallel workers for beat/downbeat detection
 
 # =============================================================================
+# TRANSCRIPTION (audio -> MIDI, sub-stage 2e)
+# =============================================================================
+# OPT-IN and DEFAULT DISABLED. muscriptor transcribes the FULL MIX (it does
+# worse on separated stems) to a <track>/<track>.MID sidecar, alongside
+# .BEATS_GRID / .ONSETS / .DOWNBEATS. Runs as part of track_analysis, or as a
+# catch-up pass when track_analysis: false. Resumable: skips folders that
+# already have a .MID unless overwrite is set.
+#
+# COST: ~76-120s per ~7-minute track on the RX 9070 XT (~4-6x realtime) — an
+# order of magnitude more than any other track feature. Hence opt-in.
+#
+# DATA CAVEAT: the MIDI has FIXED velocity 100 and FIXED tempo 120 BPM. Those
+# are serializer placeholders, NOT measurements. Never derive dynamics from
+# note velocity or tempo/bar positions from the MIDI tempo map — tempo comes
+# from bpm_madmom / bpm_essentia and beats from .BEATS_GRID / .DOWNBEATS.
+#
+# LICENSE: muscriptor's code is MIT but its model WEIGHTS are CC BY-NC 4.0.
+transcription:
+  enabled: false                 # OPT-IN. Set true to produce .MID sidecars.
+  model: medium                  # small | medium | large | local .safetensors | hf:// URL
+  device: cuda                   # cuda | cpu  (null = auto: cuda if available)
+  instruments: []                # Restrict decoding to these muscriptor instrument
+                                 # names; empty = all instruments.
+  overwrite: false               # Re-transcribe folders that already have a .MID
+
+# =============================================================================
 # CROPPING
 # =============================================================================
 cropping:
@@ -218,6 +244,7 @@ overwrite:
   per_stem_rhythm: false         # Overwrite existing per-stem rhythm features
   per_stem_harmonic: false       # Overwrite existing per-stem harmonic features
   timeseries: false              # Overwrite existing time-series features
+  transcription: false           # Overwrite existing .MID transcriptions
   music_flamingo: false          # Overwrite existing AI descriptions
   metadata: false                # Overwrite existing metadata lookups
 

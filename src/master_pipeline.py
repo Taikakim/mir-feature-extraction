@@ -146,6 +146,14 @@ class MasterPipelineConfig:
     rhythm_workers: int = 4  # Parallel workers for beat/downbeat detection
     skip_onset_analysis: bool = False  # When True, skip .ONSETS generation
 
+    # Transcription (audio -> MIDI, sub-stage 2e). OPT-IN: default disabled
+    # because muscriptor costs ~4-6x realtime per track on GPU.
+    skip_transcription: bool = True
+    transcription_model: str = 'medium'    # small | medium | large | path | hf:// URL
+    transcription_device: Optional[str] = None  # None = cuda if available else cpu
+    transcription_instruments: List[str] = field(default_factory=list)
+    transcription_overwrite: bool = False
+
     # Feature settings
     skip_loudness: bool = False
     skip_spectral: bool = False
@@ -263,6 +271,7 @@ class MasterPipelineConfig:
         demucs_legacy = data.get('demucs', {}) # Fallback
         
         rhythm = data.get('rhythm', {})
+        transcription = data.get('transcription', {})
         cropping = data.get('cropping', {})
         features = data.get('features', {})
         flamingo = data.get('music_flamingo', {})
@@ -320,6 +329,13 @@ class MasterPipelineConfig:
             # Rhythm
             rhythm_workers=rhythm.get('workers', 4),
             skip_onset_analysis=not rhythm.get('onsets', True),
+
+            # Transcription (inverted — config has an enabled flag; DEFAULT OFF)
+            skip_transcription=not transcription.get('enabled', False),
+            transcription_model=transcription.get('model', 'medium'),
+            transcription_device=transcription.get('device', None),
+            transcription_instruments=transcription.get('instruments', []) or [],
+            transcription_overwrite=transcription.get('overwrite', False),
 
             # Features
             skip_loudness=not features.get('loudness', True),
@@ -422,6 +438,13 @@ class MasterPipelineConfig:
             'rhythm': {
                 'workers': self.rhythm_workers,
                 'onsets': not self.skip_onset_analysis,
+            },
+            'transcription': {
+                'enabled': not self.skip_transcription,
+                'model': self.transcription_model,
+                'device': self.transcription_device,
+                'instruments': self.transcription_instruments,
+                'overwrite': self.transcription_overwrite,
             },
             'cropping': {
                 'length_samples': self.crop_length_samples,
@@ -792,6 +815,14 @@ class MasterPipeline:
                 if shutdown_requested.is_set():
                     return _shutdown_exit()
 
+                # 2e: MIDI transcription (OPT-IN — transcription.enabled)
+                if not self.config.skip_transcription:
+                    logger.info("[2e] MIDI Transcription (catch-up pass)")
+                    self._run_transcription(folders)
+
+                if shutdown_requested.is_set():
+                    return _shutdown_exit()
+
                 # 2d: First-stage features (loudness, spectral, timbral, etc.)
                 logger.info("[2d] First-Stage Features (catch-up pass)")
                 if self.ui: self.ui.set_stage('first_features', 'running')
@@ -1094,6 +1125,22 @@ class MasterPipeline:
         if shutdown_requested.is_set():
             logger.info("Shutdown requested — stopping track analysis after metadata.")
             return
+
+        # Sub-stage 2e: MIDI transcription (OPT-IN, default off — ~4-6x realtime)
+        # Placed before 2d so a long transcription pass doesn't sit between the
+        # cheap feature pass and cropping; it has its own guard + resume.
+        if not self.config.skip_transcription:
+            logger.info("\n[2e] MIDI Transcription (muscriptor)")
+            self.stats.start_operation('transcription')
+            self._run_transcription(folders)
+            transcribe_time = self.stats.end_operation('transcription',
+                items_processed=len(folders),
+                audio_duration=self.stats.total_audio_duration)
+            logger.info(fmt_dim(f"    MIDI transcription completed in {transcribe_time:.1f}s"))
+
+            if shutdown_requested.is_set():
+                logger.info("Shutdown requested — stopping track analysis after transcription.")
+                return
 
         # Sub-stage 2d: First-stage features (migrated to crops)
         logger.info("\n[2d] First-Stage Features")
@@ -1499,6 +1546,84 @@ class MasterPipeline:
 
         logger.info(progress.finish(
             f"Rhythm: {success} new, {skipped} skipped, {failed} failed"
+        ))
+
+    def _run_transcription(self, folders: List[Path]):
+        """
+        Sub-stage 2e: transcribe each track's full_mix to a <track>.MID sidecar.
+
+        OPT-IN (config transcription.enabled, default false) — muscriptor runs at
+        roughly 4-6x realtime on the GPU, far costlier than any other track-level
+        feature. Skips folders that already have a .MID unless
+        transcription.overwrite is set, so an interrupted run resumes.
+
+        The model is loaded ONCE for the whole batch (mir rule: never per file)
+        and unloaded afterwards so the VRAM is free for the later GPU stages.
+
+        NOTE: the produced MIDI has placeholder velocity (100) and tempo (120);
+        downstream features must not read either. See the module docstring of
+        transcription/muscriptor_transcribe.py.
+        """
+        if self.config.skip_transcription:
+            logger.debug("Transcription skipped (transcription.enabled: false)")
+            return
+
+        from core.graceful_shutdown import shutdown_requested
+        try:
+            from transcription.muscriptor_transcribe import (
+                MuScriptorTranscriber, get_midi_path,
+            )
+        except ImportError as exc:
+            logger.error(f"MIDI transcription unavailable: {exc}")
+            return
+
+        overwrite = (self.config.transcription_overwrite
+                     or self.config.should_overwrite('transcription'))
+        todo = [f for f in folders if overwrite or not get_midi_path(f).exists()]
+
+        if not todo:
+            logger.info(fmt_dim("    All tracks already have .MID — nothing to transcribe"))
+            return
+
+        logger.info(f"Transcribing {fmt_notification(str(len(todo)))} tracks "
+                    f"(model={self.config.transcription_model}, "
+                    f"{len(folders) - len(todo)} already done)")
+
+        transcriber = MuScriptorTranscriber(
+            model=self.config.transcription_model,
+            device=self.config.transcription_device,
+            instruments=self.config.transcription_instruments or None,
+        )
+
+        success = skipped = failed = 0
+        progress = ProgressBar(len(todo), desc="Transcription")
+        _t_start = time.time()
+
+        try:
+            for i, folder in enumerate(todo, 1):
+                if shutdown_requested.is_set():
+                    logger.info("Shutdown requested — stopping transcription.")
+                    break
+                name, status, info = transcriber.transcribe_folder(
+                    folder, overwrite=overwrite)
+                if status == 'success':
+                    success += 1
+                elif status == 'skipped':
+                    skipped += 1
+                else:
+                    failed += 1
+                    logger.debug(f"Transcription {name}: {info}")
+                if self.ui:
+                    elapsed = time.time() - _t_start
+                    rate = i / elapsed if elapsed > 0.5 else 0.0
+                    self.ui.set_current(file=name, operation='MIDI transcription',
+                                        done=i, total=len(todo), rate=rate)
+                logger.info(progress.update(i))
+        finally:
+            transcriber.unload()
+
+        logger.info(progress.finish(
+            f"Transcription: {success} new, {skipped} skipped, {failed} failed"
         ))
 
     def _run_metadata_lookup(self, folders: List[Path]):
