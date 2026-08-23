@@ -21,7 +21,7 @@ import time
 import plotly.graph_objects as go
 from dash import Input, Output, State, dcc, html, no_update
 
-from . import controls, render_client
+from . import bracket, controls, render_client
 
 _HISTORY_CAP = 50
 
@@ -48,8 +48,14 @@ _TIP_DIST_SHIFT = ("Sigma-SCHEDULE WARP (not a model input). Blank = the checkpo
                    "in build_schedule. Leave blank for the model default. "
                    "Length-dependent — duration changes the warp too.")
 _TIP_CKPT = ("Checkpoint journal: server-side recursive scan for *.ckpt / "
-             "*.safetensors (default root /run/media/kim/Mantu1/sa3_lora_runs), "
+             "*.safetensors (default root <eval-drive>/sa3_lora_runs, resolved server-side), "
              "cached by mtime+size. Free-text path overrides the dropdown.")
+_TIP_DIST_MODE = ("Schedule-warp mode when the numeric dist-shift is blank: "
+                  "'default' = the checkpoint's trained sampling_dist_shift; "
+                  "'flux' = the stock length-dependent FluxDistributionShift "
+                  "(breathing_v2_blockbuild convention). A non-blank number "
+                  "always wins (constant-alpha Flux override).")
+_MUT_OPS = ("shuffle", "drift", "blur", "contrast", "tilt", "life")
 
 
 def layout() -> html.Div:
@@ -112,6 +118,12 @@ def layout() -> html.Div:
                       style={"textDecoration": "underline dotted"}),
             dcc.Input(id="inf-dist-shift", type="number", value=None,
                       placeholder="ckpt default", style={"width": "90px"}),
+            html.Span("mode", title=_TIP_DIST_MODE,
+                      style={"textDecoration": "underline dotted"}),
+            dcc.Dropdown(id="inf-dist-mode", clearable=False, value="default",
+                         options=[{"label": m, "value": m}
+                                  for m in ("default", "flux")],
+                         style={"width": "110px", "display": "inline-block"}),
         ], style={"display": "flex", "gap": "6px", "alignItems": "center",
                   "flexWrap": "wrap", "marginTop": "8px"}),
         html.Div([
@@ -143,11 +155,14 @@ def layout() -> html.Div:
         ], style={"marginTop": "8px"}),
         controls.steering_panel("inf", dora_default="none"),
         html.Details([
-            html.Summary("Weight garden — shuffle (the databending op that works)"),
+            html.Summary("Weight garden — DiT weight mutations (databending)"),
             dcc.Checklist(id="inf-mut-on",
                           options=[{"label": " enable (rebuilds model)", "value": "on"}],
                           value=[]),
-            html.Span("amount (fraction shuffled)"),
+            html.Span("op (shuffle = the proven-musical one)"),
+            dcc.Dropdown(id="inf-mut-op", clearable=False, value="shuffle",
+                         options=[{"label": o, "value": o} for o in _MUT_OPS]),
+            html.Span("amount (fraction mutated)"),
             dcc.Slider(id="inf-mut-amount", min=0.05, max=1.0, step=0.05, value=0.25,
                        marks={0.05: "0.05", 0.25: "0.25", 0.5: "0.5", 1.0: "1"}),
             html.Span("target"),
@@ -162,6 +177,11 @@ def layout() -> html.Div:
             html.Span("decay rate"),
             dcc.Slider(id="inf-mut-decay-rate", min=0.0, max=1.0, step=0.1, value=0.5,
                        marks={0: "0", 0.5: "0.5", 1: "1"}),
+            html.Span("life quantile (alive |w| threshold; life op only)"),
+            dcc.Slider(id="inf-mut-quantile", min=0.05, max=0.99, step=0.01,
+                       value=0.75,
+                       marks={0.05: "0.05", 0.5: "0.5", 0.75: "0.75",
+                              0.99: "0.99"}),
         ], open=False),
         html.Details([
             html.Summary("Rhythm preserve — selection steering (a2a only)"),
@@ -181,6 +201,7 @@ def layout() -> html.Div:
             dcc.Slider(id="inf-pres-until", min=0.1, max=1.0, step=0.05, value=0.5,
                        marks={0.1: "0.1", 0.5: "0.5", 1.0: "1"}),
         ], open=False),
+        bracket.layout(),
         html.Button("Render", id="inf-render-btn"),
         html.Pre(id="inf-status", style={"whiteSpace": "pre-wrap"}),
         html.Div(id="inf-result"),
@@ -216,6 +237,112 @@ def _full_prompt(base: str | None, variation: str | None) -> str:
     return b or v
 
 
+def resolve_dist_shift_value(dist_shift, dist_mode):
+    """Payload/`/schedule` dist_shift from the numeric + mode pair: a non-blank
+    number always wins (constant-alpha Flux); else mode 'flux' -> the string
+    "flux" (stock length-dependent warp); else None (= ckpt default, key
+    omitted from payloads)."""
+    if dist_shift not in (None, ""):
+        return float(dist_shift)
+    if dist_mode == "flux":
+        return "flux"
+    return None
+
+
+# ids consumed by build_payload, in order (the bracket panel snapshots the
+# same form through form_states(); keep the two in lockstep)
+_FORM_IDS = ("inf-prompt", "inf-variation", "inf-negprompt", "inf-duration",
+             "inf-steps", "inf-cfg", "inf-cfg-interval", "inf-seed",
+             "inf-batch", "inf-apg", "inf-durpad", "inf-dist-shift",
+             "inf-dist-mode", "inf-ckpt-dd", "inf-ckpt-path", "inf-init-path",
+             "inf-init-noise", "inf-noise-ladder",
+             "inf-mut-on", "inf-mut-op", "inf-mut-amount", "inf-mut-target",
+             "inf-mut-seed", "inf-mut-decay", "inf-mut-decay-rate",
+             "inf-mut-quantile",
+             "inf-pres-on", "inf-pres-head", "inf-pres-k", "inf-pres-until")
+
+
+def form_states() -> list[State]:
+    """The full render form as Dash States: the 30 plain fields above followed
+    by the frozen 35-value steering contract (consumed as-is — new features
+    ride their own State groups, per the contract note in controls.py)."""
+    return ([State(i, "value") for i in _FORM_IDS]
+            + controls.steering_states("inf"))
+
+
+def build_payload(vals) -> tuple[str, dict]:
+    """form_states() values -> (op, payload) exactly as the Render button sends
+    them (op routing: non-empty init path -> a2a_track, else generate). Shared
+    by the single-render callback and the bracket fan-out so the two cannot
+    drift. Raises ValueError on an empty prompt / bad ladder / steering error."""
+    (base_prompt, variation, negprompt, duration, steps, cfg, cfg_interval,
+     seed, batch, apg, durpad, dist_shift, dist_mode, ckpt_dd, ckpt_path,
+     init_path, init_noise, ladder,
+     mut_on, mut_op, mut_amount, mut_target, mut_seed, mut_decay,
+     mut_decay_rate, mut_quantile,
+     pres_on, pres_head, pres_k, pres_until) = \
+        vals[:len(_FORM_IDS)]
+    steer = list(vals[len(_FORM_IDS):])
+    prompt = _full_prompt(base_prompt, variation)
+    if not prompt:
+        raise ValueError("error: prompt is empty")
+    try:
+        steering = controls.steering_payload(steer)
+    except Exception as e:
+        raise ValueError(f"steering error: {e}") from e
+    lo, hi = (cfg_interval or [0.0, 1.0])
+    common = {"steps": int(steps or 24), "cfg_scale": float(cfg or 6.0),
+              "seed": int(seed if seed is not None else -1),
+              "cfg_interval": [float(lo), float(hi)],
+              "apg_scale": float(apg if apg is not None else 1.0)}
+    ds = resolve_dist_shift_value(dist_shift, dist_mode)
+    if ds is not None:
+        common["dist_shift"] = ds
+    ckpt = (ckpt_path or "").strip() or (ckpt_dd or "").strip()
+    if ckpt:
+        common["ckpt_path"] = ckpt
+    if mut_on and "on" in mut_on:
+        common["mutate"] = {"enabled": True,
+                            "op": mut_op or "shuffle",
+                            "amount": float(mut_amount or 0.25),
+                            "target": mut_target or "attn",
+                            "seed": int(mut_seed or 1234),
+                            "decay_rate": float(mut_decay_rate
+                                                if mut_decay_rate is not None else 0.5),
+                            "decay_direction": mut_decay or "late",
+                            # resolve_mutate reads this for op=life only
+                            "quantile": float(mut_quantile
+                                              if mut_quantile is not None else 0.75)}
+    if (init_path or "").strip():
+        op = "a2a_track"
+        payload = {"audio_path": init_path.strip(),
+                   "prompt": prompt,
+                   "noise_level": float(init_noise or 0.4),
+                   **common, **steering}
+        try:
+            levels = _parse_ladder(ladder)
+        except ValueError:
+            raise ValueError(f"bad noise ladder: {ladder!r}") from None
+        if levels:
+            payload["noise_levels"] = levels
+        if pres_on and "on" in pres_on:
+            payload["preserve"] = {"enabled": True,
+                                   "head": pres_head or "onset_envelope",
+                                   "k": int(pres_k or 4),
+                                   "until": float(pres_until
+                                                  if pres_until is not None else 0.5)}
+    else:
+        op = "generate"
+        payload = {"prompt": prompt,
+                   "negative_prompt": negprompt or "",
+                   "duration": float(duration or 47),
+                   "batch_size": int(batch or 1),
+                   "duration_padding_sec": float(
+                       durpad if durpad is not None else 6.0),
+                   **common, **steering}
+    return op, payload
+
+
 def _sigma_figure(steps, duration, dist_shift, interval, cfg,
                   latch_windows) -> go.Figure:
     """Plotly port of interface/diffusion_cond.py:create_sigma_chart.
@@ -228,7 +355,7 @@ def _sigma_figure(steps, duration, dist_shift, interval, cfg,
     """
     steps = max(1, int(steps or 24))
     duration = float(duration or 47)
-    ds = None if dist_shift in (None, "") else float(dist_shift)
+    ds = dist_shift          # resolved value: float | "flux" | None
     lo, hi = (interval or [0.0, 1.0])
     lo, hi = float(lo), float(hi)
 
@@ -284,6 +411,7 @@ def _sigma_figure(steps, duration, dist_shift, interval, cfg,
 
 def register_callbacks(app) -> None:
     controls.register(app, "inf")
+    bracket.register(app, form_states, build_payload)
 
     @app.callback(Output("inf-server-badge", "children"),
                   Input("inf-interval", "n_intervals"))
@@ -325,12 +453,14 @@ def register_callbacks(app) -> None:
         Input("inf-steps", "value"),
         Input("inf-duration", "value"),
         Input("inf-dist-shift", "value"),
+        Input("inf-dist-mode", "value"),
         Input("inf-cfg-interval", "value"),
         Input("inf-cfg", "value"),
         *[Input(f"inf-ctl-latch{i}-{s}", "value")
           for i in range(1, controls.LATCH_SLOTS + 1)
           for s in ("head", "start", "end")])
-    def _sigma_chart(steps, duration, dist_shift, interval, cfg, *latch):
+    def _sigma_chart(steps, duration, dist_shift, dist_mode, interval, cfg,
+                     *latch):
         windows = []
         for i in range(controls.LATCH_SLOTS):
             head, start, end = latch[i * 3:(i + 1) * 3]
@@ -338,102 +468,23 @@ def register_callbacks(app) -> None:
                 continue
             windows.append((start if start is not None else 0.0,
                             end if end is not None else 0.6))
-        return _sigma_figure(steps, duration, dist_shift, interval, cfg,
-                             windows)
+        ds = resolve_dist_shift_value(dist_shift, dist_mode)
+        return _sigma_figure(steps, duration, ds, interval, cfg, windows)
 
     @app.callback(
         Output("inf-result", "children"),
         Output("inf-history", "data"),
         Output("inf-status", "children"),
         Input("inf-render-btn", "n_clicks"),
-        State("inf-prompt", "value"),
-        State("inf-variation", "value"),
-        State("inf-negprompt", "value"),
-        State("inf-duration", "value"),
-        State("inf-steps", "value"),
-        State("inf-cfg", "value"),
-        State("inf-cfg-interval", "value"),
-        State("inf-seed", "value"),
-        State("inf-batch", "value"),
-        State("inf-apg", "value"),
-        State("inf-durpad", "value"),
-        State("inf-dist-shift", "value"),
-        State("inf-ckpt-dd", "value"),
-        State("inf-ckpt-path", "value"),
-        State("inf-init-path", "value"),
-        State("inf-init-noise", "value"),
-        State("inf-noise-ladder", "value"),
-        State("inf-mut-on", "value"),
-        State("inf-mut-amount", "value"),
-        State("inf-mut-target", "value"),
-        State("inf-mut-seed", "value"),
-        State("inf-mut-decay", "value"),
-        State("inf-mut-decay-rate", "value"),
-        State("inf-pres-on", "value"),
-        State("inf-pres-head", "value"),
-        State("inf-pres-k", "value"),
-        State("inf-pres-until", "value"),
+        *form_states(),
         State("inf-history", "data"),
-        *controls.steering_states("inf"),
         prevent_initial_call=True)
-    def _render(_n, base_prompt, variation, negprompt, duration, steps, cfg,
-                cfg_interval, seed, batch, apg, durpad, dist_shift,
-                ckpt_dd, ckpt_path, init_path, init_noise, ladder,
-                mut_on, mut_amount, mut_target, mut_seed, mut_decay, mut_decay_rate,
-                pres_on, pres_head, pres_k, pres_until, history,
-                *steer):
-        prompt = _full_prompt(base_prompt, variation)
-        if not prompt:
-            return no_update, no_update, "error: prompt is empty"
+    def _render(_n, *vals):
+        history = vals[-1]
         try:
-            steering = controls.steering_payload(list(steer))
-        except Exception as e:
-            return no_update, no_update, f"steering error: {e}"
-        lo, hi = (cfg_interval or [0.0, 1.0])
-        common = {"steps": int(steps or 24), "cfg_scale": float(cfg or 6.0),
-                  "seed": int(seed if seed is not None else -1),
-                  "cfg_interval": [float(lo), float(hi)],
-                  "apg_scale": float(apg if apg is not None else 1.0)}
-        if dist_shift not in (None, ""):
-            common["dist_shift"] = float(dist_shift)
-        ckpt = (ckpt_path or "").strip() or (ckpt_dd or "").strip()
-        if ckpt:
-            common["ckpt_path"] = ckpt
-        if mut_on and "on" in mut_on:
-            common["mutate"] = {"enabled": True,
-                                "amount": float(mut_amount or 0.25),
-                                "target": mut_target or "attn",
-                                "seed": int(mut_seed or 1234),
-                                "decay_rate": float(mut_decay_rate
-                                                    if mut_decay_rate is not None else 0.5),
-                                "decay_direction": mut_decay or "late"}
-        if (init_path or "").strip():
-            op = "a2a_track"
-            payload = {"audio_path": init_path.strip(),
-                       "prompt": prompt,
-                       "noise_level": float(init_noise or 0.4),
-                       **common, **steering}
-            try:
-                levels = _parse_ladder(ladder)
-            except ValueError:
-                return no_update, no_update, f"bad noise ladder: {ladder!r}"
-            if levels:
-                payload["noise_levels"] = levels
-            if pres_on and "on" in pres_on:
-                payload["preserve"] = {"enabled": True,
-                                       "head": pres_head or "onset_envelope",
-                                       "k": int(pres_k or 4),
-                                       "until": float(pres_until
-                                                      if pres_until is not None else 0.5)}
-        else:
-            op = "generate"
-            payload = {"prompt": prompt,
-                       "negative_prompt": negprompt or "",
-                       "duration": float(duration or 47),
-                       "batch_size": int(batch or 1),
-                       "duration_padding_sec": float(
-                           durpad if durpad is not None else 6.0),
-                       **common, **steering}
+            op, payload = build_payload(list(vals[:-1]))
+        except ValueError as e:
+            return no_update, no_update, str(e)
         try:
             resp = render_client.render(op, payload)
         except render_client.RenderError as e:
@@ -442,7 +493,7 @@ def register_callbacks(app) -> None:
         files = resp.get("files", [])
         entry = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                  "op": op,
-                 "label": prompt[:60],
+                 "label": payload["prompt"][:60],
                  "urls": urls, "files": files,
                  "meta": resp.get("meta", {})}
         history = ([entry] + (history or []))[:_HISTORY_CAP]

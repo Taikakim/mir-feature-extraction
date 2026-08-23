@@ -21,7 +21,7 @@ LAUNCH_HINT = (
     "  .venv/bin/python eval/explorer_render_server.py --port 8056"
 )
 
-_OPS = {"generate", "a2a_track", "a2a_mix", "decode"}
+_OPS = {"generate", "a2a_track", "a2a_mix", "decode", "longform", "bend"}
 
 
 def _base_url() -> str:
@@ -103,10 +103,26 @@ def audio_url(rel: str) -> str:
     return BASE + rel
 
 
+def longform(payload: dict, timeout: float = 7200.0) -> dict:
+    """POST /longform — prompt-ARC rendering (steered_longform arc grammar
+    '0:promptA|45:promptB|...'). With `audio_path` the server runs the windowed
+    a2a arc loop; without it the t2a LongFormRenderer path (`duration`).
+    Longer default timeout: many windows per job."""
+    return render("longform", payload, timeout=timeout)
+
+
+def bend(payload: dict, timeout: float = 600.0) -> dict:
+    """POST /bend — latent data-bending then decode. Payload:
+    {"crop_id" | "latent_path", "latent_dir": optional, "seed": int,
+    "ops": [{"op": ..., "amount": ..., + op keys}, ...]}
+    (eval/latent_bend.py spec grammar, mirrors weight_mutations)."""
+    return render("bend", payload, timeout=timeout)
+
+
 def ckpts(rescan: bool = False, root: str | None = None,
           timeout: float = 60.0) -> dict | None:
     """GET /ckpts — checkpoint journal (recursive *.ckpt / *.safetensors scan
-    of the server-side target folder, default /run/media/kim/Mantu1/sa3_lora_runs,
+    of the server-side target folder, default <eval-drive>/sa3_lora_runs (resolved server-side; the drive is removable and mounts as Mantu or Mantu1),
     cached to a json journal keyed on mtime+size).
 
     Params: rescan=1 forces a fresh walk; root overrides the scan folder.
@@ -126,19 +142,22 @@ def ckpts(rescan: bool = False, root: str | None = None,
 _SCHED_CACHE: dict[tuple, list[float]] = {}
 
 
-def schedule(steps: int, duration: float, dist_shift: float | None = None,
+def schedule(steps: int, duration: float,
+             dist_shift: float | str | None = None,
              sigma_max: float = 1.0, timeout: float = 10.0) -> list[float] | None:
     """POST /schedule — the real run sigma schedule (build_schedule with the
     model's sampling_dist_shift unless dist_shift is given; length steps+1,
     descending sigma_max→0).
 
     Payload: {"steps": int, "duration": float (seconds; dist_shift is
-    length-dependent), "dist_shift": float|null (null = model default),
-    "sigma_max": float}. Response: {"sigmas": [float, ...]}.
+    length-dependent), "dist_shift": float|"flux"|null (null = model default,
+    "flux" = stock length-dependent FluxDistributionShift, float = constant
+    alpha), "sigma_max": float}. Response: {"sigmas": [float, ...]}.
     Memoized per argument tuple; None when the server is unreachable (callers
     should fall back to a linear ramp and say so)."""
-    key = (int(steps), float(duration),
-           None if dist_shift is None else float(dist_shift), float(sigma_max))
+    if dist_shift is not None and not isinstance(dist_shift, str):
+        dist_shift = float(dist_shift)
+    key = (int(steps), float(duration), dist_shift, float(sigma_max))
     if key in _SCHED_CACHE:
         return _SCHED_CACHE[key]
     try:
