@@ -7,7 +7,7 @@ from . import latents, analysis, viewer_tab, dataset_tab, analysis_tab, audio_pa
 from . import player_client as pc
 from .sidecar_index import CropMeta, group_by_track
 from .scalar_cache import ScalarCache
-from . import inference_tab, a2a_tab
+from . import inference_tab, a2a_tab, bend_tab
 
 
 SCALAR_FIELDS = ["bpm", "lufs", "rel_pos"]
@@ -167,3 +167,4 @@ def register(app, index: list[CropMeta], latent_dir: Path):
 
     inference_tab.register_callbacks(app)
     a2a_tab.register_callbacks(app, index, latent_dir)
+    bend_tab.register_callbacks(app, index, latent_dir)

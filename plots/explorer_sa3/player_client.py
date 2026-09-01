@@ -1,11 +1,16 @@
 """URL builders + reachability check for the SAME decode player.
 
-Defaults to the low-VRAM ONNX server `latent_server_onnx.py` (port 7893): ~2 GB VRAM,
-so it can decode/mix/source alongside a running training job without OOM. It has
-**no /steer** (LatCH steering needs the torch DiT/heads). For steering, set
-`SA3_PLAYER_PORT=7892` to use the torch player `latent_server_sa3.py` (full incl.
-/steer); `SA3_PLAYER_BASE` overrides the whole base URL. NB: the ONNX server does a
-~9-min MIGraphX compile at boot — start it once, long-lived.
+Defaults to the RENDER SERVER (port 8056, `SAO/eval/explorer_render_server.py`),
+which already holds SAME-L resident as `MODEL.model.pretransform`. Before
+2026-08-25 this pointed at a standalone player that loaded a *second* copy of
+the same weights (7.12 GB on a 16 GB card); those GET endpoints (`/decode
+/source /mix /steer /crops /meta`) were moved onto the render server unchanged,
+so only this base URL differs.
+
+Overrides: `SA3_PLAYER_PORT=7893` selects the low-VRAM ONNX player
+`latent_server_onnx.py` (~2 GB, decodes alongside a training job, but has **no
+/steer** -- LatCH steering needs the torch heads; NB ~9-min MIGraphX compile at
+boot, so start it once, long-lived). `SA3_PLAYER_BASE` overrides the whole URL.
 """
 from __future__ import annotations
 import os
@@ -13,7 +18,7 @@ from urllib.parse import urlencode
 
 BASE = os.environ.get(
     "SA3_PLAYER_BASE",
-    f"http://localhost:{os.environ.get('SA3_PLAYER_PORT', '7893')}")
+    f"http://localhost:{os.environ.get('SA3_PLAYER_PORT', '8056')}")
 
 
 def decode_url(crop_id: str) -> str:

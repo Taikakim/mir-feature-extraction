@@ -114,7 +114,9 @@ def register_coact(app, index, latent_dir):
                   Output("sa3-coact-feat", "options"),
                   Input("sa3-analysis-go", "n_clicks"))
     def _fill(_n):
-        crops = [{"label": c.stem, "value": c.stem} for c in index[:4000]]
+        # index holds CropMeta (sidecar_index.py:9), not Paths — .id is the crop
+        # stem. Was c.stem, which raised AttributeError and 500d this callback.
+        crops = [{"label": c.id, "value": c.id} for c in index[:4000]]
         feats = [{"label": k, "value": k} for k in sorted(dim_corr_table())]
         return crops, feats
 

@@ -120,19 +120,157 @@ def bend(payload: dict, timeout: float = 600.0) -> dict:
 
 
 def ckpts(rescan: bool = False, root: str | None = None,
-          timeout: float = 60.0) -> dict | None:
+          root_ids: list[str] | None = None, timeout: float = 60.0) -> dict | None:
     """GET /ckpts — checkpoint journal (recursive *.ckpt / *.safetensors scan
     of the server-side target folder, default <eval-drive>/sa3_lora_runs (resolved server-side; the drive is removable and mounts as Mantu or Mantu1),
     cached to a json journal keyed on mtime+size).
 
-    Params: rescan=1 forces a fresh walk; root overrides the scan folder.
+    Params: rescan=1 forces a fresh walk; root overrides the single scan folder;
+    root_ids=["lumi_uuid", ...] returns the MERGED listing across those configured
+    roots, each entry tagged with root_id/family/label/epoch/step/rank/corpus/verdict.
     Response: {"root": str, "ckpts": [{"path": str, "size": int, "mtime": float},
     ...]}. Returns None when the server is unreachable."""
     params: dict = {"rescan": int(bool(rescan))}
     if root:
         params["root"] = root
+    if root_ids:
+        params["root_ids"] = ",".join(root_ids)
     try:
         r = requests.get(f"{BASE}/ckpts", params=params, timeout=timeout)
+        # A 404 here is not "server down" -- it is the server telling us the scan
+        # root is an unmounted removable drive, and it names which. Pass that body
+        # through so the picker can say so instead of blaming the connection.
+        if r.status_code == 404:
+            try:
+                return r.json()
+            except ValueError:
+                pass
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def slots(timeout: float = 10.0) -> dict | None:
+    """GET /slots — the resident adapter table + VRAM budget."""
+    try:
+        r = requests.get(f"{BASE}/slots", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def set_slots(specs: list[dict], activate: int | None = None,
+              timeout: float = 300.0) -> dict:
+    """POST /slots — declare the resident adapter SET.
+
+    specs: [{"ckpt_path": str, "label": str?}]. Changing the set costs one
+    remove+reload; switching between resident slots afterwards costs nothing
+    (measured: 1.7 s per A/B render vs a multi-GB reload). Raises RenderError with
+    the server's own reason on refusal — over the VRAM floor, over max_slots, or a
+    fullft path, which replaces the backbone rather than augmenting it."""
+    body = {"slots": specs}
+    if activate is not None:
+        body["activate"] = int(activate)
+    try:
+        r = requests.post(f"{BASE}/slots", json=body, timeout=timeout)
+    except Exception as e:
+        raise RenderError(f"render server unreachable: {e}") from e
+    j = r.json() if r.content else {}
+    if r.status_code >= 400 or not j.get("ok"):
+        raise RenderError(j.get("reason") or j.get("error")
+                          or j.get("detail") or f"HTTP {r.status_code}")
+    return j
+
+
+def ab(payload: dict, timeout: float = 7200.0) -> dict:
+    """POST /ab — one payload rendered across resident slots, ONE shared seed, so
+    the arms differ only by the model. `null` in ab.slots is the bare base: the
+    control arm, and the one you actually need."""
+    try:
+        r = requests.post(f"{BASE}/ab", json=payload, timeout=timeout)
+    except Exception as e:
+        raise RenderError(f"render server unreachable: {e}") from e
+    j = r.json() if r.content else {}
+    if r.status_code >= 400 or not j.get("ok"):
+        raise RenderError(j.get("reason") or j.get("error")
+                          or j.get("detail") or f"HTTP {r.status_code}")
+    return j
+
+
+def presets_list(timeout: float = 5.0) -> list[dict] | None:
+    """GET /presets — named render recipes, newest first. None when unreachable."""
+    try:
+        r = requests.get(f"{BASE}/presets", timeout=timeout)
+        r.raise_for_status()
+        return r.json().get("presets", [])
+    except Exception:
+        return None
+
+
+def preset_load(name: str, timeout: float = 5.0) -> dict | None:
+    """GET /presets/<name> — {"schema","name","notes","created","payload",
+    "form"?}. `form` is the viewer snapshot; presets written by a CLI have none."""
+    try:
+        r = requests.get(f"{BASE}/presets/{name}", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def preset_save(name: str, payload: dict, notes: str = "",
+                form: dict | None = None, timeout: float = 10.0) -> dict | None:
+    """POST /presets. seed/batch_size are stripped server-side: a preset is a
+    recipe, and a pinned seed would make a sweep's seed axis a silent no-op."""
+    body = {"name": name, "payload": payload, "notes": notes}
+    if form:
+        body["form"] = form
+    try:
+        r = requests.post(f"{BASE}/presets", json=body, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def roots(timeout: float = 10.0) -> dict | None:
+    """GET /roots — the configured checkpoint roots plus live availability.
+
+    Response: {"ok": True, "roots": [{"id","label","path","available","count",
+    ...}], "stale_root_ids": [...]}. A removable drive that is not mounted comes
+    back available=false rather than as an error, so the picker can grey it out
+    instead of losing its entries. None when the server is unreachable."""
+    try:
+        r = requests.get(f"{BASE}/roots", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def models(root_ids: list[str] | str | None = None, family: str | None = None,
+           corpus: str | None = None, q: str | None = None,
+           loadable: bool | None = None, rescan: bool = False,
+           timeout: float = 60.0) -> dict | None:
+    """GET /models — the model database across every configured root.
+
+    family is one of ckpt_probe.FAMILIES: adapter | fullft | control_adapter |
+    latch_head | unknown. Response: {"ok": True, "count": int, "models":
+    [{"id","path","label","family","corpus","loadable","root_id",...}]}.
+    None when the server is unreachable."""
+    params: dict = {"rescan": int(bool(rescan))}
+    if root_ids:
+        params["root_ids"] = (root_ids if isinstance(root_ids, str)
+                              else ",".join(root_ids))
+    for k, v in (("family", family), ("corpus", corpus), ("q", q)):
+        if v:
+            params[k] = v
+    if loadable is not None:
+        params["loadable"] = int(bool(loadable))
+    try:
+        r = requests.get(f"{BASE}/models", params=params, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception:

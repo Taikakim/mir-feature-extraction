@@ -18,9 +18,11 @@ def test_steer_url():
                  "crop=000003&head=hpcp&gain=64.0")
 
 
-def test_default_is_onnx_port():
-    # default player is now the low-VRAM ONNX server (7893), not torch (7892);
-    # overridable via SA3_PLAYER_PORT / SA3_PLAYER_BASE.
+def test_default_is_the_render_server():
+    # 2026-08-25: the standalone torch player (7892) is retired -- it held a
+    # SECOND resident SAME-L (7.12 GB). Its GET endpoints now live on the render
+    # server (8056), which already holds that autoencoder. SA3_PLAYER_PORT=7893
+    # still reaches the low-VRAM ONNX player; SA3_PLAYER_BASE overrides all.
     import os
     if "SA3_PLAYER_PORT" not in os.environ and "SA3_PLAYER_BASE" not in os.environ:
-        assert pc.BASE == "http://localhost:7893"
+        assert pc.BASE == "http://localhost:8056"

@@ -1,5 +1,13 @@
 #!/home/kim/Projects/SAO/stable-audio-3/.venv/bin/python
-"""latent_server_sa3.py — decode SAME-L (256-dim, T=4096) latents to WAV.
+"""latent_server_sa3.py — SUPERSEDED 2026-08-25, DO NOT START.
+
+Its GET endpoints (/status→/player_status /crops /meta /decode /source /mix
+/steer) now live on the render server, SAO/eval/explorer_render_server.py
+:8056, reusing the SAME-L that server already holds as
+MODEL.model.pretransform. This process loaded a SECOND copy of the same
+weights (7.12 GB of a 16 GB card). Kept only as the reference source.
+
+decode SAME-L (256-dim, T=4096) latents to WAV.
 
 Runs under the SA3 venv (py3.13). Endpoints: /status /crops /meta /decode
 /source. /mix and /steer are added in later tasks.

@@ -13,6 +13,12 @@ Guidance for Claude Code when working in this repository.
 > dialogue log auto-mirrors to a public URL for remote review). **Never write secrets** —
 > passwords, API keys/tokens, SSH creds, `.netrc` contents, or credential-revealing paths —
 > into either; keep secrets in the shell/env. (See MASTER §4.)
+>
+> ⚠️ **Also public: attribution.** For entries timestamped **08:00–17:00 Europe/Helsinki**, do not
+> attribute work, requests, decisions or presence to Kim by name in the dialogue log, DM logs or
+> WORKLOG — carry the substance and use "project guidance says" / "the call is" instead. Private
+> files (sidecars, `run_meta`, specs, this repo's docs) are unaffected, and the `kim_feedback`
+> field name is never renamed. Full rule: MASTER §4.
 @/home/kim/Projects/SAO/MASTER.md
 
 ## Project Overview

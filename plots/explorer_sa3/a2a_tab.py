@@ -112,6 +112,25 @@ def layout() -> html.Div:
              dcc.Checklist(id="a2a-pure-basis",
                            options=[{"label": " pure-basis splice", "value": "on"}],
                            value=["on"])),
+        _row(_lbl("interp"),
+             dcc.Dropdown(id="a2a-interp",
+                          options=[{"label": "slerp", "value": "slerp"},
+                                   {"label": "lerp", "value": "lerp"}],
+                          value="slerp", clearable=False,
+                          style={"width": "7em"}),
+             _lbl("construction"),
+             dcc.Dropdown(id="a2a-construction",
+                          options=[{"label": "model", "value": "model"},
+                                   {"label": "latent xfade (no model pass)",
+                                    "value": "latent_xfade"},
+                                   {"label": "audio xfade (v2 baseline)",
+                                    "value": "audio_xfade"}],
+                          value="model", clearable=False,
+                          style={"width": "16em"}),
+             _lbl("eps seed (sinesweep clamp)"),
+             dcc.Input(id="a2a-eps-seed", value=4242, step=1, **_NUM),
+             _lbl("seam eps seed"),
+             dcc.Input(id="a2a-seam-eps-seed", value=2424, step=1, **_NUM)),
         _row(dcc.Checklist(id="a2a-tempo-match",
                            options=[{"label": " tempo match", "value": "on"}],
                            value=["on"]),
@@ -151,7 +170,45 @@ def layout() -> html.Div:
         _row(_lbl("steps"), dcc.Input(id="a2a-steps", value=24, min=1, max=500, **_NUM),
              _lbl("cfg"), dcc.Input(id="a2a-cfg", value=6.0, min=0, max=25,
                                     step=0.1, **_NUM),
-             _lbl("seed"), dcc.Input(id="a2a-seed", value=-1, step=1, **_NUM)),
+             _lbl("seed"), dcc.Input(id="a2a-seed", value=-1, step=1, **_NUM),
+             _lbl("dist shift"),
+             dcc.Dropdown(id="a2a-dist-mode", clearable=False, value="default",
+                          options=[{"label": "default (ckpt)", "value": "default"},
+                                   {"label": "flux", "value": "flux"}],
+                          style={"width": "10em"})),
+
+        html.H4("Prompt ARC / longform"),
+        _row(_lbl("arc schedule — '0:promptA|45:promptB|…' "
+                  "(steered_longform grammar; bare string = single prompt)"),
+             dcc.Textarea(id="a2a-arc-schedule", value="",
+                          placeholder=("0:goa trance intro|45:full-on "
+                                       "psytrance|90:ambient outro"),
+                          style={"flex": "1", "minWidth": "28em",
+                                 "height": "3.2em"})),
+        _row(_lbl("init audio path (blank = t2a longform)"),
+             dcc.Input(id="a2a-arc-init-path", type="text", value="",
+                       style={"minWidth": "20em", "flex": "1"}),
+             _lbl("nl"),
+             dcc.Input(id="a2a-arc-noise", value=0.4, min=0.05, max=0.95,
+                       step=0.01, **_NUM)),
+        _row(_lbl("duration (s, t2a)"),
+             dcc.Input(id="a2a-arc-duration", value=120.0, min=10, max=600,
+                       step=1, **_NUM),
+             _lbl("window (s)"),
+             dcc.Input(id="a2a-arc-window", value=30.0, min=10, max=120,
+                       step=1, **_NUM),
+             _lbl("overlap (s)"),
+             dcc.Input(id="a2a-arc-overlap", value=5.0, min=1, max=30,
+                       step=0.5, **_NUM),
+             _lbl("xfade (s, t2a prompt joins)"),
+             dcc.Input(id="a2a-arc-xfade", value=4.0, min=0, max=20,
+                       step=0.5, **_NUM),
+             html.Button("Longform render", id="a2a-longform-btn",
+                         style={"fontWeight": "bold"})),
+        html.Pre(id="a2a-longform-status",
+                 style={"whiteSpace": "pre-wrap", "fontSize": "0.8em",
+                        "background": "#f6f6f6", "padding": "0.4em"}),
+        html.Div(id="a2a-longform-result"),
 
         controls.steering_panel("a2a", dora_default="evr1x"),
 
@@ -403,6 +460,8 @@ def register_callbacks(app, index, latent_dir) -> None:  # noqa: ARG001 (latent_
         State("a2a-mode", "value"), State("a2a-noise", "value"),
         State("a2a-seam-size", "value"), State("a2a-seam-nl", "value"),
         State("a2a-pure-basis", "value"),
+        State("a2a-interp", "value"), State("a2a-construction", "value"),
+        State("a2a-eps-seed", "value"), State("a2a-seam-eps-seed", "value"),
         State("a2a-tempo-match", "value"), State("a2a-tempo-mode", "value"),
         State("a2a-fine-align", "value"),
         State("a2a-chroma", "value"), State("a2a-chroma-gain", "value"),
@@ -411,16 +470,17 @@ def register_callbacks(app, index, latent_dir) -> None:  # noqa: ARG001 (latent_
         State("a2a-whole-enable", "value"), State("a2a-whole-prompt", "value"),
         State("a2a-whole-noise", "value"),
         State("a2a-steps", "value"), State("a2a-cfg", "value"),
-        State("a2a-seed", "value"),
+        State("a2a-seed", "value"), State("a2a-dist-mode", "value"),
         State("a2a-history", "data"),
         *controls.steering_states("a2a"),
         prevent_initial_call=True)
     def _render(_n, store, a_end, b_start, seg, snap, trans, quant,
                 mode, noise, seam_size, seam_nl, pure_basis,
+                interp, construction, eps_seed, seam_eps_seed,
                 tempo_match, tempo_mode, fine_align,
                 chroma, chroma_gain, guid_end,
                 prompt_region, whole_en, whole_prompt, whole_noise,
-                steps, cfg, seed, history, *steer):
+                steps, cfg, seed, dist_mode, history, *steer):
         store = store or {}
         a, b = store.get("a"), store.get("b")
         if not (a and b):
@@ -443,6 +503,13 @@ def register_callbacks(app, index, latent_dir) -> None:  # noqa: ARG001 (latent_
             "seam_inpaint": int(seam_size or 0),
             "seam_nl": float(seam_nl if seam_nl is not None else 0.35),
             "pure_basis": bool(pure_basis),
+            # crossfade-lab knobs (parity-audit item 6 — server defaults
+            # slerp/model/4242/2424 reproduce the pre-lab behavior)
+            "interp": interp or "slerp",
+            "construction": construction or "model",
+            "eps_seed": int(eps_seed if eps_seed is not None else 4242),
+            "seam_eps_seed": int(seam_eps_seed
+                                 if seam_eps_seed is not None else 2424),
             "chroma_morph": bool(chroma),
             "chroma_gain": float(chroma_gain or 2048.0),
             "guidance_end_pct": float(guid_end if guid_end is not None else 0.6),
@@ -454,6 +521,9 @@ def register_callbacks(app, index, latent_dir) -> None:  # noqa: ARG001 (latent_
             "cfg_scale": float(cfg if cfg is not None else 6.0),
             "seed": int(seed if seed is not None else -1),
         }
+        if dist_mode == "flux":
+            # "default"/absent = ckpt sampling_dist_shift (resolve_dist_shift)
+            payload["dist_shift"] = "flux"
         payload.update(controls.steering_payload(steer))
         try:
             resp = render_client.render("a2a_mix", payload)
@@ -468,6 +538,67 @@ def register_callbacks(app, index, latent_dir) -> None:  # noqa: ARG001 (latent_
                             indent=2, default=str)
         label = (f"{Path(a['path']).stem} → {Path(b['path']).stem} "
                  f"[{payload['mode']} nl={payload['noise_level']}]")
+        entry = {"ts": datetime.datetime.now().strftime("%H:%M:%S"),
+                 "label": label, "urls": resp.get("urls", []),
+                 "files": resp.get("files", []), "meta": meta,
+                 "params": payload}
+        history = ([entry] + (history or []))[:HISTORY_CAP]
+        return _players(resp), history, status
+
+    # 7b. longform render (prompt-ARC via POST /longform)
+    @app.callback(
+        Output("a2a-longform-result", "children"),
+        Output("a2a-history", "data", allow_duplicate=True),
+        Output("a2a-longform-status", "children"),
+        Input("a2a-longform-btn", "n_clicks"),
+        State("a2a-arc-schedule", "value"),
+        State("a2a-arc-init-path", "value"),
+        State("a2a-arc-noise", "value"),
+        State("a2a-arc-duration", "value"),
+        State("a2a-arc-window", "value"),
+        State("a2a-arc-overlap", "value"),
+        State("a2a-arc-xfade", "value"),
+        State("a2a-steps", "value"), State("a2a-cfg", "value"),
+        State("a2a-seed", "value"), State("a2a-dist-mode", "value"),
+        State("a2a-history", "data"),
+        *controls.steering_states("a2a"),
+        prevent_initial_call=True)
+    def _longform(_n, sched, init_path, noise, duration, window, overlap,
+                  xfade, steps, cfg, seed, dist_mode, history, *steer):
+        sched = (sched or "").strip()
+        if not sched:
+            return no_update, no_update, \
+                "ERROR: arc schedule is required ('0:promptA|45:promptB|…')"
+        payload = {
+            "schedule": sched,
+            "steps": int(steps or 24),
+            "cfg_scale": float(cfg if cfg is not None else 6.0),
+            "seed": int(seed if seed is not None else -1),
+            "window_sec": float(window or 30.0),
+            "overlap_sec": float(overlap or 5.0),
+            "xfade_sec": float(xfade if xfade is not None else 4.0),
+        }
+        init_path = (init_path or "").strip()
+        if init_path:                    # a2a arc: windowed loop over the source
+            payload["audio_path"] = init_path
+            payload["noise_level"] = float(noise if noise is not None else 0.4)
+        else:                            # t2a arc: LongFormRenderer path
+            payload["duration"] = float(duration or 120.0)
+        if dist_mode == "flux":
+            payload["dist_shift"] = "flux"
+        payload.update(controls.steering_payload(steer))
+        try:
+            resp = render_client.longform(payload)
+        except render_client.RenderError as e:
+            return no_update, no_update, f"LONGFORM ERROR:\n{e.args[0]}"
+        meta = resp.get("meta", {})
+        status = json.dumps({"seed": resp.get("seed"),
+                             "timings": resp.get("timings"),
+                             "warnings": resp.get("warnings"),
+                             "meta": {k: v for k, v in meta.items()
+                                      if k != "params_echo"}},
+                            indent=2, default=str)
+        label = (f"longform[{meta.get('mode', '?')}] {sched[:50]}")
         entry = {"ts": datetime.datetime.now().strftime("%H:%M:%S"),
                  "label": label, "urls": resp.get("urls", []),
                  "files": resp.get("files", []), "meta": meta,
