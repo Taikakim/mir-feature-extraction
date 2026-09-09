@@ -190,7 +190,17 @@ def build_crop_timeseries(arrays: Dict[str, np.ndarray], meta: dict,
             out[key] = _mode_pool(win, n_frames)
         elif key in SENTINEL_ZERO:
             mask_key = SENTINEL_ZERO[key]
-            m = _slice(np.asarray(arrays[mask_key]), float(rates.get(mask_key, default_rate)),
+            # The mask MUST be sliced at the same DERIVED rate as the field it masks. It
+            # used to take the DECLARED rate here while `win` above took the derived one,
+            # so any sidecar whose stated rate was even slightly off produced two windows
+            # a frame or two apart and an unbroadcastable multiply below. Real case:
+            # 51318 frames over 513.1608 s is 100.0038 Hz derived vs 100.0 declared --
+            # 0.004%, far inside any tolerance band, and it broke 7 of 8 AVP crops. A
+            # validity mask is not an independent measurement; it is the same
+            # measurement's coverage, and it resamples identically. (2026-09-09)
+            m = _slice(np.asarray(arrays[mask_key]),
+                       _effective_rate(mask_key, np.asarray(arrays[mask_key]), rates,
+                                       default_rate, duration),
                        start, end) if mask_key in arrays else (win > 0).astype(np.float32)
             m = np.asarray(m, dtype=np.float32)
             num = _mean_pool(win.astype(np.float32) * m, n_frames)
