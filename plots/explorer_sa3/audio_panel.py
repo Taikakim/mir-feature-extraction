@@ -7,9 +7,9 @@ from . import player_client as pc
 def panel(crop_id: str, alive: bool) -> html.Div:
     if not alive:
         return html.Div([
-            html.P("Player offline. Launch:"),
-            html.Code("/home/kim/Projects/SAO/stable-audio-3/.venv/bin/"
-                      "python scripts/latent_server_sa3.py"),
+            html.P("Render server offline (it hosts the player endpoints). Launch:"),
+            html.Code("/home/kim/Projects/SAO/.venv/bin/python "
+                      "/home/kim/Projects/SAO/eval/explorer_render_server.py"),
         ])
     return html.Div([
         html.Audio(src=pc.decode_url(crop_id), controls=True),

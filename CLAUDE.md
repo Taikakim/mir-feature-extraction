@@ -8,6 +8,17 @@ Guidance for Claude Code when working in this repository.
 > Read it before cross-cutting work, and append to
 > `/home/kim/Projects/SAO/WORKLOG.md` when you finish something another repo's
 > agent would want to know.
+>
+> ⚠️ **`WORKLOG.md` and the `AGENT_DIALOGUE.md` cross-instance channel are PUBLIC** (the
+> dialogue log auto-mirrors to a public URL for remote review). **Never write secrets** —
+> passwords, API keys/tokens, SSH creds, `.netrc` contents, or credential-revealing paths —
+> into either; keep secrets in the shell/env. (See MASTER §4.)
+>
+> ⚠️ **Also public: attribution.** For entries timestamped **08:00–17:00 Europe/Helsinki**, do not
+> attribute work, requests, decisions or presence to Kim by name in the dialogue log, DM logs or
+> WORKLOG — carry the substance and use "project guidance says" / "the call is" instead. Private
+> files (sidecars, `run_meta`, specs, this repo's docs) are unaffected, and the `kim_feedback`
+> field name is never renamed. Full rule: MASTER §4.
 @/home/kim/Projects/SAO/MASTER.md
 
 ## Project Overview
@@ -17,6 +28,8 @@ MIR feature extraction pipeline for conditioning Stable Audio Tools. Extracts 97
 **Hardware:** AMD RX 9070 XT (RDNA4, 16GB VRAM) + Ryzen 9 9900X, ROCm 7.2, PyTorch ROCm nightly.
 
 See **[TOOLS.md](TOOLS.md)** for the Pitch Shifter GUI and Feature Explorer / Latent Player.
+
+**SA3 control-eval specs (cross-repo):** the control-response evaluator `avp_sa3/sa3_control/onset_eval.py` (gain×density grid → `onset_eval.json`) and the eval-site GUIs in `~/riffer-evals/` (`onset_eval.html` browses every `onset_eval.json`; `disentangle.html` = the onset_per_beat tempo-shortcut page; `mp.html`, `traj.html`) — **full spec in `SAO/MASTER.md` §4.** The eval *measurement* (BPM/onset/groove via essentia/librosa) runs in **mir's venv** (`mir/bin/python`).
 
 ## Commands
 
@@ -56,6 +69,12 @@ Key settings:
 - `HIP_FORCE_DEV_KERNARG=1` -- prevent CPU/GPU desync
 - `TORCH_COMPILE=0` -- buggy with Flash Attention on RDNA
 - `MIOPEN_FIND_MODE` NOT set by default (causes freezes on some workloads)
+- **Native CK Flash-Attention — 30–100% faster, use it on the SA3/SAT venvs.** On the torch-2.10/2.12
+  ROCm venvs (`sat-venv`, `stable-audio-3/.venv`, `sa3-rocm7.13-test`) `flash_attn` is the **CK build**,
+  and you MUST `export FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE` (before `import torch`) to activate it —
+  the `TRUE` above is the slower Triton-AMD path; without `FALSE` you get `No module named 'aiter'` → no
+  FA. mir's own rocm-7.2 venv runs Triton FA2 (`TRUE`) and gains CK only after moving to the unified
+  rocm-7.13 venv (`SAO/MASTER.md` §3). Full story: MASTER §5 + `SAO/docs/flash-attn-ck-rdna4.md`.
 
 ## Architecture
 
@@ -148,18 +167,126 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
   ```
   Walks each track folder, extracts 20 fields at **100 Hz over the whole track** (`madmom` beat/downbeat activations, `librosa` onset envelopes per stem, multiband/per-stem RMS, spectral, HPCP), writes one `<track>.TIMESERIES.npz` per source track. Resumable (skips existing). Driven by chunked-fresh-pool workers (see `--chunk-size`, `--chunk-timeout`).
 
-- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — currently 4461 npz, **21 GB total**. Each npz contains:
+- **Expected input layout — one folder per track, not a flat directory:**
+  ```
+  <track_dir>/full_mix.<ext>                     REQUIRED (flac/wav/mp3/ogg/m4a/aiff)
+  <track_dir>/{drums,bass,other,vocals}.<ext>     OPTIONAL — separated stems, same folder
+  ```
+  `find_full_mix()`/`find_stem_files()` (both in `whole_track_timeseries.py`) look for exactly
+  this — a flat directory of audio files (`--expanded` reports "Found 0 track folders" against
+  one) or a per-track folder missing `full_mix.*` both fail silently/loudly depending on mode.
+  To build this layout from a flat corpus, **hardlink** (`os.link`) `full_mix.<ext>` into a
+  per-track folder rather than symlinking (mixes things up for some readers) or copying (wastes
+  disk on a large corpus) — `master_pipeline.py`'s Stage 1 (Organization, legacy/pre-timeseries)
+  established this same convention and Stage 2a (stem separation) already writes stems into that
+  identical per-track folder, so a `master_pipeline.py`-organized corpus needs no reshaping.
+  Stems are optional but drive real fields: the base extractor's per-stem
+  `onset_envelope_{stem}_ts`/`rms_{stem}_ts` (8 fields, all 4 stems) and the expanded
+  extractor's melody-height `f0_{other,bass}_ts` (2026-08-12, below) both come from stems, not
+  the mix. A missing stem SKIPS its fields rather than faking them from the mix — check
+  `field_rates`/`fields` in the sidecar `__meta__`, never assume a field is present.
+  **Gotcha (2026-08-17): `--add-fields` only backfills the EXPANDED field set
+  (`missing_expanded_fields()`, scoped to `whole_track_expanded.py`'s `EXPANDED_FIELDS`) — it
+  does NOT re-run the base extractor. So if a track was first extracted with only `full_mix`
+  present and stems land later, `--add-fields` will correctly add melody-height but will
+  silently never add the base per-stem onset/RMS fields (they're not in its "missing" list at
+  all, not even reported). If stems arrive after the initial pass, re-run the full `--expanded
+  --overwrite` pass instead of `--add-fields`, or you end up with a permanent two-tier field
+  set and no signal that it happened.** Also: the melody-height stem lookup
+  (`whole_track_expanded.py`) only recognized `.flac/.mp3/.wav` until 2026-08-17, when `.m4a`
+  was added — BS-RoFormer via `goa_sep_task.py` outputs `.m4a`, the same blind-spot class as an
+  earlier goa `.mp3` fix documented in the same function (818/4461 goa folders were silently
+  skipped forever before that fix; check the extension list before trusting a new stem source).
+
+- **Expanded fields:** `src/spectral/whole_track_expanded.py` adds 26 model/DSP fields at their
+  own **native rates** (0.2–100 Hz) — read `field_rates` from the sidecar meta, never assume 100 Hz.
+  Incremental backfill: `whole_track_timeseries.py --add-fields` (recomputes only what is missing).
+  **`field_rates` covers ONLY the 30 expanded fields (26 + the 4 melody) — the 20 base fields have
+  no entry at all** (verified across all 5035 Lehto sidecars), so `field_rates[f]` on a base field
+  is a `KeyError`: read it as `field_rates.get(f, meta["frame_rate"])`. Note also that
+  `expanded_version` lives at `meta["expanded"]["expanded_version"]`, **not** top level.
+  `chords_idx_ts` is a **class index** into the 24-triad `CHORD_VOCAB` (`-1` = unknown) — it must
+  be mode-pooled, never mean-pooled (averaging C=3 and G=10 gives a different chord).
+  **Per-track silent failure (2 goa sidecars, found 2026-08-18):** a madmom beat/downbeat
+  activation failure is logged as a warning and the track is written anyway, **48 fields instead of
+  50, with `beat_activation_ts`/`downbeat_activation_ts` simply absent** — nothing downstream
+  announces it. Check the field count, not just the file's existence.
+  **Stated-rate bug, fixed 2026-08-18:** `va_deam_ts`/`va_emomusic_ts` were stamped at
+  `16000/(96*160)` = 1.041667 Hz — 96 is VGGish's patch *size*; essentia's default patch *hop* is
+  93, so the true rate is 1.075269 Hz. 3.1% off, which sits under `crop_timeseries_resample`'s 5%
+  warn threshold and was therefore accepted silently (~19 s of tail drift on a 600 s track). The
+  producer now asks the algorithm for `patchHopSize`; **sidecars written earlier still carry the
+  wrong stated rate** — repair with `src/tools/repair_timeseries_meta.py --fix-vggish-rate`
+  (that tool also rebuilds a sidecar's `fields`/`field_rates`/`expanded` from the arrays actually
+  present, dry-run by default; it exists because `avp_f0_augment_transform.py` wrote the four f0
+  arrays into 1346 avp variants without ever announcing them in `__meta__`).
+
+- **Melody height (4 fields, 2026-08-12) — the pitch/melody control-head target.**
+  `f0_other_ts`, `f0_other_voiced_ts`, `f0_bass_ts`, `f0_bass_voiced_ts`, all 100 Hz,
+  `PredominantPitchMelodia` + `EqualLoudness` on the **separated stems** (other 55–1760 Hz,
+  bass 30–350 Hz). These are the only pitch fields that are **not octave-folded** — hpcp,
+  chroma_linmap, bass_chroma_linmap and chords are all pitch *class*, in which a rising line
+  and its inversion are identical, so "make the lead go up" is unexpressible from them.
+  - **Unvoiced frames are `0.0` Hz. MASK with the `_voiced_ts` field; never regress on the raw
+    values — 0 Hz is not a low note.** Voiced *fraction* is itself meaningful (a low value means
+    that stem has little predominant melody, not that tracking failed).
+  - **RESAMPLING: never mean-pool f0 in Hz.** (`crop_timeseries_resample.py` already does the
+    right thing here — this is why to use it.) The older consumer
+    (`stable-audio-tools/scripts/whole_track_target_source.py::resample_axis0`) downsamples by
+    fractional-bin mean pooling — correct for density/energy envelopes, wrong here, because it
+    averages real pitches with the 0.0 sentinel and drags each window toward silence by its
+    unvoiced fraction. Measured over 120 tracks at the SA3 grid (100 → 10.767 Hz, ~9.3 source
+    frames per target frame): **median error +0.00 st but p95 +15.86 st, with 17.2% of frames
+    wrong by more than a semitone** — sparse, severe, and concentrated at note boundaries where
+    the melody actually is. The median being zero is why a spot-check passes it. Pool the voiced
+    frames only:
+    ```python
+    num = resample_axis0(f0 * mask, n)
+    den = resample_axis0(mask, n)
+    f0_ds = np.where(den > 0, num / np.maximum(den, 1e-9), 0.0)   # and keep den as the weight
+    ```
+    (Or convert to semitones first and pool there.) The same caution applies to **any** future
+    field with a sentinel value — `resample_axis0` cannot know that `0.0` means "absent".
+  - Two voices because a rolling bassline is a melodic voice in its own right. Any mapping onto
+    SA3's 3-band chroma conditioning (bass→low, other→mid+high) belongs at the **conditioning**
+    stage, not in extraction.
+  - Skipped, not faked from the mix, where a stem is missing (4 goa folders).
+  - **Open:** `f0_bass_ts` may sit one octave above the true fundamental — melodia and YIN
+    disagree by ~12 semitones on every bass stem tested and three tests failed to settle it.
+    Melodia was chosen for contour stability (YIN flips octaves *within* a track), not because
+    its octave is known right. Re-open if absolute bass register ever matters.
+
+- **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — **5035 npz, ~37 GiB**
+  (audited 2026-08-18): **4461 goa + 574 genre-corpus sidecars, and ZERO avp** — **do not glob the
+  directory as a goa denominator**. The avp sidecars are NOT here; they live in place under
+  `<UUID drive>/avp-analyzed/<track>/` (and `.../augmentations/<variant>/` for the 1346 augmented
+  variants). A third, separate store — undocumented until now — is
+  `<UUID drive>/suomisoundi_timeseries/` (1260 npz, 6.7 GB).
+  **"50 fields" describes 4455 of those sidecars, not the store:** 574 have **46** (melody was
+  never run on the genre corpora), 4 have **38** (no stems → the 8 per-stem + 4 melody fields are
+  skipped), and 2 have **48** (the madmom activation failure noted above). Read `fields` from the
+  sidecar; do not assume the full set.
+  Each npz contains:
   - 1-D fields shape `(N_frames,)` where `N_frames ≈ duration_sec × 100`
   - `hpcp_ts` shape `(N_frames, 12)`
-  - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, etc.
+  - `__meta__` JSON string with `frame_rate`, `n_frames`, `duration`, `fields`, `field_rates`, etc.
 
-- **Consumer (cropper/resampler):** `/home/kim/Projects/SAO/stable-audio-tools/scripts/whole_track_target_source.py`
+- **Consumer (cropper/resampler) — use `src/tools/crop_timeseries_resample.py`:**
   ```python
-  from whole_track_target_source import resample_axis0, _read_npz
-  arrays, meta = _read_npz("/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz")
-  # Slice arrays[field][s:e] then resample_axis0(win, target_n_frames)
+  from crop_timeseries_resample import build_crop_timeseries
+  out = build_crop_timeseries(arrays, meta, start_sec, end_sec, n_frames)
   ```
-  `WholeTrackTargetSource.get(crop_key, feature, start_time, end_time, n_frames)` packages this for LatCH dataloaders.
+  It lives in mir because how a field may legally be downsampled is a property of the
+  measurement, not of the consumer. It derives each field's rate from `n_frames / duration`
+  rather than trusting `field_rates` (one stored rate — `maest_embed_ts` — is wrong by exactly
+  2×), masked-mean-pools the sentinel fields (`f0_*_ts`, where `0.0` means unvoiced), mode-pools
+  the categorical ones (`chords_idx_ts`), and fails the crop loudly on partial coverage.
+  The older `SAO/stable-audio-tools/scripts/whole_track_target_source.py` is **superseded for
+  expanded fields**: its `get()` applies the single top-level `meta["frame_rate"]` (100 Hz) to
+  *every* field, which is right for the 20 base fields and wrong for the 26 expanded ones at
+  0.2–100 Hz — a coarse field then gets sliced at the wrong offset, silently, or comes back
+  empty and the crop is dropped. It is still fine for base-field LatCH dataloading
+  (`WholeTrackTargetSource.get(crop_key, feature, start_time, end_time, n_frames)`).
 
 - **Use cases**: LatCH-head training against arbitrary crop windows (the SAT trainer reads via the consumer above); per-crop timeseries companions for SA3 LoRA latents (sliced to T=4096 alongside each `.npy`, see `/tmp/sa3_encode_from_manifest.py`).
 
@@ -216,3 +343,4 @@ import torch  # now safe
 - **GMI ONNX first-run JIT:** Genre model takes ~29s to JIT compile kernels on first inference per process. Mood/instrument ~0.4-0.6s. Subsequent calls are <1ms.
 - **Spotify audio features:** `/v1/audio-features/` returns 403 for all standard API apps since Nov 2024. Disabled in pipeline (`fetch_audio_features_flag=False`). The endpoint is gone permanently.
 - **timbral_models hang:** `timbral_reverb()` can loop forever on pathological audio. PASS 1 uses `cf_wait(timeout=300)` — hung crops are skipped and retried next run.
+- **`mir/bin/python` is an ffmpeg9-SONAME compat wrapper, not a plain symlink (2026-08-16).** System ffmpeg was upgraded 8.1.2→9.0.1 (pacman) on 2026-08-16, which removed `libavdevice.so.62`/`libavcodec.so.62`/etc from `/usr/lib`. `torchaudio`'s audio-load chain delegates to **torchcodec** (`torchcodec-0.10.0a0`, installed here), whose bundled `libtorchcodec_core8.so` `DT_NEEDS` those exact SONAMEs — the crash zeroed out **every** Audiobox CE score (0/162 on a test batch, no partial results; `audiobox_aesthetics.py` never imports torchcodec directly, the break is transitive through the librosa/torchaudio load path). Investigated and ruled out: no ffmpeg8-compat package exists (official repos or AUR); rebuilding torchcodec against ffmpeg9 needs torchcodec≥0.16, which needs **torch≥2.11** (mir has 2.9.1 — a much bigger, separate call than this fix warrants); a blanket ffmpeg downgrade + `IgnorePkg` would hold the *system-wide* package back indefinitely (silent security-patch rot) just for this one venv. Fix: extracted the exact ffmpeg8 SONAMEs (avcodec/avdevice/avformat/avfilter/avutil/swscale/swresample + the matching `libx265.so.216`) from the still-cached `/var/cache/pacman/pkg/ffmpeg-2:8.1.2-10-*.pkg.tar.zst` into `mir/lib/ffmpeg8-compat/` (gitignored, venv-internal — regenerate via `bsdtar -xf` on that cached package if it's ever gone; check `archive.archlinux.org/packages/f/ffmpeg/` as a fallback source). `mir/bin/python` was a symlink to the shared uv-managed interpreter; it's now a wrapper script that prepends `LD_LIBRARY_PATH` and `exec -a`'s the real interpreter (**`exec -a` is required** — a plain `exec` changes `argv[0]` to the real interpreter's own path, which breaks CPython's venv detection and silently drops the whole venv, torch/numpy included; caught live building the first version of this wrapper). Setting `os.environ['LD_LIBRARY_PATH']` from *inside* an already-running Python does **not** work here — verified live — glibc resolves a loaded `.so`'s `DT_NEEDED` entries against the `LD_LIBRARY_PATH` snapshot taken at process start, not re-read per `dlopen()`; the fix has to happen in the launcher, before the interpreter starts. `python3`/`python3.12` are unaffected (they're relative symlinks to `python`, so they inherit the wrapper transparently). Verified end-to-end: `torchaudio.load()` on a real clip, then the real `control/sa3_control/clip_metrics_audiobox.py --pattern base__base` scoring 30/30 clips with real non-null CE/PQ values in `clip_metrics.db`.

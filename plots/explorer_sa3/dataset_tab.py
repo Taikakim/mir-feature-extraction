@@ -13,6 +13,10 @@ def scatter_figure(xs, ys, xlabel, ylabel, text=None) -> go.Figure:
 
 def layout() -> html.Div:
     return html.Div([
-        dcc.Dropdown(id="sa3-ds-x"), dcc.Dropdown(id="sa3-ds-y"),
+        html.Div(id="sa3-ds-progress", style={"padding": "4px 0",
+                                              "color": "#888"}),
+        dcc.Interval(id="sa3-ds-interval", interval=1000),
+        dcc.Dropdown(id="sa3-ds-x", value="bpm"),
+        dcc.Dropdown(id="sa3-ds-y", value="lufs"),
         dcc.Graph(id="sa3-ds-graph"),
     ])

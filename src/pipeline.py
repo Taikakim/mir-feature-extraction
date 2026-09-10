@@ -1378,15 +1378,15 @@ class Pipeline:
                 'Metadata':   ['release_year'],
             }
 
-            # Pre-populate coverage from dataset.json (fast: single sequential read).
+            # Pre-populate coverage from dataset.jsonl (fast: single sequential read).
             # This shows the TUI meaningful percentages immediately, before the slow
             # per-file scan loop below completes.
-            _dataset_path = (all_crops[0].parent.parent / 'dataset.json'
+            _dataset_path = (all_crops[0].parent.parent / 'dataset.jsonl'
                              if all_crops else None)
             if _dataset_path and _dataset_path.exists():
                 try:
                     from core.data_store import DataStore
-                    logger.info(f"  Loading coverage from dataset.json...")
+                    logger.info(f"  Loading coverage from dataset.jsonl...")
                     _ds = DataStore.load(_dataset_path)
                     _ds_cov = _ds.coverage()
                     _n_ds = len(_ds)
@@ -1400,10 +1400,10 @@ class Pipeline:
                         }
                         self.stats['feature_coverage_n'] = _n_ds
                         logger.info(
-                            f"  Coverage pre-loaded from dataset.json ({_n_ds} entries)"
+                            f"  Coverage pre-loaded from dataset.jsonl ({_n_ds} entries)"
                         )
                 except Exception as _e:
-                    logger.debug(f"Could not pre-load coverage from dataset.json: {_e}")
+                    logger.debug(f"Could not pre-load coverage from dataset.jsonl: {_e}")
             # Representative single key used for coverage fraction tracking
             _COV_SENTINEL = {lbl: keys[0] for lbl, keys in _COV_KEY_GROUPS.items()}
             _cov_counts = {lbl: 0 for lbl in _COV_KEY_GROUPS}

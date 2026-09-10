@@ -57,6 +57,7 @@ STAGES: List[Tuple[str, str]] = [
     ('metadata_id3',    'ID3 Tags'),
     ('track_analysis',  'Track Analysis'),
     ('onset_analysis',  'Onsets'),
+    ('whole_track_timeseries', 'Whole-Track TS'),
     ('metadata_lookup', 'Metadata Lookup'),
     ('first_features',  'First-Stage Features'),
     ('cropping',        'Cropping'),

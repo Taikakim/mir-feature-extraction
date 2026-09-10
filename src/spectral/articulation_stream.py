@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""articulation_stream.py — derive a scalar ARTICULATION/NOVELTY stream from the whole-track
+multi-field timeseries, and validate it against the beat grid.
+
+WHY THIS EXISTS (WINTERMUTE, 2026-08-12, from the reading sweep).
+Three separate methods we want all bottom out in the *same* missing step:
+
+  * Schindler et al. 2505.10004 (topology-driven repetitions) needs a scalar SURROGATE v(t)
+    "capturing relative position within the current cycle";
+  * Popoff & Yust meter networks need an ARTICULATION SET per "part" — and per Kim's
+    generalisation (2026-08-12) any descriptor stream can be a part, but only once you can say
+    *when* it articulates;
+  * Heo & Jung 2405.04796 (PH of featured time series) needs a DISCRETISATION, because its
+    graph nodes are distinct VALUES.
+
+One step gates all three: turn our continuous 46-field timeseries into the right scalar/discrete
+stream. That is what this does. It is CPU-only, needs no training and no GPU.
+
+    articulation_stream.py --track "Ayahuasca - Propella" --validate
+    articulation_stream.py --npz /path/to/X.TIMESERIES.npz --fields spectral_flux_ts,hpcp_ts
+
+VALIDATION IS THE POINT, NOT A GARNISH. A novelty curve that fires often will hit every
+downbeat by chance, so alignment alone proves nothing. Every validation run therefore reports
+the score against a NULL built by shuffling the inter-peak intervals — same peak count, same
+interval distribution, no relationship to the audio. A result that does not beat its own null
+is reported as a failure however good the raw F-measure looks. This is the same discipline that
+caught Audiobox CE ranking Kim's two favourite checkpoints 1st and 8th of 8: a number that moves
+is not the same as a number that means something.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+TS_ROOT = Path("/run/media/kim/Lehto/timeseries")
+CORPUS_ROOT = Path("/run/media/kim/Mantu/ai-music/Goa_Separated")
+
+# MEASURED, not guessed (14 tracks, tol 0.07 s, F1 vs a swept null p95). The first version of
+# this list was reasoned from what "plausibly marks events", and three of its ten entries were
+# wrong in two different ways.
+#
+#   field                     medF1  medNull  margin  beats-null   verdict
+#   onset_envelope_drums_ts   0.556   0.391   +0.163    13/13      keep
+#   onset_envelope_bass_ts    0.530   0.363   +0.154    13/13      keep
+#   spectral_flux_ts          0.546   0.376   +0.172    14/14      keep (best single stream)
+#   onset_envelope_ts         0.545   0.407   +0.146    14/14      keep (was never asked for)
+#   hpcp_ts                   0.493   0.404   +0.094    14/14      keep
+#   onset_envelope_other_ts   0.476   0.387   +0.092    13/13      keep
+#   chroma_linmap_ts          0.345   0.272   +0.072    14/14      keep
+#   rms_energy_bass_ts        0.430   0.414   +0.013    14/14      DROP -- at its own null
+#   rms_energy_air_ts         0.428   0.412   +0.012    12/14      DROP -- at its own null
+#   rms_energy_mid_ts         0.424   0.414   +0.006    12/14      DROP -- at its own null
+#   onset_envelope_vocals_ts  0.189   0.160   +0.017    12/13      DROP -- null (goa has no vocal)
+#
+# THE BAND ENERGIES CARRIED NOTHING. Not weak signal -- no signal: slow-varying state, so a
+# peak-picker fires wherever the envelope wobbles. The comment above this list used to say the
+# slow fields "describe state, not articulation" and then included them anyway. Dropping them
+# lifted the fused stream from margin +0.089 to +0.172 (median F1 0.487 -> 0.558), improving on
+# 13 of 14 tracks. That -- not timing disagreement, which is what I first claimed -- is why the
+# fused stream had been scoring BELOW its own best members: three of ten inputs were noise.
+#
+# AND ONE ENTRY NAMED NOTHING AT ALL. "onsets_activations_ts" is the PER-CROP TimeseriesDB
+# spelling; the whole-track npz calls the full-mix envelope "onset_envelope_ts". It was present
+# in 0 of 14 npz, reported missing on every run by the check build_stream does for exactly this,
+# and never read. Two stores, two vocabularies, one silent hole -- check the npz field list, do
+# not port a name across from the other store.
+DEFAULT_FIELDS = [
+    "onset_envelope_ts",
+    "onset_envelope_drums_ts", "onset_envelope_bass_ts", "onset_envelope_other_ts",
+    "spectral_flux_ts", "hpcp_ts", "chroma_linmap_ts",
+]
+
+# NOT a default field, and deliberately so, despite scoring by far the best thing here:
+# beat_activation_ts hits medF1 0.800 / margin +0.399 / 14 of 14 tracks -- more than double the
+# next field. It is CIRCULAR. beat_activation_ts is madmom's per-frame beat activation and
+# BEATS_GRID is madmom's DBN decoding OF THAT ACTIVATION, so the two are the input and output of
+# one model and high agreement is guaranteed by construction, not discovered.
+#
+# It is still worth having, as the thing this harness previously lacked: a POSITIVE CONTROL. A
+# validation pipeline that cannot recover madmom's own beats from madmom's own activation is
+# broken, and would fail silently by reporting everything as null. 0.800 says the harness
+# measures what it claims to. Use it to test the tester, never as an articulation input --
+# anything built on it inherits a dependency on the beat grid, which is exactly the property the
+# grid-free formulation exists to avoid.
+POSITIVE_CONTROL_FIELD = "beat_activation_ts"
+
+
+def _rate_of(name: str, meta: dict, default: float = 100.0) -> float:
+    """Field rate from the sidecar. The 20 legacy fields predate `field_rates` and are 100 Hz
+    (MASTER §2); anything else without an entry is a bug worth surfacing, not silently guessing."""
+    return float((meta.get("field_rates") or {}).get(name, default))
+
+
+# Fields that ARE ALREADY a novelty/onset curve. Differencing these is a real bug, not a
+# nuance: it yields the derivative OF a novelty, which peaks on the *rise* of an onset rather
+# than the onset. Diagnosed 2026-08-12 by the null test -- the onset envelopes scored AT CHANCE
+# against the beat grid while chroma flux (a genuine state field, correctly differenced) beat
+# its null clearly. An onset detector failing to find beats while a harmony field finds them is
+# not a plausible result about music; it is a sign the transform is wrong.
+ALREADY_NOVELTY = (
+    "onset_envelope_", "onsets_activations", "spectral_flux",
+    "beat_activation", "downbeat_activation",
+)
+
+
+def is_novelty_field(name: str) -> bool:
+    return any(name.startswith(p) or p in name for p in ALREADY_NOVELTY)
+
+
+def field_novelty(arr: np.ndarray, name: str = "") -> np.ndarray:
+    """Half-wave-rectified frame-to-frame change: how much did this stream just CHANGE.
+
+    For fields that are already novelty curves (see ALREADY_NOVELTY) the field itself IS the
+    articulation signal and is returned as-is.
+
+    For a multi-dimensional field (hpcp is (N,12)) the novelty is the norm of the difference
+    vector -- i.e. flux -- so chroma contributes "the harmony moved", not "which chord".
+    Rectified because an articulation is an ONSET of change; decay is not an event.
+    """
+    a = np.asarray(arr, dtype=np.float64)
+    if name and is_novelty_field(name):
+        return a if a.ndim == 1 else np.linalg.norm(a, axis=1)
+    if a.ndim == 1:
+        d = np.diff(a, prepend=a[:1])
+        return np.maximum(d, 0.0)
+    d = np.diff(a, axis=0, prepend=a[:1])
+    return np.linalg.norm(np.maximum(d, 0.0), axis=1)
+
+
+def _robust_norm(x: np.ndarray) -> np.ndarray:
+    """Scale to a comparable range without letting one loud field dominate the fusion.
+    Median/IQR rather than max: a single transient must not set the scale for a whole track."""
+    x = np.nan_to_num(np.asarray(x, dtype=np.float64))
+    med = np.median(x)
+    iqr = np.subtract(*np.percentile(x, [75, 25])) or (x.std() or 1.0)
+    return np.maximum(x - med, 0.0) / iqr
+
+
+def _resample_to(x: np.ndarray, src_rate: float, dst_rate: float, n_out: int) -> np.ndarray:
+    if abs(src_rate - dst_rate) < 1e-9 and len(x) == n_out:
+        return x
+    src_t = np.arange(len(x)) / src_rate
+    dst_t = np.arange(n_out) / dst_rate
+    return np.interp(dst_t, src_t, x)
+
+
+def build_stream(npz_path: Path, fields=None, rate: float = 100.0):
+    """-> (fused novelty stream at `rate`, per-field streams, meta). Fields absent from the npz
+    are reported, never silently dropped -- a quietly missing input is how a fusion ends up
+    measuring less than you think it does."""
+    d = np.load(npz_path, allow_pickle=True)
+    meta = json.loads(str(d["__meta__"])) if "__meta__" in d.files else {}
+    dur = float(meta.get("duration") or 0.0)
+    n_out = int(round(dur * rate)) or max(len(d[f]) for f in d.files if f != "__meta__")
+
+    want = fields or DEFAULT_FIELDS
+    used, missing, per_field = [], [], {}
+    for name in want:
+        if name not in d.files:
+            missing.append(name)
+            continue
+        nov = field_novelty(d[name], name)
+        nov = _resample_to(_robust_norm(nov), _rate_of(name, meta), rate, n_out)
+        per_field[name] = nov
+        used.append(name)
+
+    if not used:
+        raise SystemExit(f"no usable fields in {npz_path.name} (wanted {want})")
+    fused = np.mean(np.stack([per_field[k] for k in used]), axis=0)
+    return fused, per_field, {"meta": meta, "used": used, "missing": missing,
+                              "rate": rate, "n": n_out}
+
+
+def pick_peaks(x: np.ndarray, rate: float, min_gap_s: float = 0.25, k: float = 1.0):
+    """Local maxima above median + k*IQR, thinned by a refractory gap. Returns times (s)."""
+    thr = np.median(x) + k * (np.subtract(*np.percentile(x, [75, 25])) or x.std() or 1.0)
+    cand = np.flatnonzero((x[1:-1] >= x[:-2]) & (x[1:-1] > x[2:]) & (x[1:-1] > thr)) + 1
+    out, last = [], -1e9
+    gap = min_gap_s * rate
+    for i in cand:
+        if i - last >= gap:
+            out.append(i)
+            last = i
+    return np.asarray(out, dtype=float) / rate
+
+
+# ---------------------------------------------------------------------------
+# Cycle structure. Interface agreed with CONTINUITY 2026-08-12:
+#   cycle_boundaries(stream, rate) -> {"boundaries": float[] sec,
+#                                      "shapes": float[n_cycles, D],
+#                                      "phase": float[n_frames] in [0,1),
+#                                      "index": int[n_frames]}
+# The hard boundaries and the soft per-frame phase/index are the same object viewed two ways;
+# both are returned because a caller that cannot trust a segmentation can still use the phase.
+#
+# GRID-FREE IS A HARD CONSTRAINT, NOT A PREFERENCE. Nothing below reads BEATS_GRID. The period
+# comes from the stream's own autocorrelation and the phase from folding the stream onto that
+# period, so the whole construction is invariant to the per-field latency that the offset study
+# showed we cannot pin down (see best_offset). The beat grid appears ONLY in the scoring code,
+# never in the derivation -- the moment a boundary depends on madmom, everything downstream
+# inherits a dependency on the one thing this is meant to work without, and we get a subtler
+# version of the beat_activation_ts circularity.
+# ---------------------------------------------------------------------------
+
+def autocorr(x: np.ndarray) -> np.ndarray:
+    """Unbiased autocorrelation via FFT, normalised to acf[0] == 1.
+
+    The /(n-k) is not cosmetic: the raw FFT autocorrelation tapers linearly with lag simply
+    because fewer samples overlap, which biases every period search toward SHORT lags. Without
+    it a bar-length peak loses to a beat-length one on geometry alone.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x - x.mean()
+    n = len(x)
+    f = np.fft.rfft(x, 2 * n)
+    ac = np.fft.irfft(f * np.conj(f))[:n]
+    counts = np.arange(n, 0, -1, dtype=float)
+    ac = ac / counts
+    return ac / (ac[0] or 1.0)
+
+
+def dominant_period(x: np.ndarray, rate: float, min_s: float = 1.0, max_s: float = 12.0):
+    """-> (period_seconds, acf_peak_strength). Phase-invariant by construction.
+
+    Plain argmax, and the obvious objection to it is real: autocorrelation peaks at EVERY integer
+    multiple of the true period, the unbiased normalisation makes those peaks near-equal, so the
+    pick among them is close to arbitrary. A pure 2 s sine reports 10.01 s here. The textbook fix
+    is to take the SHORTEST lag within a few percent of the maximum.
+
+    THAT FIX WAS TESTED AND REJECTED ON EVIDENCE (14 tracks, 2026-08-12). It does repair the sine
+    (2.00 s), and it degrades real music badly: bar-lock collapses from Rayleigh R=0.9915 / p=1e-6
+    to R=0.5147 / p=0.025, and within-3%-of-a-whole-bar from 12/14 to 8/14, because on real
+    material the shortest strong peak is often a SUB-bar grouping (0.74-0.76 bars = 3 beats).
+    Argmax over the unbiased ACF is the rule that actually finds bars, so it stays.
+
+    The residual caveat is honest and unfixed: the reported period may be a small integer multiple
+    of the true loop length (the validated set contains 1, 2, 3, 4 and 6-bar answers, and some of
+    the larger ones are plausibly multiples of a shorter loop). For distinct-vs-recurring cycle
+    comparison a multiple groups N bars per cycle rather than misplacing anything, so it is
+    tolerable -- but do not read `period` as "the loop length" without checking.
+    """
+    ac = autocorr(x)
+    lo, hi = int(min_s * rate), min(int(max_s * rate), len(ac) - 1)
+    if hi <= lo + 2:
+        return 0.0, 0.0
+    seg = ac[lo:hi]
+    k = int(np.argmax(seg))
+    return (lo + k) / rate, float(seg[k])
+
+
+def cycle_boundaries(stream: np.ndarray, rate: float, D: int = 16,
+                     min_s: float = 1.0, max_s: float = 12.0):
+    """Segment a stream into repeating cycles without any external grid.
+
+    period  <- autocorrelation peak (phase-invariant)
+    phase   <- fold the stream onto that period and put the boundary at the profile's MINIMUM,
+               i.e. the quietest point of the average cycle. A cycle should start where the last
+               one finished, and the trough is the only self-derived landmark that means that;
+               anchoring on the maximum instead puts the boundary on the downbeat hit, which
+               splits the very event a shape descriptor should contain.
+    shapes  <- each cycle resampled to D bins, so shapes[i] is comparable across cycles and
+               across tracks with different tempi.
+
+    Returns hard boundaries AND the soft per-frame (phase, index). If the period search fails
+    the result is honest rather than empty: one cycle spanning the whole stream, strength 0.0 --
+    check `strength` before trusting a segmentation.
+
+    `index` is NEGATIVE (-1) for the frames before the first boundary. Those frames are a real
+    partial cycle, not an error, and they are marked rather than folded into cycle 0 so a
+    consumer never averages a fragment in with whole cycles.
+
+    VALIDATED against a grid it never reads (14 tracks, 2026-08-12): the derived period lands on
+    a whole BAR on all 14 -- ratios to the beat interval of 3.95..3.98, 7.91..8.07, 12.02, 16.15,
+    24.24, i.e. 1, 2, 3, 4 and 6 bars in 4/4. Median deviation 0.0115 bars against 0.25 expected
+    if the period were arbitrary; Rayleigh test on (period/beat/4 mod 1) gives R=0.9915, p=1.1e-6.
+    Cycle shapes resemble each other (mean per-bin spread / overall spread = 0.788).
+    """
+    n = len(stream)
+
+    def no_cycle():
+        """The single honest answer for every way this can fail to find structure."""
+        return {"boundaries": np.array([0.0, n / rate]), "period": 0.0, "strength": 0.0,
+                "shapes": np.zeros((1, D)), "phase": np.zeros(n), "index": np.zeros(n, int)}
+
+    period_s, strength = dominant_period(stream, rate, min_s, max_s)
+    P = int(round(period_s * rate))
+    # A DEAD STREAM MUST NOT PRODUCE A CONFIDENT PERIOD. On flat input the autocorrelation is
+    # identically zero, argmax returns the first lag, and the function happily reports
+    # period == min_s with a full set of cycles -- a fabricated segmentation of nothing, which
+    # is the failure mode a consumer is least able to notice. The threshold is deliberately
+    # LOOSE (real tracks measure 0.70-0.94): it is a deadness guard, not a quality gate, and
+    # setting it high would silently discard weakly-periodic material that is genuinely there.
+    if P < 4 or P >= n or strength < 0.05:
+        return no_cycle()
+
+    n_cyc = n // P
+    folded = stream[:n_cyc * P].reshape(n_cyc, P)
+    profile = folded.mean(axis=0)
+    off = int(np.argmin(profile))                      # trough of the average cycle
+
+    # Not one whole cycle fits after the phase offset. Reachable on short or aperiodic input
+    # (white noise picks a long period, the offset eats the remainder) and it used to raise
+    # IndexError on `starts[-1]` -- a crash in a consumer's loop rather than a usable answer.
+    starts = np.arange(off, n - P + 1, P)
+    if len(starts) == 0:
+        return no_cycle()
+
+    bounds = np.concatenate([starts, [starts[-1] + P]]) / rate
+    # Resample each cycle to D bins by POSITION-WITHIN-CYCLE, not by frame index. (_resample_to
+    # is the wrong tool here: called with src_rate == dst_rate it would hand back the first D
+    # frames of the cycle and silently discard the rest.)
+    src = np.linspace(0.0, 1.0, P)
+    dst = np.linspace(0.0, 1.0, D)
+    shapes = np.stack([np.interp(dst, src, stream[s:s + P]) for s in starts])
+
+    t = np.arange(n)
+    ph = ((t - off) % P) / P
+    idx = np.floor_divide(t - off, P)
+    return {"boundaries": bounds, "period": period_s, "strength": strength,
+            "shapes": shapes, "phase": ph, "index": idx}
+    if len(pred) == 0 or len(ref) == 0:
+        return 0.0, 0.0, 0.0
+    used = np.zeros(len(ref), dtype=bool)
+    hits = 0
+    for p in pred:
+        j = int(np.argmin(np.abs(ref - p)))
+        if not used[j] and abs(ref[j] - p) <= tol:
+            used[j] = True
+            hits += 1
+    prec, rec = hits / len(pred), hits / len(ref)
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return prec, rec, f1
+
+
+OFFSETS = np.arange(-0.30, 0.301, 0.02)
+
+
+def best_offset(pred: np.ndarray, ref: np.ndarray, tol: float):
+    """Best global time-shift and its F1.
+
+    Sweeping an offset visibly rescues the scores: uncalibrated, every stream sat at chance and
+    looked like a null result; calibrated, they all scored well above it. The obvious reading is
+    that each extractor has its own effective latency against the beat grid (different window
+    sizes, different frame conventions) and the sweep is measuring that delay.
+
+    THAT READING IS MOSTLY WRONG, and it is worth keeping the correction next to the code that
+    invited it. Measured over 14 tracks (2026-08-12, same day, one track -> fourteen), the
+    per-field offset is NOT a constant of the field for most fields:
+
+        field                     median    IQR     range
+        hpcp_ts                   +0.04   0.000    stable  <- a real constant
+        spectral_flux_ts          -0.02   0.020    stable  <- a real constant
+        onset_envelope_bass_ts    -0.08   0.080    -0.20 .. +0.28
+        onset_envelope_other_ts   -0.02   0.160    spans the whole sweep
+        rms_energy_mid_ts         +0.04   0.210    spans the whole sweep
+        onset_envelope_drums_ts   -0.04   0.200    spans the whole sweep
+        rms_energy_air_ts         -0.06   0.270    spans the whole sweep
+
+    Only hpcp and spectral_flux behave like pipeline latencies. For the rest, "best offset" is
+    picking a local maximum in a nearly flat landscape -- a different thing from measuring a
+    delay, and it varies per track. The earlier claim that "drums want ~+0.16 s" was one track's
+    draw stated as a property of the extractor.
+
+    So the sweep stays (it is the fair way to score, and the null is swept identically so the
+    search cannot manufacture a result), but its output is NOT a calibration constant you may
+    bake in. Anything downstream either calibrates against a grid it has, restricts itself to the
+    two stable fields, or -- better -- uses a phase-invariant formulation that never needs the
+    offset at all.
+    """
+    scores = [(float(o), _match_f1(pred + o, ref, tol)[2]) for o in OFFSETS]
+    o, f1 = max(scores, key=lambda t: t[1])
+    return o, f1
+
+
+def null_f1(pred: np.ndarray, ref: np.ndarray, tol: float, trials: int = 200, seed: int = 0,
+            sweep: bool = False):
+    """The number that decides whether any of this means anything.
+
+    Shuffle the INTER-PEAK INTERVALS: identical peak count and identical interval distribution,
+    but no relationship to the audio. If the real stream cannot beat this, its alignment with
+    the bar grid is an artifact of how often it fires, not evidence that it found the bars.
+    """
+    if len(pred) < 3:
+        return 0.0, 0.0
+    rng = np.random.default_rng(seed)
+    gaps = np.diff(pred)
+    scores = []
+    for _ in range(trials):
+        g = rng.permutation(gaps)
+        fake = np.concatenate([[pred[0]], pred[0] + np.cumsum(g)])
+        # IF THE REAL SCORE IS A MAX OVER OFFSETS, THE NULL MUST BE TOO. Taking the best of 31
+        # shifts is a multiple-comparison win worth ~+0.11 F1 on its own; comparing a swept real
+        # score against an unswept null would manufacture a "result" out of the search itself.
+        scores.append(best_offset(fake, ref, tol)[1] if sweep
+                      else _match_f1(fake, ref, tol)[2])
+    return float(np.mean(scores)), float(np.percentile(scores, 95))
+
+
+def cross_track_control(pred: np.ndarray, own_ref: np.ndarray, foreign_refs, tol: float):
+    """The control that decides WHAT the alignment is evidence OF.
+
+    A swept null rules out "peak density explains it", but not "any beat-periodic sequence
+    phase-locks to any beat grid". So score the same peaks against OTHER tracks' grids: if a
+    foreign grid scores as well as the track's own, we have only shown periodicity. Measured
+    2026-08-12 across three tracks -- own grid beat the best foreign grid by +0.128, +0.160 and
+    +0.277 F1, and the diagonal dominated every row, so the alignment is track-specific.
+    """
+    own = best_offset(pred, own_ref, tol)[1]
+    frg = 0.0
+    for r in foreign_refs:
+        n = min(len(own_ref), len(r))
+        if n > 2:
+            frg = max(frg, best_offset(pred, r[:n], tol)[1])
+    return own, frg
+
+
+def load_reference(track: str, which: str):
+    """Ground truth times. WHICH reference matters more than any parameter here.
+
+    This stream detects ARTICULATIONS -- moments when something changes. Beats are
+    articulations; DOWNbeats are a metrically-privileged sparse subset of them. Scoring an
+    articulation detector against downbeats asks it to have found the metre, which it does not
+    claim to do, and at ~5x the reference density that comparison is decided by peak count
+    rather than by placement. Default is therefore the beat grid; downbeats remain available
+    because bar-level agreement is a separate, harder question.
+    """
+    ext = {"beats": "BEATS_GRID", "downbeats": "DOWNBEATS"}[which]
+    p = CORPUS_ROOT / track / f"{track}.{ext}"
+    if not p.exists():
+        return None
+    return np.array([float(x) for x in p.read_text().split() if x.strip()])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--track", help="track name (npz + DOWNBEATS looked up by name)")
+    ap.add_argument("--npz", type=Path)
+    ap.add_argument("--fields", help="comma-separated field list (default: event-like fields)")
+    ap.add_argument("--rate", type=float, default=100.0)
+    ap.add_argument("--min-gap", type=float, default=0.25, help="peak refractory, seconds")
+    ap.add_argument("--tol", type=float, default=0.07, help="match tolerance vs downbeats, s")
+    ap.add_argument("--validate", action="store_true", help="score against the grid + null")
+    ap.add_argument("--ref", choices=["beats", "downbeats"], default="beats",
+                    help="reference grid; beats is the honest default (see load_reference)")
+    ap.add_argument("--per-field", action="store_true", help="also score each field alone")
+    ap.add_argument("--calibrate", action="store_true", default=True,
+                    help="fit a per-field global offset (REQUIRED for a fair read; the null is "
+                         "swept identically so the search cannot manufacture a result)")
+    ap.add_argument("--no-calibrate", dest="calibrate", action="store_false")
+    ap.add_argument("--null-trials", type=int, default=60)
+    a = ap.parse_args()
+
+    npz = a.npz or (TS_ROOT / f"{a.track}.TIMESERIES.npz")
+    if not npz.exists():
+        raise SystemExit(f"no timeseries at {npz}")
+    fields = a.fields.split(",") if a.fields else None
+    fused, per_field, info = build_stream(npz, fields, a.rate)
+
+    print(f"[stream] {npz.name}")
+    print(f"  duration {info['meta'].get('duration', 0):.1f}s @ {a.rate} Hz -> {info['n']} frames")
+    print(f"  fields used ({len(info['used'])}): {', '.join(info['used'])}")
+    if info["missing"]:
+        print(f"  fields MISSING ({len(info['missing'])}): {', '.join(info['missing'])}")
+
+    peaks = pick_peaks(fused, a.rate, a.min_gap)
+    print(f"  articulation points: {len(peaks)}  "
+          f"({len(peaks) / max(info['meta'].get('duration', 1), 1) * 60:.1f}/min)")
+
+    if not a.validate:
+        return 0
+    track = a.track or npz.name.replace(".TIMESERIES.npz", "")
+    ref = load_reference(track, a.ref)
+    if ref is None:
+        print(f"  [validate] no {a.ref} grid for this track -- cannot score")
+        return 1
+
+    def report(label, pk):
+        if a.calibrate:
+            off, f1 = best_offset(pk, ref, a.tol)
+            p, r, _ = _match_f1(pk + off, ref, a.tol)
+            nm, n95 = null_f1(pk, ref, a.tol, trials=a.null_trials, sweep=True)
+            extra = f"off {off:+.2f}s "
+        else:
+            off = 0.0
+            p, r, f1 = _match_f1(pk, ref, a.tol)
+            nm, n95 = null_f1(pk, ref, a.tol, trials=a.null_trials, sweep=False)
+            extra = ""
+        verdict = "REAL SIGNAL" if f1 > n95 else "at/below null -- NOT evidence"
+        print(f"  {label:28s} n={len(pk):5d}  {extra}P={p:.3f} R={r:.3f} F1={f1:.3f} | "
+              f"null mean {nm:.3f} p95 {n95:.3f}  -> {verdict}")
+
+    span = float(ref[-1] - ref[0]) if len(ref) > 1 else 1.0
+    print(f"  [validate] ref={a.ref}: {len(ref)} points, median spacing "
+          f"{np.median(np.diff(ref)):.3f}s, tol +/-{a.tol}s")
+    report("FUSED", peaks)
+    if a.per_field:
+        for name in info["used"]:
+            report(name, pick_peaks(per_field[name], a.rate, a.min_gap))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

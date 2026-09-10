@@ -5,7 +5,7 @@ from pathlib import Path
 import dash
 from dash import dcc, html
 from .sidecar_index import scan_index
-from . import viewer_tab, dataset_tab, analysis_tab
+from . import viewer_tab, dataset_tab, analysis_tab, inference_tab, a2a_tab, bend_tab
 from .callbacks import register
 
 _INI = Path(__file__).parent.parent.parent / "latent_player_sa3.ini"
@@ -24,6 +24,9 @@ def build_layout(index) -> html.Div:
             dcc.Tab(label="Viewer", children=viewer_tab.layout()),
             dcc.Tab(label="Dataset", children=dataset_tab.layout()),
             dcc.Tab(label="Analysis", children=analysis_tab.layout()),
+            dcc.Tab(label="Inference", children=inference_tab.layout()),
+            dcc.Tab(label="A2A", children=a2a_tab.layout()),
+            dcc.Tab(label="Latent lab", children=bend_tab.layout()),
         ]),
     ])
 

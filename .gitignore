@@ -109,7 +109,21 @@ plots/latent_analysis/data/*
 plots/latent_analysis/data/posters/*
 !plots/latent_analysis/data/posters/.gitkeep
 
-# Large local artifacts — never commit (added 2026-06-22)
+# Never-commit artifacts that kept surfacing as "untracked, never committed" in cross-repo
+# audits (2026-09-04). None of these are work-in-progress -- they are large generated data,
+# binary wheels, or agent/tool scratch. Listing them here is what stops a future audit from
+# re-flagging them as unlanded work.
+# NB: .gitignore has no inline comments -- a trailing "# ..." becomes part of the pattern and
+# silently matches nothing, which is exactly how the first version of this block failed.
+
+# TimeseriesDB (2.8 GB SQLite), canonical per CLAUDE.md -- never in git
+data/
+# generated statistical_analysis output
+stats/
+# generated audit render
+audit_board.png
+# locally built wheels (onnxruntime_migraphx, xformers: ~30 MB)
 *.whl
-/data/
+# agent / browser tool scratch
+.playwright-mcp/
 .superpowers/

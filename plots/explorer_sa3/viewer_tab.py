@@ -28,11 +28,28 @@ def timeseries_figure(name: str, ts: np.ndarray) -> go.Figure:
     return fig
 
 
+def placeholder_figure(msg: str, height: int = 480) -> go.Figure:
+    """Blank-but-labelled figure so an unpopulated graph isn't a bare plane."""
+    fig = go.Figure()
+    fig.update_layout(height=height,
+                      xaxis=dict(visible=False), yaxis=dict(visible=False),
+                      annotations=[dict(text=msg, showarrow=False,
+                                        font=dict(color="#888", size=14))])
+    return fig
+
+
 def layout() -> html.Div:
     return html.Div([
-        dcc.Dropdown(id="sa3-crop-dd"),
-        dcc.Graph(id="sa3-latent-graph"),
-        dcc.Dropdown(id="sa3-ts-dd"),
-        dcc.Graph(id="sa3-ts-graph"),
+        html.Label("Track"),
+        dcc.Dropdown(id="sa3-track-dd", placeholder="choose a track…"),
+        html.Label("Crop (within track)"),
+        dcc.Dropdown(id="sa3-crop-dd", placeholder="choose a crop…"),
+        dcc.Graph(id="sa3-latent-graph",
+                  figure=placeholder_figure("choose a track above — its first "
+                                            "crop's latent renders here")),
+        dcc.Dropdown(id="sa3-ts-dd", placeholder="timeseries feature…"),
+        dcc.Graph(id="sa3-ts-graph",
+                  figure=placeholder_figure("timeseries of the selected crop",
+                                            height=240)),
         html.Div(id="sa3-audio-panel"),
     ])

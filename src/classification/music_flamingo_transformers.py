@@ -147,7 +147,18 @@ class MusicFlamingoTransformers:
         logger.info("Loading model (one-time operation)...")
 
         try:
-            from transformers import MusicFlamingoForConditionalGeneration, AutoProcessor
+            # MF is in MAINLINE transformers as AudioFlamingo3ForConditionalGeneration
+            # (official README, music_flamingo branch) — prefer it; the lashahub fork's
+            # MusicFlamingoForConditionalGeneration is the fallback for older installs.
+            # (The mainline class also kills the "audioflamingo3 -> musicflamingo" type
+            # warning: the checkpoint config IS audioflamingo3.)
+            try:
+                from transformers import (
+                    AudioFlamingo3ForConditionalGeneration as MusicFlamingoForConditionalGeneration,
+                    AutoProcessor,
+                )
+            except ImportError:
+                from transformers import MusicFlamingoForConditionalGeneration, AutoProcessor
             import torch
 
             self.torch = torch
@@ -212,10 +223,26 @@ class MusicFlamingoTransformers:
                 model_kwargs["attn_implementation"] = "flash_attention_2"
                 logger.info("✓ Flash Attention 2 enabled")
 
-            # Load model
-            self.model = MusicFlamingoForConditionalGeneration.from_pretrained(
-                model_id, **model_kwargs
-            )
+            # Load model. Without flash-attn, prefer torch SDPA (memory-efficient kernel)
+            # over eager — eager materializes the full LxL attention matrix, which OOMs on
+            # long tracks (LUMI probe 2026-07-30: ~15-min ambient pieces tried to allocate
+            # 14-24 GiB per attention on a 64 GB GCD). Fall back to default if the arch
+            # doesn't support sdpa.
+            if "attn_implementation" not in model_kwargs:
+                model_kwargs["attn_implementation"] = "sdpa"
+            try:
+                self.model = MusicFlamingoForConditionalGeneration.from_pretrained(
+                    model_id, **model_kwargs
+                )
+            except (ValueError, TypeError) as e:
+                if model_kwargs.get("attn_implementation") == "sdpa":
+                    logger.warning(f"sdpa attention unsupported ({e}); falling back to default")
+                    model_kwargs.pop("attn_implementation", None)
+                    self.model = MusicFlamingoForConditionalGeneration.from_pretrained(
+                        model_id, **model_kwargs
+                    )
+                else:
+                    raise
 
             # Apply torch.compile if requested
             if self.use_torch_compile and not use_flash_attention:
@@ -306,15 +333,32 @@ class MusicFlamingoTransformers:
                 add_generation_prompt=True,
                 return_dict=True,
             ).to(self.model.device)
+            # Cast float features (audio input_features) to the MODEL dtype — the processor
+            # emits fp32, and a bf16/fp16 model dies in the audio-encoder conv with
+            # "Input type (float) and bias type (c10::BFloat16) should be the same"
+            # (hit on every track, LUMI caption probe 2026-07-30; the local avp pass used
+            # the GGUF path so this transformers-path bug was never exercised). Cast only
+            # floating tensors — input_ids/attention_mask stay integer.
+            _dt = next(self.model.parameters()).dtype
+            for _k in list(inputs.keys()):
+                _v = inputs[_k]
+                if self.torch.is_tensor(_v) and _v.is_floating_point() and _v.dtype != _dt:
+                    inputs[_k] = _v.to(_dt)
 
-            # Generate
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature,
-                top_p=top_p,
-            )
+            # Generate — under AUTOCAST when the model is half-precision: the audio tower
+            # is dtype-MIXED (bf16 conv stem + fp32-kept modules), so a single input dtype
+            # can never satisfy it (fp32 in -> "Input type float vs bias BFloat16"; bf16 in
+            # -> "expected scalar type Float but found BFloat16" — both hit on LUMI probes
+            # 2026-07-30). Autocast per-op casts both directions; no-op for fp32 loads.
+            with self.torch.autocast(device_type=self.model.device.type, dtype=_dt,
+                                     enabled=(_dt != self.torch.float32)):
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature,
+                    top_p=top_p,
+                )
 
             # Decode
             decoded = self.processor.batch_decode(

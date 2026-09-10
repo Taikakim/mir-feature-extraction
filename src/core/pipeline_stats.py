@@ -81,6 +81,7 @@ class PipelineStats:
     # Track analysis
     tracks_total: int = 0
     tracks_separated: int = 0
+    tracks_separation_failed: int = 0
     tracks_analyzed: int = 0
     tracks_metadata_found: int = 0
 
@@ -149,6 +150,22 @@ class PipelineStats:
             return self.run_end_time - self.run_start_time
         return time.time() - self.run_start_time
     
+    def track_analysis_succeeded(self) -> bool:
+        """Stage 2 (track analysis) completeness gate.
+
+        Returns False ONLY for a wholesale stem-separation failure — separation
+        was attempted and every track failed (0 separated, >0 failed). Such a run
+        must not be recorded complete, or master_pipeline.run()'s state gate
+        silently skips the retry on every subsequent run (the 0-stem sticky-skip
+        bug caught 2026-07-04). Everything else counts as success:
+
+        - ``tracks_separated > 0``                          → real progress
+        - ``separated == 0 and separation_failed == 0``     → nothing to do
+          (all stems already present and skipped, or separation disabled)
+        - partial success (some ok, some failed)            → progress was made
+        """
+        return not (self.tracks_separated == 0 and self.tracks_separation_failed > 0)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert all stats to dictionary for JSON serialization."""
         from datetime import datetime
@@ -165,6 +182,7 @@ class PipelineStats:
                 'files_organized': self.files_organized,
                 'tracks_total': self.tracks_total,
                 'tracks_separated': self.tracks_separated,
+                'tracks_separation_failed': self.tracks_separation_failed,
                 'tracks_analyzed': self.tracks_analyzed,
                 'tracks_metadata_found': self.tracks_metadata_found,
                 'crops_created': self.crops_created,
