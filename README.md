@@ -1,6 +1,6 @@
 # MIR Feature Extraction Framework
 
-Comprehensive music feature extraction pipeline for conditioning **Stable Audio Tools** and similar audio generation models. Extracts 97+ numeric MIR features, 496 AI classification labels, and 5 natural language descriptions from audio files.
+Comprehensive music feature extraction pipeline for conditioning **Stable Audio**-family generation models (Stable Audio Open Small, Stable Audio 3). Extracts 100+ per-track/per-crop numeric MIR features, 496 AI classification labels, and one or more AI text descriptions from audio files — plus a separate **whole-track time-series store** (50 frame-level fields at native rates, 0.2–100 Hz) for training control-conditioning heads (LatCH) that steer generation along a specific feature over time.
 
 **Status:** Work-in-progress but functional. Core analysis scripts are tested; pipeline glue may lag behind. Scripts have built-in `--help`.
 
@@ -8,14 +8,16 @@ Comprehensive music feature extraction pipeline for conditioning **Stable Audio 
 
 1. **Organizes** audio files into structured folders
 2. **Separates** stems (drums, bass, other, vocals) via Demucs or BS-RoFormer
-3. **Extracts** rhythm, loudness, spectral, harmonic, timbral, and aesthetic features
+3. **Extracts** rhythm, loudness, spectral, harmonic, timbral, and aesthetic features per track/crop
 4. **Classifies** genre (400), mood (56), instruments (40) via Essentia
 5. **Generates** AI text descriptions via Music Flamingo (8B params), optionally condensed by Granite-tiny revision
 6. **Benchmarks** caption quality across Music Flamingo, LLM revision, and Qwen2.5-Omni
 7. **Transcribes** drums to MIDI via ADTOF-PyTorch
 8. **Creates** beat-aligned training crops with feature migration
+9. **Extracts whole-track time series** (beat/downbeat/onset activations, per-band energy, chroma, embeddings, melody-height, etc.) at each field's native rate, for arbitrary-window conditioning targets
+10. **Explores** the resulting feature/latent space interactively (Dash apps + a pitch-shift/time-stretch comparison GUI — see [TOOLS.md](TOOLS.md))
 
-All features are saved to `.INFO` JSON files with atomic writes (never overwrites).
+All per-track/per-crop features are saved to `.INFO` JSON sidecars with atomic writes (never overwrites); frame-level arrays are saved to a separate SQLite/`.npz` time-series store (see below) to keep the JSON sidecars small.
 
 ## Requirements
 
@@ -57,6 +59,22 @@ python src/master_pipeline.py --config config/master_pipeline.yaml
 python tests/poc_lmm_revise.py "/path/to/audio.flac" --genre "Goa Trance" -v
 ```
 
+## Time-Series Data & Conditioning-Model Integration
+
+Beyond the per-track/per-crop scalar features in `.INFO`, the pipeline produces two frame-level time-series stores, used to train and drive **LatCH** ("latent conditioning heads") — small models that steer a diffusion/flow generation model along a chosen feature's trajectory over time:
+
+- **Per-crop `data/timeseries.db`** (SQLite) — frame-level arrays (beat/downbeat/onset activations, per-band energy, spectral flux/flatness/skewness/kurtosis, HPCP, tonic) for a *fixed* crop-to-track mapping, at the crop's own sample rate. Loaded via `core.timeseries_db.TimeseriesDB`.
+- **Whole-track `<track>.TIMESERIES.npz`** sidecars (`src/spectral/whole_track_timeseries.py` + `whole_track_expanded.py`) — the same rhythmic/spectral fields plus 26 additional model/DSP fields (MAEST embeddings, genre/mood/instrument sliding-window scores, arousal-valence, chord classes, EBU-R128 loudness, etc.) and 4 **melody-height** fields (`f0_{other,bass}_ts` + voiced masks — the only *non* octave-folded pitch signal, tracked on the separated stems), each at its **own native rate** (0.2–100 Hz, not a fixed grid). This store supports *arbitrary* `[start_sec, end_sec]` training-crop windows chosen at consume time, not just the crops this pipeline itself produced. Consume via `src/tools/crop_timeseries_resample.py`, which knows the correct pooling rule per field (masked-mean for sentinel/pitch fields, mode-pooling for categorical ones, plain resample otherwise) — do not resample these fields by hand.
+
+```bash
+# Extract whole-track time series for a corpus of per-track folders
+# (full_mix.<ext> [+ optional drums/bass/other/vocals.<ext>] per folder)
+python src/spectral/whole_track_timeseries.py /path/to/track_folders --workers 4
+python src/spectral/whole_track_timeseries.py /path/to/track_folders --expanded --add-fields  # backfill
+```
+
+**Integration with Stable Audio training/inference.** This repo owns *measurement* only — no model training or generation code lives here. The time-series stores above are the feature side of a LatCH pipeline whose head-training and guided-inference code lives in sibling, model-side repos built on [Stable Audio Tools](https://github.com/Stability-AI/stable-audio-tools) and [Stable Audio 3](https://github.com/Stability-AI/stable-audio-3): a LatCH head is trained to predict one of these features from the model's own latent, then used at inference time to nudge generation toward a requested value or trajectory for that feature. `plots/explorer_sa3/` in this repo is the interactive front end for that — a Dash viewer (this repo's venv) paired with a player process (the model-side venv) for reviewing Stable Audio 3 latents and auditioning LatCH-guided generation.
+
 ## ROCm GPU Environment
 
 All ROCm environment variables are centralized in `src/core/rocm_env.py` and documented in `config/master_pipeline.yaml`. Every GPU-using script calls `setup_rocm_env()` before importing torch.
@@ -75,26 +93,38 @@ export TORCH_COMPILE=0   # buggy with FA on RDNA
 ## Documentation
 
 - **[USER_MANUAL.md](USER_MANUAL.md)** - Usage guide, module reference, troubleshooting
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Why the project is structured this way, data flow, output schema
+- **[TOOLS.md](TOOLS.md)** - Pitch Shifter GUI, Unified MIR Explorer, latent/feature analysis pipeline
 - **[MUSIC_FLAMINGO.md](MUSIC_FLAMINGO.md)** - Music Flamingo setup and usage
 - **[FEATURES_STATUS.md](FEATURES_STATUS.md)** - Feature implementation tracker
+- **[CLAUDE.md](CLAUDE.md)** - Developer guidance: subsystems, dev rules, known issues/gotchas
 - **[config/master_pipeline.yaml](config/master_pipeline.yaml)** - All pipeline and ROCm settings
 
 ## Project Layout
 
 ```
 src/
-  core/           # Utilities: JSON handler, file utils, rocm_env, text normalization
+  core/           # Utilities: JSON handler, file utils, rocm_env, text normalization,
+                  # timeseries_db.py (per-crop SQLite store)
   preprocessing/  # File organization, stem separation (Demucs, BS-RoFormer), loudness
   rhythm/         # Beat detection, BPM, syncopation, onsets, per-stem rhythm
-  spectral/       # Spectral features, multiband RMS
+  spectral/       # Spectral features, multiband RMS, whole_track_timeseries.py,
+                  # whole_track_expanded.py (50-field whole-track store)
   harmonic/       # Chroma, per-stem harmonic movement
   timbral/        # Audio Commons features, AudioBox aesthetics
   classification/ # Essentia, Music Flamingo (GGUF + Transformers)
   transcription/  # MIDI drum transcription (ADTOF, Drumsep)
-  tools/          # Metadata lookup, training crops, statistical analysis (VIF/PCA/MI)
+  tools/          # Metadata lookup, training crops, statistical analysis (VIF/PCA/MI),
+                  # crop_timeseries_resample.py (whole-track store consumer)
   crops/          # Crop-specific pipeline and feature extraction
-tests/            # Benchmarks (audio captioning comparison)
+plots/
+  explorer/       # Unified MIR Explorer — Dash app (dataset/latent exploration, port 7895)
+  explorer_sa3/   # Stable Audio 3 latent viewer + LatCH-guided generation auditioning
+  latent_analysis/# Latent-dimension × MIR-feature correlation pipeline
+scripts/          # Dataset maintenance utilities (run manually, not imported by the pipeline)
+tests/            # Automated tests + benchmarks (audio captioning comparison)
 config/           # YAML pipeline configuration
+data/             # timeseries.db (per-crop time-series SQLite store)
 models/           # GGUF model files (Qwen3, GPT-OSS, Granite, Music Flamingo)
 repos/            # External repos (cloned by setup script, not tracked)
 ```
