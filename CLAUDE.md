@@ -259,9 +259,16 @@ The per-crop TimeseriesDB above is keyed by `<track>_<crop>` and only works when
 - **Output:** `/run/media/kim/Lehto/timeseries/<track>.TIMESERIES.npz` — **5035 npz, ~37 GiB**
   (audited 2026-08-18): **4461 goa + 574 genre-corpus sidecars, and ZERO avp** — **do not glob the
   directory as a goa denominator**. The avp sidecars are NOT here; they live in place under
-  `<UUID drive>/avp-analyzed/<track>/` (and `.../augmentations/<variant>/` for the 1346 augmented
-  variants). A third, separate store — undocumented until now — is
-  `<UUID drive>/suomisoundi_timeseries/` (1260 npz, 6.7 GB).
+  `Mantu/avp-analyzed-stems/<track>/` (and `.../augmentations/<variant>/` for the 1346 augmented
+  variants). A third, separate store is
+  `Mantu/suomisoundi_data/suomisoundi_timeseries/` (1260 npz, flat, 7.5 GB).
+  **⚠ Both of those paths were wrong until 2026-09-16 (W): they read `<UUID drive>/avp-analyzed/`
+  and `<UUID drive>/suomisoundi_timeseries/`. Verified against all three mounted volumes — neither
+  exists on the UUID drive; both are on Mantu, under the names above. The avp set is confirmed the
+  same one (170 top-level sidecars + exactly 1346 augmentation variants, matching this entry's own
+  count), and `Mantu/avp-analyzed-stems/<track>/full_mix.flac` is the source audio (167 usable).
+  The old path cost two failed lookups before anyone noticed the drive was mounted and simply did
+  not contain it — a missing dir on a REMOVABLE drive reads as "unmounted", not "wrong path".**
   **"50 fields" describes 4455 of those sidecars, not the store:** 574 have **46** (melody was
   never run on the genre corpora), 4 have **38** (no stems → the 8 per-stem + 4 melody fields are
   skipped), and 2 have **48** (the madmom activation failure noted above). Read `fields` from the
