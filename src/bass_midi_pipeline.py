@@ -69,9 +69,9 @@ class BassMidiPipeline:
                  dip_ratio: float = 0.5, release_ratio: float = 0.3,
                  rms_thresh: float = 0.05, min_vol_ratio: float = 0.33,
                  min_midi: int = MIN_MIDI, max_midi: int = MAX_MIDI,
-                 lpf_cutoff: float = 220.0):
+                 lpf_cutoff: float = 220.0, bpm: float = 0.0):
         self.audio_path = Path(audio_path)
-        self.beats_path = Path(beats_path)
+        self.beats_path = Path(beats_path) if beats_path else None
         self.output_path = Path(output_path)
         self.subdivision = subdivision
         self.flux_thresh = flux_thresh
@@ -82,6 +82,7 @@ class BassMidiPipeline:
         self.min_midi = min_midi
         self.max_midi = max_midi
         self.lpf_cutoff = lpf_cutoff
+        self.bpm = bpm
         self.pitch_quantization_count = 0
         self.chroma_profile = None
 
@@ -133,19 +134,38 @@ class BassMidiPipeline:
               f"bass range {self.freq_lo:.0f}-{self.freq_hi:.0f}Hz ({self.bass_mask.sum()} bins)")
 
     def _load_beats(self) -> np.ndarray:
-        """Load beat timestamps from file."""
-        if not self.beats_path or not Path(self.beats_path).is_file():
-            return np.array([])
+        """Load beat timestamps from file, or generate from BPM/beat tracker."""
+        if self.beats_path and Path(self.beats_path).is_file():
+            try:
+                beats = np.loadtxt(self.beats_path)
+                if beats.ndim == 0:
+                    beats = np.array([float(beats)])
+                elif beats.ndim == 2:
+                    beats = beats[:, 0]
+                return beats
+            except Exception as e:
+                print(f"  Warning: Failed to load beats: {e}")
+
+        # Fallback 1: user-specified or catalog BPM
+        if self.bpm and self.bpm > 0:
+            print(f"  Generating beat grid from BPM: {self.bpm:.2f}")
+            beat_dur = 60.0 / self.bpm
+            return np.arange(0, self.duration + beat_dur, beat_dur)
+
+        # Fallback 2: librosa beat tracking
         try:
-            beats = np.loadtxt(self.beats_path)
-            if beats.ndim == 0:
-                beats = np.array([float(beats)])
-            elif beats.ndim == 2:
-                beats = beats[:, 0]
-            return beats
+            print("  Auto-tracking beats with librosa...")
+            tempo, beats_frames = librosa.beat.beat_track(y=self.y, sr=self.sr)
+            if hasattr(tempo, "__len__"):
+                tempo = float(tempo[0])
+            beats_times = librosa.frames_to_time(beats_frames, sr=self.sr)
+            if len(beats_times) >= 2:
+                print(f"  Detected tempo: {tempo:.1f} BPM ({len(beats_times)} beats)")
+                return beats_times
         except Exception as e:
-            print(f"  Warning: Failed to load beats: {e}")
-            return np.array([])
+            print(f"  Warning: Beat tracking failed: {e}")
+
+        return np.array([])
 
     def _load_chroma(self) -> Optional[np.ndarray]:
         """Load chroma vector from adjacent .INFO file."""
@@ -659,6 +679,8 @@ if __name__ == "__main__":
                         help="Low-Pass Filter cutoff Hz (default 220.0). Set to 0 to disable.")
     parser.add_argument("--pitch-count", type=int, default=7,
                         help="Pitch quantization: restrict to Top N pitch classes. Uses chroma from .INFO if available. 0=disable. Default 7.")
+    parser.add_argument("--bpm", type=float, default=0.0,
+                        help="Track BPM for automatic beat grid generation if no beats file is provided.")
 
     args = parser.parse_args()
 
@@ -687,7 +709,8 @@ if __name__ == "__main__":
                 break
 
     if not beats_path:
-        print("Warning: No beats file provided or found. Quantization will be skipped/limited.")
+        if args.bpm <= 0:
+            print("Note: No beats file provided. Will use BPM or auto beat tracking.")
         beats_path = ""
 
     # Auto-detect output
@@ -704,6 +727,7 @@ if __name__ == "__main__":
                                 release_ratio=args.release_ratio,
                                 min_midi=args.min_pitch,
                                 max_midi=args.max_pitch,
-                                lpf_cutoff=args.lpf)
+                                lpf_cutoff=args.lpf,
+                                bpm=args.bpm)
     pipeline.pitch_quantization_count = args.pitch_count
     pipeline.run()
