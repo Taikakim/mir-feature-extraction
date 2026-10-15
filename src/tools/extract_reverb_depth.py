@@ -14,7 +14,7 @@ ProcessPool parallel, resumable (appends to CSV, skips done). mir venv, CPU, GPU
 
 Usage:
   mir/bin/python src/tools/extract_reverb_depth.py --out <csv> --jobs 10 \
-      --corpus goa:/run/media/kim/Mantu1/ai-music/Goa_Separated \
+      --corpus goa:/run/media/kim/Mantu/ai-music/Goa_Separated \
       --corpus avp:/run/media/kim/9a41.../avp-analyzed
 """
 import sys, os, csv, time, signal, argparse, glob
