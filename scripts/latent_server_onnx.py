@@ -189,7 +189,7 @@ def main():
     global _sess, _latent_dir, _chunk, _overlap, _active_ep
     ap = argparse.ArgumentParser()
     ap.add_argument("--onnx", required=True, type=Path, help="exported SAME decoder .onnx")
-    ap.add_argument("--latent-dir", default="/home/kim/Projects/latents_sa3")
+    ap.add_argument("--latent-dir", default="/run/media/kim/Kosmos/latents/latents_sa3")
     ap.add_argument("--chunk-latents", type=int, default=128, help="MUST match the export L")
     ap.add_argument("--overlap", type=int, default=16, help=">= decoder receptive field")
     ap.add_argument("--provider", default="migraphx", help="migraphx | rocm | cpu")

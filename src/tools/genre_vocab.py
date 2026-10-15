@@ -110,7 +110,7 @@ def scan_corpus(latents_dir: str, out_json: str, prob_thresh: float = 0.10, min_
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Build fixed genre vocabulary from SA3 corpus")
-    ap.add_argument("--latents-dir", default="/home/kim/Projects/latents_sa3")
+    ap.add_argument("--latents-dir", default="/run/media/kim/Kosmos/latents/latents_sa3")
     ap.add_argument("--out", default="/home/kim/Projects/SAO/control/sa3_control/genre_vocab.json")
     ap.add_argument("--prob-thresh", type=float, default=0.10)
     ap.add_argument("--min-support", type=int, default=303)

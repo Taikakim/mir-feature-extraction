@@ -7,7 +7,7 @@ already scored without re-running the model.
 Run in the MIR venv (essentia + effnet_onnx/gmi_onnx + MIGraphX):
 
     mir/bin/python src/tools/crop_genre.py \\
-        --latents-dir /home/kim/Projects/latents_sa3 \\
+        --latents-dir /run/media/kim/Kosmos/latents/latents_sa3 \\
         --vocab /home/kim/Projects/SAO/control/sa3_control/genre_vocab.json
 
 The full corpus scan (~55 min) is deferred to a manual run when the GPU is free.
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--latents-dir",
-        default="/home/kim/Projects/latents_sa3",
+        default="/run/media/kim/Kosmos/latents/latents_sa3",
         help="Directory containing *.json crop metadata files.",
     )
     ap.add_argument(

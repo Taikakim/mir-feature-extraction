@@ -20,7 +20,7 @@ Two modes, one script (shared feature-extraction core):
       Whole-track full_mix.{flac,wav} -> safe_update() into the track's .INFO.
       Handles both <track>/full_mix.* (goa, avp source) layouts via glob.
 
-  --mode crops --crops-dir /home/kim/Projects/latents_sa3
+  --mode crops --crops-dir /run/media/kim/Kosmos/latents/latents_sa3
       For each <idx>.json crop companion: read ONLY the [start_sample:end_sample)
       window of source_path (soundfile partial read, no full-file decode), run
       hardness/depth/booming on the in-memory slice (no /dev/shm needed -- these 3
@@ -41,7 +41,7 @@ RUN WITH THE mir INTERPRETER (essentia not required, but keeps deps consistent):
         --corpus avp:/run/media/kim/9a410a1d-a4a8-4faf-8298-bcaa2576ea9d/avp-analyzed
 
     /home/kim/Projects/mir/mir/bin/python src/tools/extract_timbral_hdb.py \\
-        --mode crops --jobs 8 --crops-dir /home/kim/Projects/latents_sa3
+        --mode crops --jobs 8 --crops-dir /run/media/kim/Kosmos/latents/latents_sa3
 """
 import sys, os, json, time, argparse, subprocess
 from pathlib import Path
