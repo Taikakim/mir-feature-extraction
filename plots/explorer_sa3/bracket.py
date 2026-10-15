@@ -7,7 +7,7 @@ single value). The panel snapshots the WHOLE inference form through
 avoid a circular import), enumerates the Cartesian product, then issues
 sequential POSTs — one render per `brk-tick` interval so the grid/status
 update per item. The server serializes on GPU_LOCK and echoes the merged
-request back as `meta.params_echo`, which is the recall record. The 35-state
+request back as `meta.params_echo`, which is the recall record. The N_STEER-state
 steering contract is consumed as-is; every id here is `brk-*`.
 """
 from __future__ import annotations

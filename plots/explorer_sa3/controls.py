@@ -2,10 +2,12 @@
 
 Frozen contract (design B.2). Dash ids are app-global, so the panel is
 prefix-parameterized: instantiate once per tab with ns="inf" and ns="a2a".
-`steering_states(ns)` returns EXACTLY 23 States in a fixed order which
+`steering_states(ns)` returns EXACTLY N_STEER States in a fixed order which
 `steering_payload(vals)` consumes to build the shared latch/film/dora JSON
 blocks accepted by /generate, /a2a_track and /a2a_mix (design A.4).
 """
+# Last edited: WINTERMUTE 2026-10-14 — LATCH_SLOTS 3 -> 6; N_STEER derived from it
+# Last edited: WINTERMUTE 2026-10-15 — LatCH adv row + guide_schedule / guide_anchor / guide_rescale (N_STEER +3, appended)
 from __future__ import annotations
 import os
 from typing import Sequence
@@ -14,7 +16,11 @@ from dash import Input, Output, State, dcc, html, no_update
 
 from . import render_client
 
-LATCH_SLOTS = 3
+# 6 since 2026-10-14 (was a UI cap of 3, hit by bass + body + air). The steering
+# contract below is derived from it, so raising it again needs no other edit.
+LATCH_SLOTS = 6
+SLOT_FIELDS = ("head", "kind", "value", "gain", "start", "end", "loss", "wsec")
+N_STEER = LATCH_SLOTS * len(SLOT_FIELDS) + 14
 
 # fallback when /info is unreachable at payload-build time (server hard-codes
 # the same default in film_default)
@@ -136,6 +142,23 @@ def steering_panel(ns: str, dora_default: str = "none",
             html.Span("(hover each label for how to pick a value)",
                       style={"fontSize": "11px", "color": "#888"}),
         ], style=_ROW_STYLE),
+        html.Div([
+            html.Span("", style={"minWidth": "60px"}),
+            html.Span("schedule", title=_SCHED_HELP, style=_HELP_STYLE),
+            dcc.Dropdown(id=f"{ns}-ctl-latch-sched",
+                         options=[{"label": "alpha (TFG)", "value": "alpha"},
+                                  {"label": "flat", "value": "flat"}],
+                         value="alpha", clearable=False,
+                         style={"width": "120px", "display": "inline-block"}),
+            html.Span("anchor", title=_ANCHOR_HELP, style=_HELP_STYLE),
+            dcc.Input(id=f"{ns}-ctl-latch-anchor", type="number", value=None,
+                      min=0, max=3, step=0.05, placeholder="off",
+                      style=_NUM_STYLE),
+            html.Span("rescale", title=_RESCALE_HELP, style=_HELP_STYLE),
+            dcc.Input(id=f"{ns}-ctl-latch-rescale", type="number", value=None,
+                      min=0, max=1, step=0.1, placeholder="off",
+                      style=_NUM_STYLE),
+        ], style=_ROW_STYLE),
         # The pickers used to fill from Input(<id>, "id"), which Dash fires exactly
         # once per page load: with :8056 down at load time they returned [] and never
         # retried, so the panel stayed empty forever with no error shown. This poller
@@ -151,14 +174,14 @@ def steering_panel(ns: str, dora_default: str = "none",
 
 
 def steering_states(ns: str) -> list[State]:
-    """EXACTLY this order, length 35 (v2 contract, extended append-only per slot
-    2026-07-12: +loss/+wsec per slot, +rho/mu/gamma/n_iter advanced row;
-    steering_payload depends on it)."""
+    """EXACTLY this order, length N_STEER = 8 per slot + 11 (v2 contract, extended
+    append-only per slot 2026-07-12: +loss/+wsec per slot, +rho/mu/gamma/n_iter
+    advanced row; slot count raised 3 -> 6 on 2026-10-14; steering_payload
+    depends on it)."""
     states: list[State] = []
     for i in range(1, LATCH_SLOTS + 1):
         p = f"{ns}-ctl-latch{i}"
-        for suffix in ("head", "kind", "value", "gain", "start", "end",
-                       "loss", "wsec"):
+        for suffix in SLOT_FIELDS:
             states.append(State(f"{p}-{suffix}", "value"))
     states += [State(f"{ns}-ctl-film-enable", "value"),
                State(f"{ns}-ctl-film-value", "value"),
@@ -170,14 +193,18 @@ def steering_states(ns: str) -> list[State]:
                State(f"{ns}-ctl-latch-rho", "value"),
                State(f"{ns}-ctl-latch-mu", "value"),
                State(f"{ns}-ctl-latch-gamma", "value"),
-               State(f"{ns}-ctl-latch-niter", "value")]
+               State(f"{ns}-ctl-latch-niter", "value"),
+               # appended 2026-10-15 (+3): guidance weighting / trajectory anchor / per-edit rescale
+               State(f"{ns}-ctl-latch-sched", "value"),
+               State(f"{ns}-ctl-latch-anchor", "value"),
+               State(f"{ns}-ctl-latch-rescale", "value")]
     return states
 
 
 def steering_payload(vals: Sequence) -> dict:
-    """Consume exactly 35 values in steering_states order -> A.4 blocks (v2)."""
-    if len(vals) != 35:
-        raise ValueError(f"steering_payload expects 35 values, got {len(vals)}")
+    """Consume exactly N_STEER values in steering_states order -> A.4 blocks (v2)."""
+    if len(vals) != N_STEER:
+        raise ValueError(f"steering_payload expects {N_STEER} values, got {len(vals)}")
     latch = []
     for i in range(LATCH_SLOTS):
         head, kind, value, gain, start, end, loss, wsec = vals[i * 8:(i + 1) * 8]
@@ -196,7 +223,8 @@ def steering_payload(vals: Sequence) -> dict:
         if wsec is not None:
             slot["w_sec"] = float(wsec)
         latch.append(slot)
-    film_enable, film_value, film_gain = vals[24:27]
+    o = LATCH_SLOTS * len(SLOT_FIELDS)
+    film_enable, film_value, film_gain = vals[o:o + 3]
     film = None
     if film_enable and "on" in film_enable:
         srv = render_client.info() or {}
@@ -204,7 +232,7 @@ def steering_payload(vals: Sequence) -> dict:
         film = {"ckpt": ckpt,
                 "value": float(film_value) if film_value is not None else 4.0,
                 "gain": float(film_gain) if film_gain is not None else 1.75}
-    dora_dd, dora_strength, dora_imin, dora_imax = vals[27:31]
+    dora_dd, dora_strength, dora_imin, dora_imax = vals[o + 3:o + 7]
     dora = None
     if dora_dd == "none":
         # explicit "none" must reach the server by name: an absent dora block
@@ -233,7 +261,7 @@ def steering_payload(vals: Sequence) -> dict:
     out = {"latch": latch, "film": film, "dora": dora}
     # advanced LatCH hparams ride top-level (server resolve_latch reads them);
     # blank rho/mu = keep the auto slot-1-gain tie
-    rho, mu, gamma, niter = vals[31:35]
+    rho, mu, gamma, niter = vals[o + 7:o + 11]
     if rho is not None:
         out["rho"] = float(rho)
     if mu is not None:
@@ -242,6 +270,15 @@ def steering_payload(vals: Sequence) -> dict:
         out["gamma"] = float(gamma)
     if niter is not None:
         out["n_iter"] = int(niter)
+    # sent only when they differ from the server default, so a default request stays
+    # byte-identical to one built before these options existed
+    sched, anchor, rescale = vals[o + 11:o + 14]
+    if sched and sched != "alpha":
+        out["guide_schedule"] = sched
+    if anchor:
+        out["guide_anchor"] = float(anchor)
+    if rescale:
+        out["guide_rescale"] = float(rescale)
     return out
 
 
@@ -339,6 +376,20 @@ _NITER_HELP = ("n_iter -- guidance iterations per sampling step, default 4. NOT 
                "2 for a quick look, 4 to work, 8 when a target is being ignored. Above 8 the "
                "returns are small and the artefacts are not. Note the paper's TFG also has an "
                "N_recur; we implement N_iter only.")
+
+_SCHED_HELP = ("schedule -- how each slot's guidance budget is spread over its window. alpha (default) = "
+               "TFG's weight (1-sigma)/sum, almost nothing in the first, noisiest steps and most in the last "
+               "ones; flat = equal weight per step. Measured 2026-10-15 (latch_early_budget page): flat widens "
+               "the onset range ~1.45x at a clean gain but pushes loudness up at high gains; by ear alpha over "
+               "0-1 is the clean, transparent setting. Pair flat with the anchor.")
+_ANCHOR_HELP = ("anchor -- trajectory anchor s0. Empty = off. After every step the latent's spread (std) is capped "
+                "at the healthy value for that noise level, sqrt(((1-t)*s0)^2 + t^2); normal states are never "
+                "touched. 1.2 sits just above an unguided SA3 render (~1.0-1.2). Measured 2026-10-15 "
+                "(latch_guide_anchor page): returns flat / early-window / high-gain renders to the unguided "
+                "loudness and keeps the onset spread, but does not repair early-window content damage.")
+_RESCALE_HELP = ("rescale -- per-edit rescale phi 0..1 (like CFG rescale). Empty = off. Restores the latent's "
+                 "spread after each guidance edit. Measured 2026-10-15: NO effect on the loudness push (the "
+                 "growth happens in the model's own later steps); kept for comparison, use the anchor instead.")
 
 _WINDOW_HELP = ("start/end -- the FRACTION OF STEPS this slot is active for, but the delivered "
                 "guidance is NOT proportional to the width. Per-step strength is scaled by "

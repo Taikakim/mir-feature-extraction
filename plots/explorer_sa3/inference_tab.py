@@ -15,6 +15,7 @@ plotly port of interface/diffusion_cond.py:create_sigma_chart, fed by the
 server's /schedule endpoint so it shows the *real* dist-shift-warped run
 schedule. Checkpoint picker is fed by the /ckpts journal endpoint.
 """
+# Last edited: WINTERMUTE 2026-10-14 — section presets (latch/dora/film/sampler/prompt/workspace)
 from __future__ import annotations
 import time
 
@@ -22,9 +23,14 @@ import plotly.graph_objects as go
 import dash
 from dash import Input, Output, State, dcc, html, no_update
 
-from . import bracket, controls, render_client
+from . import bracket, controls, render_client, subpresets
 
 _HISTORY_CAP = 50
+_TIP_SUBPRESET = ("Section presets: latch / dora / film / sampler / prompt, each loaded "
+                  "on its own without touching the rest of the form (seed never). "
+                  "'workspace' saves all five under one name and loads them by reference. "
+                  "Import an eval presets.json with: "
+                  "mir/bin/python -m plots.explorer_sa3.subpresets <presets.json>")
 
 _TIP_APG = ("Adaptive Projected Guidance (Sadat 2024): guidance direction is "
             "split into components parallel/orthogonal to the conditional "
@@ -78,6 +84,26 @@ def layout() -> html.Div:
             html.Button("Save", id="inf-preset-save", n_clicks=0),
             html.Span(id="inf-preset-status",
                       style={"fontSize": "11px", "color": "#888"}),
+        ], style={"display": "flex", "gap": "6px", "alignItems": "center",
+                  "marginBottom": "6px"}),
+        # Sub-presets restore ONE section and leave the rest of the form alone
+        # (subpresets.py). STACK adds a LatCH preset's slots after the ones in use.
+        html.Div([
+            html.Span("Section", style={"minWidth": "60px", "fontWeight": "bold"},
+                      title=_TIP_SUBPRESET),
+            dcc.Dropdown(id="inf-sub-kind", options=list(subpresets.ALL_KINDS),
+                         value="latch", clearable=False,
+                         style={"width": "120px", "display": "inline-block"}),
+            dcc.Dropdown(id="inf-sub-dd", options=[], value=None, clearable=True,
+                         placeholder="saved section presets",
+                         style={"width": "240px", "display": "inline-block"}),
+            html.Button("Load", id="inf-sub-load", n_clicks=0),
+            html.Button("Stack", id="inf-sub-stack", n_clicks=0,
+                        title="LatCH only: add the preset's slots after the ones in use"),
+            dcc.Input(id="inf-sub-name", type="text", placeholder="save section as…",
+                      style={"width": "180px"}),
+            html.Button("Save", id="inf-sub-save", n_clicks=0),
+            html.Span(id="inf-sub-status", style={"fontSize": "11px", "color": "#888"}),
         ], style={"display": "flex", "gap": "6px", "alignItems": "center",
                   "marginBottom": "6px"}),
         html.Div([
@@ -332,7 +358,7 @@ _FORM_IDS = ("inf-prompt", "inf-variation", "inf-negprompt", "inf-duration",
 
 def form_states() -> list[State]:
     """The full render form as Dash States: the 30 plain fields above followed
-    by the frozen 35-value steering contract (consumed as-is — new features
+    by the frozen N_STEER-value steering contract (consumed as-is — new features
     ride their own State groups, per the contract note in controls.py)."""
     return ([State(i, "value") for i in _FORM_IDS]
             + controls.steering_states("inf"))
@@ -360,6 +386,19 @@ def _late_ids() -> list[str]:
 def _early_ids() -> list[str]:
     late = set(_late_ids())
     return [st.component_id for st in form_states() if st.component_id not in late]
+
+
+def _form_dict(vals) -> dict:
+    return {st.component_id: v for st, v in zip(form_states(), vals)}
+
+
+def _sub_output_ids() -> list[str]:
+    """Every early id a section preset can write: section fields, slot heads and
+    the LatCH advanced row. Late slot values go through inf-preset-pending."""
+    ids = [f"inf-{f}" for k in subpresets.FIELDS for f in subpresets.FIELDS[k]]
+    ids += [f"inf-ctl-latch{i}-head" for i in range(1, controls.LATCH_SLOTS + 1)]
+    ids += [f"inf-{f}" for f in subpresets.LATCH_ADV.values()]
+    return ids
 
 
 def build_payload(vals) -> tuple[str, dict]:
@@ -675,6 +714,61 @@ def register_callbacks(app) -> None:
         if not pending:
             return (*[no_update] * len(late), no_update)
         return (*[pending.get(i, no_update) for i in late], None)
+
+    # ------------------------------------------------------------ section presets
+    @app.callback(Output("inf-sub-dd", "options"),
+                  Input("inf-sub-kind", "value"),
+                  Input("inf-sub-status", "children"))
+    def _sub_options(kind, _status):
+        return subpresets.names(kind) if kind else []
+
+    @app.callback(Output("inf-sub-status", "children"),
+                  Input("inf-sub-save", "n_clicks"),
+                  State("inf-sub-kind", "value"),
+                  State("inf-sub-name", "value"),
+                  *form_states(),
+                  prevent_initial_call=True)
+    def _sub_save(n, kind, name, *vals):
+        if not n:
+            return no_update
+        form = _form_dict(vals)
+        name = (name or "").strip()
+        try:
+            if kind == subpresets.WORKSPACE:
+                subpresets.save_workspace(name, form, "inf")
+                return f"saved workspace “{name}” + one {name!r} preset per section"
+            subpresets.save(kind, name, subpresets.section_from_form(kind, form, "inf"))
+        except (ValueError, OSError) as e:
+            return f"save failed: {e}"
+        return f"saved {kind} “{name}”"
+
+    sub_ids = _sub_output_ids()
+
+    @app.callback(*[Output(i, "value", allow_duplicate=True) for i in sub_ids],
+                  Output("inf-preset-pending", "data", allow_duplicate=True),
+                  Output("inf-sub-status", "children", allow_duplicate=True),
+                  Input("inf-sub-load", "n_clicks"),
+                  Input("inf-sub-stack", "n_clicks"),
+                  State("inf-sub-kind", "value"),
+                  State("inf-sub-dd", "value"),
+                  *form_states(),
+                  prevent_initial_call=True)
+    def _sub_load(_nl, _ns, kind, name, *vals):
+        blank = [no_update] * len(sub_ids)
+        stack = dash.ctx.triggered_id == "inf-sub-stack"
+        if not name:
+            return (*blank, no_update, "pick a section preset first")
+        if stack and kind != "latch":
+            return (*blank, no_update, "STACK is for LatCH presets; use Load")
+        try:
+            early, late, loaded = subpresets.resolve(kind, name, _form_dict(vals),
+                                                     "inf", stack=stack)
+        except (ValueError, OSError, KeyError) as e:
+            return (*blank, no_update, f"load failed: {e}")
+        # late values ride the same pending store as the whole-form preset, so
+        # _preset_apply_slots lands them after the head autofill
+        return (*[early.get(i, no_update) for i in sub_ids], late or None,
+                f"{'stacked' if stack else 'loaded'} {', '.join(loaded)}")
 
     controls.register(app, "inf")
     bracket.register(app, form_states, build_payload)
