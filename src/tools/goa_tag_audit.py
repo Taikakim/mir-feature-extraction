@@ -231,6 +231,11 @@ def main():
     refs = [d for d in arc.values() if len(d["fp"]) >= 80]
     print(f"[audit] indexing {len(refs)} archive fingerprints", flush=True)
     idx = FpIndex(refs)
+    # Goa_Separated is a SNAPSHOT of the Goa Dataset names at separation time; the Goa Dataset was re-tagged after
+    # (e.g. the 'Michelle Robinson Obama - CD Track NN' folders are now goa/Vibrasphere/...). Link each separated folder
+    # to its current source file by fingerprint and report where the names have since diverged.
+    goa_refs = [d for d in goa.values() if len(d["fp"]) >= 80]
+    goa_idx = FpIndex(goa_refs) if sep_scan else None
     # name check: the archive covers pre-2000 goa almost completely, so a Picard artist/title that appears nowhere in
     # its folder names, filenames or tags is suspect even without an audio match
     corpus = " " + " | ".join(norm(os.path.relpath(d["path"], a.archive).replace(os.sep, " ")) + " " +
@@ -298,6 +303,17 @@ def main():
         else:
             row.update(match_sim=None, match_copies=0, match_sure=False, copy_artist_ok=None, copy_title_ok=None,
                        match_rel="", match_tags="", other_copies="")
+        src_rel = src_name = ""
+        src_differs = None
+        if is_sep and len(d["fp"]) >= 80:
+            c = [x for x in goa_idx.query(d["fp"]) if x[2] >= SURE]
+            if c:
+                s = goa_refs[c[0][0]]
+                src_rel = os.path.relpath(s["path"], a.goa)
+                s_stem = os.path.splitext(os.path.basename(s["path"]))[0]
+                src_name = f"{s['artist']} - {s['title']}" if s["artist"] or s["title"] else s_stem.split(". ", 1)[-1]
+                src_differs = fuzzy_share(norm(tag_at), " " + norm(src_name) + " ") < TEXT_OK
+        row.update(goa_source_rel=src_rel, goa_source_name_now=src_name, renamed_since_separation=src_differs)
         row["verdict"] = verdict(row)
         rows.append(row)
         if n % 500 == 0:
@@ -318,7 +334,8 @@ def main():
         r["latents_sa3_crops"] = crops.get(name, 0)
 
     cols = list(rows[0].keys())
-    for name, sel in (("goa_tag_audit.csv", rows), ("suspects.csv", [r for r in rows if r["verdict"].startswith("SUSPECT")])):
+    for name, sel in (("goa_tag_audit.csv", rows), ("suspects.csv", [r for r in rows if r["verdict"].startswith("SUSPECT")]),
+                      ("separated_renamed_since.csv", [r for r in rows if r["renamed_since_separation"]])):
         with open(os.path.join(a.out, name), "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
