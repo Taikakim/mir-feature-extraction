@@ -164,6 +164,12 @@ class FpIndex:
         return sorted(out, key=lambda t: -t[2])
 
 
+# Known earlier/other names of the same act (normalised). An archive copy under the alias counts as agreeing.
+ALIASES = {
+    "sandman": ["green house effect", "greenhouse effect"],   # Itzik Levy's first name for the project
+}
+
+
 def name_parts(artist):
     """'Amanite FX & Prana feat. X' -> ['amanite fx', 'prana', 'x'] (normalised)."""
     return [p for p in (norm(x) for x in re.split(r"\s*(?:&|,|/|\bfeat\.?|\bft\.?|\bvs\.?|\band\b)\s*", artist, flags=re.I))
@@ -217,6 +223,10 @@ def main():
 
     goa = cached_scan(sorted(audio_files(a.goa)), os.path.join(a.out, "goa_dataset_scan.jsonl"), a.workers,
                       a.cache_only)
+    # Goa_Separated (the analysed copy that latents_sa3 is cut from) holds tracks whose source files are no longer in the
+    # Goa Dataset, e.g. the 37 'Michelle Robinson Obama - CD Track NN' folders (Picard: the 'Becoming' audiobook)
+    sep_scan = cached_scan(sorted(glob.glob(os.path.join(glob.escape(a.separated), "*", "full_mix.*"))),
+                           os.path.join(a.out, "goa_separated_scan.jsonl"), a.workers, a.cache_only)
     arc = cached_scan(sorted(audio_files(a.archive)), os.path.join(a.out, "archive_scan.jsonl"), a.workers, a.cache_only)
     refs = [d for d in arc.values() if len(d["fp"]) >= 80]
     print(f"[audit] indexing {len(refs)} archive fingerprints", flush=True)
@@ -227,12 +237,26 @@ def main():
                               norm(f"{d['artist']} {d['title']} {d['album']}") for d in arc.values()) + " "
 
     rows = []
-    for n, (p, d) in enumerate(goa.items(), 1):
-        rel = os.path.relpath(p, a.goa)
-        part = rel.split(os.sep)[0] if os.sep in rel else "root"
-        stem = os.path.splitext(os.path.basename(p))[0]
-        folder = os.path.basename(os.path.dirname(p)) if part != "root" else ""
+    items = [(p, d, False) for p, d in goa.items()] + [(p, d, True) for p, d in sep_scan.items()]
+    for n, (p, d, is_sep) in enumerate(items, 1):
         name_from = "tags"
+        if is_sep:
+            folder_name = os.path.basename(os.path.dirname(p))
+            rel, part, stem, folder = f"Goa_Separated/{folder_name}", "goa_separated", folder_name, ""
+            try:  # the pipeline's own record of the names (track_metadata_*), else the folder name below
+                info = json.load(open(os.path.join(os.path.dirname(p), folder_name + ".INFO")))
+                if info.get("track_metadata_artist") or info.get("track_metadata_title"):
+                    d = dict(d, artist=str(info.get("track_metadata_artist") or ""),
+                             title=str(info.get("track_metadata_title") or ""),
+                             album=str(info.get("track_metadata_album") or d["album"]))
+                    name_from = "INFO"
+            except (OSError, ValueError):
+                pass
+        else:
+            rel = os.path.relpath(p, a.goa)
+            part = rel.split(os.sep)[0] if os.sep in rel else "root"
+            stem = os.path.splitext(os.path.basename(p))[0]
+            folder = os.path.basename(os.path.dirname(p)) if part != "root" else ""
         if not (d["artist"] or d["title"]) and " - " in stem:
             # no readable tags (mutagen's easy mode reads none from AIFF): Picard's rename put its names in the filename
             d = dict(d, artist=stem.split(" - ", 1)[0].split(". ", 1)[-1], title=stem.split(" - ", 1)[1])
@@ -260,7 +284,8 @@ def main():
             # artist and title are checked separately against the copy's tags + filename + release folder: a right title
             # under a wrong artist (Picard's 'Hawklords - Out of Phase' for Flippin Bixies) must not pass
             ref_str = " " + norm(f"{ref_at} {ref_name} {os.path.basename(os.path.dirname(r['path']))}") + " "
-            artist_ok = any(fuzzy_share(p, ref_str) == 1.0 for p in parts) if parts else False
+            names = parts + [al for p in parts for al in ALIASES.get(p, [])]
+            artist_ok = any(fuzzy_share(p, ref_str) == 1.0 for p in names) if names else False
             title_ok = fuzzy_share(title_core, ref_str) >= TEXT_OK
             scored.append((int(artist_ok) + int(title_ok), sim, os.path.relpath(r["path"], a.archive), ref_at,
                            artist_ok, title_ok))
@@ -276,7 +301,7 @@ def main():
         row["verdict"] = verdict(row)
         rows.append(row)
         if n % 500 == 0:
-            print(f"[audit] matched {n}/{len(goa)}", flush=True)
+            print(f"[audit] matched {n}/{len(items)}", flush=True)
 
     # where a wrong name went downstream: Goa_Separated/<Artist - Title>/ and the latents_sa3 crops cut from it
     sep = set(os.listdir(a.separated)) if os.path.isdir(a.separated) else set()
@@ -298,9 +323,50 @@ def main():
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
             w.writerows(sel)
+    single_release_artists(rows, os.path.join(a.out, "single_release_artists.csv"))
     from collections import Counter
-    for part in ("root", "goa", "goa-unsorted"):
+    for part in ("root", "goa", "goa-unsorted", "goa_separated"):
         print(part, dict(Counter(r["verdict"] for r in rows if r["part"] == part)), flush=True)
+
+
+def single_release_artists(rows, path):
+    """Picard-named artists (goa, goa-unsorted, Goa_Separated) with ONE release in our collection, flagged when the
+    archive has no trace of them. A goa act owned as a single EP or track is normal and the archive (near complete
+    pre-2000) usually has it; one Picard invented from a wrong MusicBrainz match (the blues-rock bands, audiobooks)
+    usually is absent. A lead for a listen, not proof: post-2000 acts are absent from the archive too."""
+    by = {}
+    for r in rows:
+        if not r["tag_artist"]:
+            continue
+        e = by.setdefault(norm(r["tag_artist"]), {"artist": r["tag_artist"], "parts": set(), "albums": set(),
+                                                   "titles": set(), "files": 0, "in_archive": r["artist_in_archive"],
+                                                   "audio_ok": 0, "crops": 0, "examples": []})
+        e["parts"].add(r["part"])
+        if r["tag_album"]:
+            e["albums"].add(norm(r["tag_album"]))
+        e["titles"].add(norm(r["tag_title"]))
+        e["files"] += 1
+        e["audio_ok"] += r["verdict"].startswith("ok")
+        e["crops"] += r["latents_sa3_crops"]
+        if len(e["examples"]) < 3:
+            e["examples"].append(r["rel"])
+    out = []
+    for e in by.values():
+        picard = e["parts"] & {"goa", "goa-unsorted", "goa_separated"}
+        if not picard or "root" in e["parts"] or len(e["albums"]) > 1:
+            continue                                            # Tidal-tagged, or more than one release
+        out.append(dict(artist=e["artist"], in_archive=e["in_archive"], audio_confirmed_files=e["audio_ok"],
+                        files=e["files"], distinct_titles=len(e["titles"]), album=next(iter(e["albums"]), ""),
+                        parts="+".join(sorted(e["parts"])), latents_sa3_crops=e["crops"],
+                        lead=("HALLUCINATED?" if e["in_archive"] is False and not e["audio_ok"] else ""),
+                        examples=" || ".join(e["examples"])))
+    out.sort(key=lambda r: (r["lead"] != "HALLUCINATED?", r["artist"].lower()))
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(out[0].keys()) if out else ["artist"])
+        w.writeheader()
+        w.writerows(out)
+    print(f"[audit] single-release Picard artists: {len(out)}, not in archive and no audio match: "
+          f"{sum(bool(x['lead']) for x in out)}", flush=True)
 
 
 def verdict(r):
