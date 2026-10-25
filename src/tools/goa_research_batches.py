@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Owner: WINTERMUTE (created 2026-10-25)
+# Last edited: WINTERMUTE 2026-10-25 -- NOT_SUSPECT: drop Aavepyörä and 01-GGE from the artist batches
 """goa_research_batches.py -- JSON files of 50 for an external web-research agent, from the goa_tag_audit.py outputs.
 
 Two kinds of batch, both with an empty `research` block for the agent and nothing else to change:
@@ -38,6 +39,8 @@ RENAMED_INSTRUCTIONS = (
     "Leave fields null when you cannot verify; do not guess. confidence: high / medium / low. sources: the URLs used. "
     "Do not change any field outside `research`."
 )
+# real acts the archive just lacks, not tagging errors (2026-10-25): an own project, an untagged vinyl rip
+NOT_SUSPECT = {"Aavepyörä", "01-GGE"}
 ARTIST_RESEARCH = {"exists": None, "makes_psytrance": None, "genre": None, "active_years": None, "label": None,
                    "likely_real": [], "notes": None, "sources": [], "confidence": None}
 RENAMED_RESEARCH = {"correct": None, "artist": None, "title": None, "album": None, "year": None, "label": None,
@@ -70,7 +73,7 @@ def main():
     # ---- artists
     artists = []
     for s in csv.DictReader(open(os.path.join(a.out, "single_release_artists.csv"))):
-        if not s["lead"]:
+        if not s["lead"] or s["artist"] in NOT_SUSPECT:
             continue
         files, titles, other_names, crops = [], [], set(), 0
         for r in by_artist.get(s["artist"], []):
